@@ -1,64 +1,69 @@
-# pogopoOS2.0 STEP6 — Native audio engine
+# pogopoOS2.0 STEP7 — SD WAV + BMI270 + Power
 
-This step keeps the working previous step GUI/application framework and adds a native ESP-IDF I2S audio component for the MAX98357A.
+This project is based on the fully tested previous step 6 build.
 
-## Hardware
+## Added in STEP7
 
-- MAX98357A DIN / ESP32 DOUT: GPIO38
-- BCLK: GPIO39
-- LRCK / WS: GPIO40
-- 32768 Hz
-- 16-bit stereo Philips I2S
-- No MCLK
+### 1. `pogopo_storage`
+- SDMMC 4-bit mode
+- CLK GPIO6, CMD GPIO7
+- D0 GPIO5, D1 GPIO4, D2 GPIO16, D3 GPIO15
+- mount point: `/sdcard`
+- scans `/sdcard/pogopo/sounds/*.wav`
+- PCM WAV loader: 8/16-bit, mono/stereo, 8–96 kHz
+- samples are converted to mono 16-bit and kept in PSRAM during playback
 
-## New component
+Copy this archive's `COPY_TO_SD/pogopo` folder to the root of your SD card.
 
-`components/pogopo_audio`
+### 2. PCM playback in `pogopo_audio`
+- generated system sounds still use the 4-voice mixer
+- WAV is mixed together with system sounds
+- nearest-neighbour sample-rate conversion to the 32768 Hz I2S output
+- WAV memory ownership is transferred to the audio task and released automatically
+- UI Tick volume reduced from 48 to 32
+- Error notes reduced from 64/68 to 49/52
 
-- `pogopo::audio::Audio`
-- independent FreeRTOS audio task on Core 0
-- continuous DMA-backed I2S stream
-- four-voice software mixer
-- sine, square, triangle and noise waveforms
-- attack/release envelope to reduce clicks
-- non-blocking command queue
-- master volume 0–100%
-- generated UI effects and raw tones
-- write/error/queue statistics
+### 3. `pogopo_imu`
+- official Espressif BMI270 component
+- address 0x68, chip ID 0x24
+- accel ±2 g, gyro ±2000 dps, sensor ODR 100 Hz
+- application samples every 20 ms
+- normalized acceleration in g and gyro in dps
+- calculated roll and pitch
+- Motion Lab with live horizon and moving ball
+- A calibrates the current pose as zero
 
-## Audio Lab controls
+The first build may download the managed component `espressif/bmi270`.
 
-- TOP / DOWN: select sound
-- A: play selected sound
-- LEFT / RIGHT: volume -/+ 5%
-- START: startup melody
-- B: return to launcher
-- MENU: system overlay
+### 4. `pogopo_power`
+Old pogopoOS1.0 shutdown behaviour was ported:
+- Power button GPIO17, active LOW
+- hold for 2 seconds
+- if USB is connected, ship mode is blocked and a warning appears
+- release the button to return to the OS
+- without USB, release the button and BQ24295 BATFET ship mode is requested
+- watchdog bits in REG05 are cleared before BATFET disable in REG07
+- BQ24295 INT GPIO41
+- battery divider GPIO1, NMOS gate GPIO2
+- calibrated ADC one-shot reading, divider ×2
 
-## Included sounds
+Power-on remains hardware-controlled by the charger/QON circuit, exactly as before.
 
-- UI tick
-- click
-- confirm
-- back
-- error
-- startup melody
-- coin
-- 440 Hz sine
-- 880 Hz square
-- noise burst
+## New launcher apps
+- WAV Player
+- Motion Lab
+- Power Status
 
-## Haptics tuning
 
-The motor is still GPIO3 active-high. Because the driver is binary on/off, perceived strength is tuned by pulse length:
+## Power test order
+1. First open **Power Status** and verify battery voltage and USB state.
+2. With USB connected, hold the physical power button for 2 seconds. It should show `USB CONNECTED` and must not switch off.
+3. Release the button and return to the OS.
+4. For the real shutdown test, disconnect USB, hold for 2 seconds, then release the button.
+5. The BQ24295 should disable BATFET and the console should power off.
 
-- Tick: 18 ms -> 24 ms
-- other effects: approximately 5% longer
-
-## Expected boot log
-
-```
-pogopoOS2.0 AUDIO ENGINE STEP6
-Audio ready: 32768 Hz, 16-bit stereo Philips, DOUT=38 BCLK=39 LRCK=40
-STEP6 ready: native I2S audio mixer + GUI audio lab + louder haptics
-```
+## Notes
+- The SD mount is non-fatal. The OS still starts if the card is missing.
+- The IMU init is non-fatal. Motion Lab shows an error if BMI270 is unavailable.
+- Power/BQ initialization is treated as required because shutdown safety depends on it.
+- GPIO18 is reserved for a future BMI270 data-ready interrupt mode; this step uses stable timed sampling.

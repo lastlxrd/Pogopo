@@ -1,0 +1,2 @@
+dependencies:
+  espressif/bmi270: "^1.0.1~1"

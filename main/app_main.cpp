@@ -11,6 +11,9 @@
 #include "pogopo_input.h"
 #include "pogopo_haptics.h"
 #include "pogopo_audio.h"
+#include "pogopo_storage.h"
+#include "pogopo_imu.h"
+#include "pogopo_power.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -28,13 +31,19 @@ static pogopo::Graphics g_gfx;
 static pogopo::Input g_input;
 static pogopo::Haptics g_haptics;
 static pogopo::Audio g_audio;
-static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio);
+static pogopo::Storage g_storage;
+static pogopo::Imu g_imu;
+static pogopo::Power g_power;
+static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power);
 
 static pogopo::demo::LauncherApp g_launcher_app;
 static pogopo::demo::GraphicsDemoApp g_graphics_app;
 static pogopo::demo::InputMonitorApp g_input_app;
 static pogopo::demo::HapticsLabApp g_haptics_app;
 static pogopo::demo::AudioLabApp g_audio_app;
+static pogopo::demo::WavPlayerApp g_wav_app;
+static pogopo::demo::MotionLabApp g_motion_app;
+static pogopo::demo::PowerStatusApp g_power_app;
 static pogopo::demo::AboutApp g_about_app;
 
 namespace {
@@ -79,6 +88,75 @@ esp_err_t start_audio() {
     return g_audio.begin(config);
 }
 
+
+esp_err_t start_storage() {
+    pogopo::Storage::Config config;
+    config.clk_io = board::SD_CLK; config.cmd_io = board::SD_CMD;
+    config.d0_io = board::SD_D0; config.d1_io = board::SD_D1;
+    config.d2_io = board::SD_D2; config.d3_io = board::SD_D3;
+    config.mount_point = "/sdcard";
+    return g_storage.begin(config);
+}
+
+esp_err_t start_imu() {
+    pogopo::Imu::Config config;
+    config.bus = i2c_bus_handle(); config.address = 0x68;
+    config.interrupt_io = board::IMU_INT; config.sample_period_ms = 20;
+    config.task_core = 1;
+    return g_imu.begin(config);
+}
+
+esp_err_t start_power() {
+    pogopo::Power::Config config;
+    config.bus = i2c_bus_handle(); config.charger_address = 0x6B;
+    config.power_button_io = board::POWER_BUTTON;
+    config.charger_int_io = board::CHARGER_INT;
+    config.battery_measure_io = board::BAT_MEAS;
+    config.battery_gate_io = board::BAT_GATE;
+    config.shutdown_hold_ms = 2000;
+    config.task_core = 1;
+    return g_power.begin(config);
+}
+
+void draw_power_message(const char* title, const char* line1, const char* line2) {
+    auto& canvas = g_gfx.canvas();
+    g_gfx.set_clip({0, 0, g_gfx.width(), g_gfx.height()});
+    canvas.clear_clip(pogopo::gfx::WHITE);
+    canvas.draw_rect(16, 18, 368, 204, pogopo::gfx::BLACK);
+    canvas.draw_text(42, 43, title, pogopo::gfx::font5x7(), pogopo::gfx::BLACK, 2);
+    canvas.draw_line(34, 74, 366, 74, pogopo::gfx::BLACK);
+    canvas.draw_text(37, 101, line1, pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
+    canvas.draw_text(37, 124, line2, pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
+    canvas.draw_text(37, 178, "GPIO17 / BQ24295 BATFET", pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
+    g_gfx.reset_clip();
+    g_gfx.present();
+}
+
+void handle_power_event(const pogopo::power::Event& event) {
+    if (event.type == pogopo::power::EventType::UsbBlocked) {
+        g_haptics.play(pogopo::HapticEffect::Alert);
+        g_audio.play(pogopo::AudioEffect::Error);
+        draw_power_message("USB CONNECTED", "UNPLUG TYPE-C TO POWER OFF", "RELEASE POWER BUTTON");
+        g_power.waitForRelease(8000);
+        g_app_manager.invalidate();
+        return;
+    }
+
+    g_haptics.play(pogopo::HapticEffect::Heavy);
+    g_audio.play(pogopo::AudioEffect::Confirm);
+    draw_power_message("POWER OFF", "RELEASE POWER BUTTON", "ENTERING BQ SHIP MODE...");
+    g_power.waitForRelease(8000); // QON must be released or the charger can wake again immediately.
+    vTaskDelay(pdMS_TO_TICKS(120));
+    g_audio.stopAll();
+    const esp_err_t err = g_power.enterShipMode();
+    if (err != ESP_OK) {
+        draw_power_message("POWER ERROR", esp_err_to_name(err), "PRESS RESET OR TRY AGAIN");
+    } else {
+        draw_power_message("SHIP MODE SENT", "BATFET DISABLED", "GOODBYE :) ");
+    }
+    while (true) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
 esp_err_t start_input() {
     pogopo::Input::Config config;
     config.bus = i2c_bus_handle();
@@ -104,6 +182,9 @@ void os_task(void*) {
     g_app_manager.registerApp(g_input_app);
     g_app_manager.registerApp(g_haptics_app);
     g_app_manager.registerApp(g_audio_app);
+    g_app_manager.registerApp(g_wav_app);
+    g_app_manager.registerApp(g_motion_app);
+    g_app_manager.registerApp(g_power_app);
     g_app_manager.registerApp(g_about_app);
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
@@ -113,6 +194,9 @@ void os_task(void*) {
         const int64_t now_us = esp_timer_get_time();
         const uint32_t dt_ms = static_cast<uint32_t>(std::clamp<int64_t>((now_us - last_us) / 1000, 0, 100));
         last_us = now_us;
+
+        pogopo::power::Event power_event;
+        if (g_power.nextEvent(power_event, 0)) handle_power_event(power_event);
 
         g_app_manager.processInput();
         g_app_manager.update(dt_ms);
@@ -135,7 +219,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 AUDIO ENGINE STEP6");
+    ESP_LOGI(TAG, "pogopoOS2.0 STORAGE + MOTION + POWER STEP7");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -149,10 +233,16 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(start_audio());
     ESP_ERROR_CHECK(start_input());
 
+    const esp_err_t sd_err = start_storage();
+    if (sd_err != ESP_OK) ESP_LOGW(TAG, "SD unavailable; WAV player will show instructions: %s", esp_err_to_name(sd_err));
+    const esp_err_t imu_err = start_imu();
+    if (imu_err != ESP_OK) ESP_LOGW(TAG, "BMI270 unavailable: %s", esp_err_to_name(imu_err));
+    ESP_ERROR_CHECK(start_power());
+
     if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 1) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP6 ready: native I2S audio mixer + GUI audio lab + louder haptics");
+    ESP_LOGI(TAG, "STEP7 ready: SDMMC WAV + BMI270 motion + old 2s power/ship logic");
 }

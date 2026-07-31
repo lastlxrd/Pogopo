@@ -7,6 +7,7 @@
 #include <iterator>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 namespace pogopo::audio {
@@ -41,6 +42,7 @@ esp_err_t Audio::begin(const Config& config) {
     voice_serial_ = 0;
     noise_state_ = 0xA5C31E27u;
     silenceVoices();
+    clearPcm();
     initSineTable();
 
     queue_ = xQueueCreate(config_.queue_depth, sizeof(Command));
@@ -130,10 +132,15 @@ void Audio::end() {
         task_ = nullptr;
     }
     if (queue_) {
+        Command pending;
+        while (xQueueReceive(queue_, &pending, 0) == pdTRUE) {
+            if (pending.type == CommandType::PlayPcm && pending.pcm_samples) heap_caps_free(pending.pcm_samples);
+        }
         vQueueDelete(queue_);
         queue_ = nullptr;
     }
     silenceVoices();
+    clearPcm();
     active_voices_.store(0);
     cleanupI2s();
 }
@@ -158,6 +165,24 @@ bool Audio::tone(uint16_t frequency_hz, uint16_t duration_ms,
     command.duration_ms = duration_ms;
     command.volume = std::min<uint8_t>(volume, 100);
     return enqueue(command);
+}
+
+bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume) {
+    if (!samples || frames == 0 || sample_rate < 8000 || sample_rate > 96000) {
+        if (samples) heap_caps_free(samples);
+        return false;
+    }
+    Command command;
+    command.type = CommandType::PlayPcm;
+    command.volume = std::min<uint8_t>(volume, 100);
+    command.pcm_samples = samples;
+    command.pcm_frames = frames;
+    command.pcm_sample_rate = sample_rate;
+    if (!enqueue(command)) {
+        heap_caps_free(samples);
+        return false;
+    }
+    return true;
 }
 
 void Audio::stopAll() {
@@ -206,6 +231,7 @@ void Audio::task_loop() {
             for (auto& voice : voices_) {
                 mix += renderVoice(voice);
             }
+            mix += renderPcm();
             mix = std::clamp<int32_t>(mix, -32767, 32767);
             const int16_t sample = static_cast<int16_t>(mix);
             output[frame * 2] = sample;
@@ -245,8 +271,12 @@ void Audio::processCommands() {
             case CommandType::PlayTone:
                 startTone(command);
                 break;
+            case CommandType::PlayPcm:
+                startPcm(command);
+                break;
             case CommandType::StopAll:
                 silenceVoices();
+                clearPcm();
                 break;
         }
     }
@@ -314,6 +344,40 @@ void Audio::startTone(const Command& command) {
     voice.note_index = 0;
     voice.phase = 0;
     loadCurrentNote(voice);
+}
+
+void Audio::startPcm(Command& command) {
+    clearPcm();
+    pcm_.samples = command.pcm_samples;
+    pcm_.frames = command.pcm_frames;
+    pcm_.position_q16 = 0;
+    pcm_.step_q16 = (static_cast<uint64_t>(command.pcm_sample_rate) << 16U) / config_.sample_rate;
+    pcm_.step_q16 = std::max<uint64_t>(1U, pcm_.step_q16);
+    pcm_.volume = command.volume;
+    pcm_.active = true;
+    pcm_active_.store(true);
+    command.pcm_samples = nullptr;
+}
+
+int32_t Audio::renderPcm() {
+    if (!pcm_.active || !pcm_.samples || pcm_.frames == 0) return 0;
+    const uint32_t index = static_cast<uint32_t>(pcm_.position_q16 >> 16U);
+    if (index >= pcm_.frames) {
+        clearPcm();
+        return 0;
+    }
+    const int32_t raw = pcm_.samples[index];
+    const int32_t sample = static_cast<int32_t>(
+        (static_cast<int64_t>(raw) * pcm_.volume * master_volume_.load()) / 10000LL);
+    pcm_.position_q16 += pcm_.step_q16;
+    if ((pcm_.position_q16 >> 16U) >= pcm_.frames) clearPcm();
+    return sample;
+}
+
+void Audio::clearPcm() {
+    if (pcm_.samples) heap_caps_free(pcm_.samples);
+    pcm_ = {};
+    pcm_active_.store(false);
 }
 
 void Audio::loadCurrentNote(Voice& voice) {
@@ -416,7 +480,7 @@ uint16_t Audio::envelopeQ15(const Voice& voice) const {
 
 const Audio::Note* Audio::patternForEffect(Effect effect, size_t& count) const {
     static constexpr Note tick[] = {
-        {1900, 22, 48, Waveform::Square, 1, 5},
+        {1900, 22, 32, Waveform::Square, 1, 5},
     };
     static constexpr Note click[] = {
         {1250, 34, 58, Waveform::Triangle, 2, 7},
@@ -432,9 +496,9 @@ const Audio::Note* Audio::patternForEffect(Effect effect, size_t& count) const {
         {360, 72, 62, Waveform::Triangle, 2, 12},
     };
     static constexpr Note error[] = {
-        {190, 92, 64, Waveform::Square, 3, 12},
+        {190, 92, 49, Waveform::Square, 3, 12},
         {0,   34,  0, Waveform::Sine, 0, 0},
-        {145, 125, 68, Waveform::Square, 3, 18},
+        {145, 125, 52, Waveform::Square, 3, 18},
     };
     static constexpr Note startup[] = {
         {523, 72, 58, Waveform::Sine, 4, 10},
@@ -472,6 +536,7 @@ void Audio::updateActiveVoiceCount() {
     for (const auto& voice : voices_) {
         if (voice.active) ++count;
     }
+    if (pcm_.active) ++count;
     active_voices_.store(count);
 }
 

@@ -9,5 +9,8 @@ idf_component_register(
         pogopo_haptics
         pogopo_audio
         pogopo_gui
+        pogopo_storage
+        pogopo_imu
+        pogopo_power
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
