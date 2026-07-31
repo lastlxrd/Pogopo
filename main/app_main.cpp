@@ -14,6 +14,7 @@
 #include "pogopo_storage.h"
 #include "pogopo_imu.h"
 #include "pogopo_power.h"
+#include "pogopo_settings.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -34,7 +35,8 @@ static pogopo::Audio g_audio;
 static pogopo::Storage g_storage;
 static pogopo::Imu g_imu;
 static pogopo::Power g_power;
-static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power);
+static pogopo::Settings g_settings;
+static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power, g_settings);
 
 static pogopo::demo::LauncherApp g_launcher_app;
 static pogopo::demo::GraphicsDemoApp g_graphics_app;
@@ -44,6 +46,7 @@ static pogopo::demo::AudioLabApp g_audio_app;
 static pogopo::demo::WavPlayerApp g_wav_app;
 static pogopo::demo::MotionLabApp g_motion_app;
 static pogopo::demo::PowerStatusApp g_power_app;
+static pogopo::demo::SettingsApp g_settings_app;
 static pogopo::demo::AboutApp g_about_app;
 
 namespace {
@@ -69,7 +72,9 @@ esp_err_t start_haptics() {
     config.active_high = true;
     config.task_priority = 4;
     config.task_core = 0;
-    return g_haptics.begin(config);
+    const esp_err_t err = g_haptics.begin(config);
+    if (err == ESP_OK) g_haptics.setEnabled(g_settings.hapticsEnabled());
+    return err;
 }
 
 
@@ -79,13 +84,15 @@ esp_err_t start_audio() {
     config.bclk_io = board::AUDIO_BCLK;
     config.lrck_io = board::AUDIO_LRCK;
     config.sample_rate = 32768;
-    config.master_volume = 68;
+    config.master_volume = g_settings.volume();
     config.dma_desc_num = 6;
     config.dma_frame_num = 256;
     config.render_frames = 256;
     config.task_priority = 6;
     config.task_core = 0;
-    return g_audio.begin(config);
+    const esp_err_t err = g_audio.begin(config);
+    if (err == ESP_OK) g_audio.setEnabled(g_settings.audioEnabled());
+    return err;
 }
 
 
@@ -176,6 +183,7 @@ esp_err_t start_input() {
 void os_task(void*) {
     int64_t last_us = esp_timer_get_time();
     TickType_t wake = xTaskGetTickCount();
+    uint32_t settings_dirty_ms = 0;
 
     g_app_manager.registerApp(g_launcher_app, true);
     g_app_manager.registerApp(g_graphics_app);
@@ -185,10 +193,11 @@ void os_task(void*) {
     g_app_manager.registerApp(g_wav_app);
     g_app_manager.registerApp(g_motion_app);
     g_app_manager.registerApp(g_power_app);
+    g_app_manager.registerApp(g_settings_app);
     g_app_manager.registerApp(g_about_app);
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
-    g_audio.play(pogopo::AudioEffect::Startup);
+    if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -200,6 +209,19 @@ void os_task(void*) {
 
         g_app_manager.processInput();
         g_app_manager.update(dt_ms);
+
+        if (g_settings.dirty()) {
+            settings_dirty_ms += dt_ms;
+            if (settings_dirty_ms >= 1200U) {
+                const esp_err_t settings_err = g_settings.save();
+                if (settings_err != ESP_OK) {
+                    ESP_LOGW(TAG, "NVS auto-save failed: %s", esp_err_to_name(settings_err));
+                }
+                settings_dirty_ms = 0;
+            }
+        } else {
+            settings_dirty_ms = 0;
+        }
         const esp_err_t render_error = g_app_manager.render();
         if (render_error != ESP_OK) {
             ESP_LOGW(TAG, "GUI render failed: %s", esp_err_to_name(render_error));
@@ -219,11 +241,12 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STORAGE + MOTION + POWER STEP7");
+    ESP_LOGI(TAG, "pogopoOS2.0 STREAMING + SETTINGS STEP8");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
 
+    ESP_ERROR_CHECK(g_settings.begin());
     ESP_ERROR_CHECK(i2c_bus_init());
     i2c_scan();
     run_peripheral_tests();
@@ -244,5 +267,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP7 ready: SDMMC WAV + BMI270 motion + old 2s power/ship logic");
+    ESP_LOGI(TAG, "STEP8 ready: streaming WAV + NVS settings + tuned haptics");
 }

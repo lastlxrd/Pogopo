@@ -17,6 +17,7 @@ esp_err_t Haptics::begin(const Config& config) {
     if (config.motor_io < 0 || config.queue_depth == 0) return ESP_ERR_INVALID_ARG;
 
     config_ = config;
+    enabled_.store(true);
 
     gpio_config_t io_cfg = {};
     io_cfg.pin_bit_mask = 1ULL << config_.motor_io;
@@ -71,12 +72,14 @@ void Haptics::end() {
 }
 
 bool Haptics::play(Effect effect) {
+    if (!enabled_.load()) return true;
     Command command;
     command.effect = effect;
     return enqueue(command);
 }
 
 bool Haptics::pulse(uint16_t duration_ms) {
+    if (!enabled_.load()) return true;
     if (duration_ms == 0) return false;
     Command command;
     command.custom_pulse = true;
@@ -86,6 +89,14 @@ bool Haptics::pulse(uint16_t duration_ms) {
 
 void Haptics::clearPending() {
     if (queue_) xQueueReset(queue_);
+}
+
+void Haptics::setEnabled(bool enabled) {
+    enabled_.store(enabled);
+    if (!enabled) {
+        clearPending();
+        set_motor(false);
+    }
 }
 
 bool Haptics::enqueue(const Command& command) {
@@ -119,12 +130,12 @@ void Haptics::task_loop() {
 void Haptics::run_effect(Effect effect) {
     switch (effect) {
         case Effect::Tick: {
-            const Segment sequence[] = {{true, 24}};
+            const Segment sequence[] = {{true, 45}};
             run_segments(sequence, 1);
             break;
         }
         case Effect::Click: {
-            const Segment sequence[] = {{true, 45}};
+            const Segment sequence[] = {{true, 55}};
             run_segments(sequence, 1);
             break;
         }
@@ -161,6 +172,7 @@ void Haptics::run_segments(const Segment* segments, size_t count) {
 }
 
 void Haptics::set_motor(bool on) {
+    if (!enabled_.load()) on = false;
     active_.store(on);
     if (!gpio_ready_) return;
     const int level = (on == config_.active_high) ? 1 : 0;

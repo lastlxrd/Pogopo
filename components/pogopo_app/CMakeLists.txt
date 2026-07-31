@@ -12,5 +12,6 @@ idf_component_register(
         pogopo_storage
         pogopo_imu
         pogopo_power
+        pogopo_settings
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

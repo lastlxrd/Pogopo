@@ -10,6 +10,7 @@
 #include "pogopo_storage.h"
 #include "pogopo_imu.h"
 #include "pogopo_power.h"
+#include "pogopo_settings.h"
 
 namespace pogopo::app {
 
@@ -19,14 +20,15 @@ class Context {
 public:
     Context(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics,
             audio::Audio& audio, storage::Storage& storage, imu::Imu& imu, power::Power& power,
-            gui::Theme& theme, AppManager& manager)
+            settings::Settings& settings, gui::Theme& theme, AppManager& manager)
         : gfx(graphics), input(input), haptics(haptics), audio(audio),
-          storage(storage), imu(imu), power(power), theme(theme), manager(manager) {}
+          storage(storage), imu(imu), power(power), settings(settings), theme(theme), manager(manager) {}
 
     void invalidate();
     void invalidate(const gfx::Rect& region);
     bool launch(const char* id);
     bool home();
+    bool uiSound(audio::Effect effect);
 
     gfx::Graphics& gfx;
     input::Input& input;
@@ -35,6 +37,7 @@ public:
     storage::Storage& storage;
     imu::Imu& imu;
     power::Power& power;
+    settings::Settings& settings;
     gui::Theme& theme;
     AppManager& manager;
 };

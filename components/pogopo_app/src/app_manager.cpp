@@ -17,13 +17,17 @@ void Context::invalidate() { manager.invalidate(); }
 void Context::invalidate(const gfx::Rect& region) { manager.invalidate(region); }
 bool Context::launch(const char* id) { return manager.launch(id); }
 bool Context::home() { return manager.home(); }
+bool Context::uiSound(audio::Effect effect) {
+    return settings.uiSoundsEnabled() ? audio.play(effect) : true;
+}
 
 AppManager::AppManager(gfx::Graphics& graphics, input::Input& input,
                        haptics::Haptics& haptics, audio::Audio& audio,
-                       storage::Storage& storage, imu::Imu& imu, power::Power& power)
+                       storage::Storage& storage, imu::Imu& imu, power::Power& power,
+                       settings::Settings& settings)
     : gfx_(graphics), input_(input), haptics_(haptics), audio_(audio),
-      storage_(storage), imu_(imu), power_(power),
-      context_(graphics, input, haptics, audio, storage, imu, power, theme_, *this) {}
+      storage_(storage), imu_(imu), power_(power), settings_(settings),
+      context_(graphics, input, haptics, audio, storage, imu, power, settings, theme_, *this) {}
 
 bool AppManager::registerApp(Application& app, bool home) {
     if (count_ >= apps_.size() || find(app.id())) return false;
@@ -128,7 +132,7 @@ void AppManager::openSystemMenu() {
     system_menu_open_ = true;
     system_menu_selected_ = 0;
     haptics_.play(haptics::Effect::DoubleClick);
-    audio_.play(audio::Effect::Click);
+    if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Click);
     invalidate(systemMenuRect());
 }
 
@@ -146,21 +150,21 @@ void AppManager::handleSystemMenu(const input::Event& event) {
     if (event.button == input::Button::Top) {
         system_menu_selected_ = (system_menu_selected_ + 2) % 3;
         haptics_.play(haptics::Effect::Tick);
-        audio_.play(audio::Effect::Tick);
+        if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Tick);
         invalidate(systemMenuRect());
     } else if (event.button == input::Button::Down) {
         system_menu_selected_ = (system_menu_selected_ + 1) % 3;
         haptics_.play(haptics::Effect::Tick);
-        audio_.play(audio::Effect::Tick);
+        if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Tick);
         invalidate(systemMenuRect());
     } else if (event.type == input::EventType::Pressed &&
                (event.button == input::Button::B || event.button == input::Button::Menu)) {
         haptics_.play(haptics::Effect::Click);
-        audio_.play(audio::Effect::Back);
+        if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Back);
         closeSystemMenu(true);
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         haptics_.play(haptics::Effect::Confirm);
-        audio_.play(audio::Effect::Confirm);
+        if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Confirm);
         const int action = system_menu_selected_;
         closeSystemMenu(false);
         if (action == 0) invalidate();

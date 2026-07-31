@@ -94,15 +94,37 @@ public:
     const char* title() const override { return "WAV Player"; }
     void onEnter(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
 private:
     void rescan(AppContext& context);
-    gui::List list_{{18, 42, 364, 148}};
+    void startSelected(AppContext& context);
+    gui::List list_{{18, 42, 364, 116}};
     std::array<storage::FileEntry, storage::Storage::MAX_FILES> files_{};
     std::array<gui::ListItem, storage::Storage::MAX_FILES> items_{};
     std::array<std::array<char, 32>, storage::Storage::MAX_FILES> subtitles_{};
     size_t file_count_ = 0;
-    char status_[64] = "READY";
+    uint32_t ui_accumulator_ms_ = 0;
+    audio::StreamState last_state_ = audio::StreamState::Stopped;
+    uint32_t last_position_second_ = 0;
+    char status_[80] = "READY";
+};
+
+class SettingsApp final : public Application {
+public:
+    const char* id() const override { return "settings"; }
+    const char* title() const override { return "Settings"; }
+    void onEnter(AppContext& context) override;
+    void onExit(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
+    void applyRuntime(AppContext& context);
+    void markChanged(AppContext& context);
+    int selected_ = 0;
+    uint32_t save_delay_ms_ = 0;
+    char status_[48] = "NVS READY";
 };
 
 class MotionLabApp final : public Application {

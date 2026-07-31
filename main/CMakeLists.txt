@@ -16,6 +16,7 @@ idf_component_register(
         pogopo_storage
         pogopo_imu
         pogopo_power
+        pogopo_settings
         pogopo_gui
         pogopo_app
         esp_timer

@@ -12,10 +12,11 @@ constexpr gui::ListItem kLauncherItems[] = {
     {"Graphics demo", "Sprites + partial redraw", "graphics", true},
     {"Input monitor", "Buttons and event state", "input", true},
     {"Audio lab", "I2S mixer + generated sounds", "audio", true},
-    {"WAV player", "SDMMC files + PCM playback", "wav", true},
+    {"WAV player", "Streaming PCM from SD", "wav", true},
     {"Motion lab", "BMI270 accel + gyro", "motion", true},
     {"Power status", "Battery, USB and shutdown", "power", true},
     {"Haptics lab", "Play vibration patterns", "haptics", true},
+    {"Settings", "Persistent NVS options", "settings", true},
     {"About Pogopo", "Framework information", "about", true},
 };
 
@@ -82,17 +83,17 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         const gui::ListItem* item = list_.selectedItem();
         if (item && item->id) {
             context.haptics.play(haptics::Effect::Confirm);
-            context.audio.play(audio::Effect::Confirm);
+            context.uiSound(audio::Effect::Confirm);
             context.launch(item->id);
         }
     }
@@ -101,7 +102,7 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
     canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP7");
+    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP8");
     list_.draw(canvas, context.theme);
     gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
 }
@@ -120,12 +121,12 @@ void GraphicsDemoApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type != input::EventType::Pressed) return;
     if (event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back);
+        context.uiSound(audio::Effect::Back);
         context.home();
     } else if (event.button == input::Button::A) {
         paused_ = !paused_;
         context.haptics.play(paused_ ? haptics::Effect::DoubleClick : haptics::Effect::Confirm);
-        context.audio.play(paused_ ? audio::Effect::Click : audio::Effect::Confirm);
+        context.uiSound(paused_ ? audio::Effect::Click : audio::Effect::Confirm);
         context.invalidate({12, 27, 376, 196});
     }
 }
@@ -188,7 +189,7 @@ void InputMonitorApp::onEnter(AppContext& context) {
 void InputMonitorApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back);
+        context.uiSound(audio::Effect::Back);
         context.home();
     }
 }
@@ -242,15 +243,15 @@ void HapticsLabApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back);
+        context.uiSound(audio::Effect::Back);
         context.home();
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         const size_t selected = list_.selected();
@@ -260,7 +261,7 @@ void HapticsLabApp::onEvent(AppContext& context, const input::Event& event) {
         };
         if (selected < sizeof(effects) / sizeof(effects[0])) {
             context.haptics.play(effects[selected]);
-            context.audio.play(audio::Effect::Click);
+            context.uiSound(audio::Effect::Click);
             last_effect_ = haptics::effect_name(effects[selected]);
             context.invalidate({20, 198, 360, 20});
         }
@@ -299,22 +300,23 @@ void AudioLabApp::onEvent(AppContext& context, const input::Event& event) {
 
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Left || event.button == input::Button::Right) {
         const int delta = event.button == input::Button::Right ? 5 : -5;
         const int volume = std::clamp<int>(static_cast<int>(context.audio.masterVolume()) + delta, 0, 100);
         context.audio.setMasterVolume(static_cast<uint8_t>(volume));
+        context.settings.setVolume(static_cast<uint8_t>(volume));
         context.haptics.play(haptics::Effect::Tick);
-        context.audio.play(audio::Effect::Click);
+        context.uiSound(audio::Effect::Click);
         context.invalidate({20, 176, 360, 39});
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back);
+        context.uiSound(audio::Effect::Back);
         context.home();
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
         context.haptics.play(haptics::Effect::Confirm);
@@ -393,66 +395,287 @@ void AudioLabApp::draw(AppContext& context, const gfx::Rect&) {
 void WavPlayerApp::rescan(AppContext& context) {
     file_count_ = context.storage.listWav("/pogopo/sounds", files_.data(), files_.size());
     for (size_t i = 0; i < file_count_; ++i) {
-        std::snprintf(subtitles_[i].data(), subtitles_[i].size(), "%lu KB",
-                      static_cast<unsigned long>((files_[i].size + 1023U) / 1024U));
+        const uint32_t size_kb = (files_[i].size + 1023U) / 1024U;
+        if (size_kb >= 1024U) {
+            std::snprintf(subtitles_[i].data(), subtitles_[i].size(), "%lu.%lu MB",
+                          static_cast<unsigned long>(size_kb / 1024U),
+                          static_cast<unsigned long>((size_kb % 1024U) / 103U));
+        } else {
+            std::snprintf(subtitles_[i].data(), subtitles_[i].size(), "%lu KB",
+                          static_cast<unsigned long>(size_kb));
+        }
         items_[i] = {files_[i].name, subtitles_[i].data(), files_[i].path, true};
     }
     list_.setItems(items_.data(), file_count_);
     list_.setRowHeight(27);
-    std::snprintf(status_, sizeof(status_), file_count_ ? "%u WAV FILES" : "NO /pogopo/sounds/*.wav",
+    std::snprintf(status_, sizeof(status_), file_count_ ? "%u WAV FILES - STREAM READY" : "NO /pogopo/sounds/*.wav",
                   static_cast<unsigned>(file_count_));
     context.invalidate();
 }
 
-void WavPlayerApp::onEnter(AppContext& context) { rescan(context); }
+void WavPlayerApp::onEnter(AppContext& context) {
+    rescan(context);
+    ui_accumulator_ms_ = 0;
+    const auto info = context.audio.streamInfo();
+    last_state_ = info.state;
+    last_position_second_ = info.position_ms / 1000U;
+}
+
+void WavPlayerApp::startSelected(AppContext& context) {
+    if (!context.storage.mounted() || file_count_ == 0) {
+        std::snprintf(status_, sizeof(status_), "SD/WAV NOT FOUND");
+        context.haptics.play(haptics::Effect::Alert);
+        context.uiSound(audio::Effect::Error);
+        return;
+    }
+
+    const auto& file = files_[list_.selected()];
+    const bool queued = context.audio.playStream(file.path, 82);
+    if (queued) {
+        std::snprintf(status_, sizeof(status_), "OPENING %.52s", file.name);
+        context.haptics.play(haptics::Effect::Confirm);
+        context.uiSound(audio::Effect::Confirm);
+    } else {
+        std::snprintf(status_, sizeof(status_), context.audio.enabled() ? "STREAM QUEUE FULL" : "AUDIO DISABLED");
+        context.haptics.play(haptics::Effect::Alert);
+        context.uiSound(audio::Effect::Error);
+    }
+}
 
 void WavPlayerApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
+
     if (event.button == input::Button::Top && list_.move(-1)) {
-        context.haptics.play(haptics::Effect::Tick); context.audio.play(audio::Effect::Tick);
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
-        context.haptics.play(haptics::Effect::Tick); context.audio.play(audio::Effect::Tick);
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
-        context.audio.stopAll(); context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back); context.home();
-    } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
-        rescan(context);
+        context.haptics.play(haptics::Effect::Click);
+        context.uiSound(audio::Effect::Back);
+        context.home(); // Music intentionally keeps playing in the background.
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
-        if (!context.storage.mounted() || file_count_ == 0) {
-            std::snprintf(status_, sizeof(status_), "SD/WAV NOT FOUND");
-            context.haptics.play(haptics::Effect::Alert); context.audio.play(audio::Effect::Error);
+        startSelected(context);
+        context.invalidate({18, 158, 364, 59});
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
+        if (!context.audio.toggleStreamPause()) {
+            startSelected(context);
         } else {
-            storage::WavData wav{};
-            const auto& file = files_[list_.selected()];
-            const esp_err_t err = context.storage.loadWav(file.path, wav);
-            if (err == ESP_OK && wav.valid()) {
-                const uint32_t frames = wav.frames, rate = wav.sample_rate;
-                int16_t* owned = wav.samples; wav.samples = nullptr;
-                const bool queued = context.audio.playPcmOwned(owned, frames, rate, 82);
-                std::snprintf(status_, sizeof(status_), queued ? "PLAY %s %luHZ" : "AUDIO QUEUE FULL",
-                              file.name, static_cast<unsigned long>(rate));
-                context.haptics.play(queued ? haptics::Effect::Confirm : haptics::Effect::Alert);
-            } else {
-                storage::Storage::freeWav(wav);
-                std::snprintf(status_, sizeof(status_), "WAV ERROR: %s", esp_err_to_name(err));
-                context.haptics.play(haptics::Effect::Alert); context.audio.play(audio::Effect::Error);
+            context.haptics.play(haptics::Effect::DoubleClick);
+        }
+        context.invalidate({18, 158, 364, 59});
+    } else if (event.type == input::EventType::Pressed &&
+               (event.button == input::Button::Left || event.button == input::Button::Right)) {
+        const auto info = context.audio.streamInfo();
+        if (context.audio.streamActive() || info.state == audio::StreamState::Finished) {
+            int64_t target = static_cast<int64_t>(info.position_ms);
+            target += event.button == input::Button::Right ? 5000 : -5000;
+            target = std::clamp<int64_t>(target, 0, info.duration_ms);
+            if (context.audio.seekStreamMs(static_cast<uint32_t>(target))) {
+                context.haptics.play(haptics::Effect::Tick);
+                context.uiSound(audio::Effect::Tick);
             }
         }
-        context.invalidate({18, 191, 364, 25});
+    }
+}
+
+void WavPlayerApp::update(AppContext& context, uint32_t dt_ms) {
+    ui_accumulator_ms_ += dt_ms;
+    if (ui_accumulator_ms_ < 125U) return;
+    ui_accumulator_ms_ = 0;
+
+    const auto info = context.audio.streamInfo();
+    const uint32_t second = info.position_ms / 1000U;
+    if (info.state != last_state_ || second != last_position_second_) {
+        if (info.state == audio::StreamState::Error && last_state_ != audio::StreamState::Error) {
+            context.haptics.play(haptics::Effect::Alert);
+            context.uiSound(audio::Effect::Error);
+        }
+        last_state_ = info.state;
+        last_position_second_ = second;
+        context.invalidate({18, 158, 364, 59});
     }
 }
 
 void WavPlayerApp::draw(AppContext& context, const gfx::Rect&) {
-    auto& canvas = context.gfx.canvas(); canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "WAV PLAYER", context.storage.mounted() ? "SD 4-BIT" : "NO SD");
-    if (file_count_) list_.draw(canvas, context.theme);
-    else gui::draw_wrapped_text(canvas, {28, 58, 344, 90},
-        "Copy the archive folder COPY_TO_SD/pogopo to the root of the SD card, then press START to rescan.",
-        context.theme, 1, 4);
-    canvas.draw_text(22, 197, status_, gfx::font5x7(), context.theme.foreground);
-    gui::draw_footer(canvas, context.theme, "A PLAY  B BACK", "START RESCAN");
+    auto& canvas = context.gfx.canvas();
+    canvas.clear_clip(context.theme.background);
+    const auto info = context.audio.streamInfo();
+    gui::draw_header(canvas, context.theme, "STREAM WAV", audio::stream_state_name(info.state));
+
+    if (file_count_) {
+        list_.draw(canvas, context.theme);
+    } else {
+        gui::draw_wrapped_text(canvas, {28, 58, 344, 82},
+            "Copy WAV files to /pogopo/sounds on the SD card, then reopen this app.",
+            context.theme, 1, 4);
+    }
+
+    gui::ProgressBar progress({22, 161, 356, 14});
+    progress.setRange(0, static_cast<int>(std::max<uint32_t>(1U, info.duration_ms / 1000U)));
+    progress.setValue(static_cast<int>(info.position_ms / 1000U));
+    progress.draw(canvas, context.theme);
+
+    char time_line[96];
+    const uint32_t pos_s = info.position_ms / 1000U;
+    const uint32_t dur_s = info.duration_ms / 1000U;
+    std::snprintf(time_line, sizeof(time_line), "%02lu:%02lu / %02lu:%02lu  BUF %lums",
+                  static_cast<unsigned long>(pos_s / 60U), static_cast<unsigned long>(pos_s % 60U),
+                  static_cast<unsigned long>(dur_s / 60U), static_cast<unsigned long>(dur_s % 60U),
+                  static_cast<unsigned long>(info.buffered_ms));
+    canvas.draw_text(24, 181, time_line, gfx::font5x7(), context.theme.foreground);
+
+    std::snprintf(status_, sizeof(status_), "%s %luHZ %u/%u  U%lu E%lu",
+                  audio::stream_state_name(info.state),
+                  static_cast<unsigned long>(info.sample_rate),
+                  static_cast<unsigned>(info.channels),
+                  static_cast<unsigned>(info.bits_per_sample),
+                  static_cast<unsigned long>(info.underruns),
+                  static_cast<unsigned long>(info.read_errors));
+    canvas.draw_text(24, 197, status_, gfx::font5x7(), context.theme.foreground);
+    gui::draw_footer(canvas, context.theme, "A PLAY  START PAUSE  B BACK", "L/R SEEK 5S");
+}
+
+void SettingsApp::applyRuntime(AppContext& context) {
+    context.audio.setMasterVolume(context.settings.volume());
+    context.audio.setEnabled(context.settings.audioEnabled());
+    context.haptics.setEnabled(context.settings.hapticsEnabled());
+}
+
+void SettingsApp::markChanged(AppContext& context) {
+    applyRuntime(context);
+    save_delay_ms_ = 800;
+    std::snprintf(status_, sizeof(status_), "CHANGED - AUTO SAVE");
+    context.invalidate();
+}
+
+void SettingsApp::onEnter(AppContext& context) {
+    selected_ = 0;
+    save_delay_ms_ = 0;
+    applyRuntime(context);
+    std::snprintf(status_, sizeof(status_), context.settings.ok() ? "NVS READY" : "NVS ERROR");
+    context.invalidate();
+}
+
+void SettingsApp::onExit(AppContext& context) {
+    if (context.settings.dirty()) {
+        const esp_err_t err = context.settings.save();
+        std::snprintf(status_, sizeof(status_), err == ESP_OK ? "SAVED" : "SAVE ERROR");
+    }
+}
+
+void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
+    if (!nav_event(event)) return;
+
+    if (event.button == input::Button::Top) {
+        selected_ = (selected_ + 4) % 5;
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
+        context.invalidate();
+        return;
+    }
+    if (event.button == input::Button::Down) {
+        selected_ = (selected_ + 1) % 5;
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
+        context.invalidate();
+        return;
+    }
+    if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
+        if (context.settings.dirty()) context.settings.save();
+        context.haptics.play(haptics::Effect::Click);
+        context.uiSound(audio::Effect::Back);
+        context.home();
+        return;
+    }
+    if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
+        context.settings.resetDefaults(false);
+        markChanged(context);
+        context.haptics.play(haptics::Effect::Confirm);
+        context.uiSound(audio::Effect::Confirm);
+        return;
+    }
+
+    const bool left = event.button == input::Button::Left;
+    const bool right = event.button == input::Button::Right;
+    const bool activate = event.type == input::EventType::Pressed && event.button == input::Button::A;
+    if (!left && !right && !activate) return;
+
+    switch (selected_) {
+        case 0: {
+            const int delta = left ? -5 : 5;
+            const int value = std::clamp<int>(static_cast<int>(context.settings.volume()) + delta, 0, 100);
+            context.settings.setVolume(static_cast<uint8_t>(value));
+            break;
+        }
+        case 1:
+            context.settings.setAudioEnabled(!context.settings.audioEnabled());
+            break;
+        case 2:
+            context.settings.setUiSoundsEnabled(!context.settings.uiSoundsEnabled());
+            break;
+        case 3:
+            context.settings.setHapticsEnabled(!context.settings.hapticsEnabled());
+            break;
+        case 4: {
+            int value = static_cast<int>(context.settings.motionSensitivity());
+            value += left ? -1 : 1;
+            if (value < 0) value = 2;
+            if (value > 2) value = 0;
+            context.settings.setMotionSensitivity(static_cast<uint8_t>(value));
+            break;
+        }
+        default:
+            return;
+    }
+
+    markChanged(context);
+    context.haptics.play(haptics::Effect::Click);
+    context.uiSound(audio::Effect::Click);
+}
+
+void SettingsApp::update(AppContext& context, uint32_t dt_ms) {
+    if (save_delay_ms_ == 0 || !context.settings.dirty()) return;
+    if (dt_ms >= save_delay_ms_) {
+        save_delay_ms_ = 0;
+        const esp_err_t err = context.settings.save();
+        std::snprintf(status_, sizeof(status_), err == ESP_OK ? "SAVED TO NVS" : "NVS SAVE ERROR");
+        context.invalidate({20, 188, 360, 24});
+    } else {
+        save_delay_ms_ -= dt_ms;
+    }
+}
+
+void SettingsApp::draw(AppContext& context, const gfx::Rect&) {
+    auto& c = context.gfx.canvas();
+    c.clear_clip(context.theme.background);
+    gui::draw_header(c, context.theme, "SYSTEM SETTINGS", context.settings.dirty() ? "UNSAVED" : "NVS");
+
+    const char* labels[] = {"MASTER VOLUME", "AUDIO OUTPUT", "UI SOUNDS", "HAPTICS", "MOTION SENS."};
+    char values[5][20]{};
+    std::snprintf(values[0], sizeof(values[0]), "%u%%", static_cast<unsigned>(context.settings.volume()));
+    std::snprintf(values[1], sizeof(values[1]), "%s", context.settings.audioEnabled() ? "ON" : "OFF");
+    std::snprintf(values[2], sizeof(values[2]), "%s", context.settings.uiSoundsEnabled() ? "ON" : "OFF");
+    std::snprintf(values[3], sizeof(values[3]), "%s", context.settings.hapticsEnabled() ? "ON" : "OFF");
+    std::snprintf(values[4], sizeof(values[4]), "%s", settings::motion_sensitivity_name(context.settings.motionSensitivity()));
+
+    for (int i = 0; i < 5; ++i) {
+        const int y = 43 + i * 28;
+        const bool focus = i == selected_;
+        const gfx::Color bg = focus ? context.theme.focus_background : context.theme.background;
+        const gfx::Color fg = focus ? context.theme.focus_foreground : context.theme.foreground;
+        c.fill_rect(20, y, 360, 25, bg);
+        c.draw_rect(20, y, 360, 25, context.theme.border);
+        c.draw_text(30, y + 9, labels[i], gfx::font5x7(), fg, 1, true, bg);
+        const int value_x = 366 - static_cast<int>(std::strlen(values[i])) * 6;
+        c.draw_text(value_x, y + 9, values[i], gfx::font5x7(), fg, 1, true, bg);
+    }
+
+    c.draw_text(23, 190, status_, gfx::font5x7(), context.theme.foreground);
+    gui::draw_footer(c, context.theme, "L/R OR A CHANGE  B BACK", "START DEFAULTS");
 }
 
 void MotionLabApp::onEnter(AppContext& context) {
@@ -468,7 +691,7 @@ void MotionLabApp::onEnter(AppContext& context) {
 void MotionLabApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type != input::EventType::Pressed) return;
     if (event.button == input::Button::B) {
-        context.haptics.play(haptics::Effect::Click); context.audio.play(audio::Effect::Back); context.home();
+        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.home();
     } else if (event.button == input::Button::A) {
         latest_ = context.imu.sample();
         zero_roll_ = latest_.roll;
@@ -477,7 +700,7 @@ void MotionLabApp::onEvent(AppContext& context, const input::Event& event) {
         visual_pitch_ = 0;
         visual_initialized_ = true;
         context.haptics.play(haptics::Effect::Confirm);
-        context.audio.play(audio::Effect::Confirm);
+        context.uiSound(audio::Effect::Confirm);
         context.invalidate();
     }
 }
@@ -493,8 +716,11 @@ void MotionLabApp::update(AppContext& context, uint32_t dt_ms) {
     // Visual-only filtering: keep the numeric readout immediate, but make the
     // spirit-level display calm and readable. The signs are intentionally
     // inverted so the ball follows the physical direction of the tilt.
-    const float target_roll = std::clamp(-(latest_.roll - zero_roll_), -45.0f, 45.0f);
-    const float target_pitch = std::clamp(-(latest_.pitch - zero_pitch_), -45.0f, 45.0f);
+    const float sensitivity_values[] = {0.65f, 1.0f, 1.45f};
+    const uint8_t sensitivity_index = std::min<uint8_t>(context.settings.motionSensitivity(), 2);
+    const float sensitivity = sensitivity_values[sensitivity_index];
+    const float target_roll = std::clamp(-(latest_.roll - zero_roll_) * sensitivity, -45.0f, 45.0f);
+    const float target_pitch = std::clamp(-(latest_.pitch - zero_pitch_) * sensitivity, -45.0f, 45.0f);
 
     if (!visual_initialized_) {
         visual_roll_ = target_roll;
@@ -559,7 +785,9 @@ void MotionLabApp::draw(AppContext& context, const gfx::Rect&) {
     c.fill_circle(bx, by, 5, context.theme.foreground);
     c.draw_line(cx - 5, cy, cx + 5, cy, context.theme.foreground);
     c.draw_line(cx, cy - 5, cx, cy + 5, context.theme.foreground);
-    gui::draw_footer(c, context.theme, "A ZERO  B BACK", "BMI270 100HZ");
+    char motion_footer[32];
+    std::snprintf(motion_footer, sizeof(motion_footer), "BMI270 %s", settings::motion_sensitivity_name(context.settings.motionSensitivity()));
+    gui::draw_footer(c, context.theme, "A ZERO  B BACK", motion_footer);
 }
 
 void PowerStatusApp::onEnter(AppContext& context) {
@@ -567,7 +795,7 @@ void PowerStatusApp::onEnter(AppContext& context) {
 }
 void PowerStatusApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
-        context.haptics.play(haptics::Effect::Click); context.audio.play(audio::Effect::Back); context.home();
+        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.home();
     }
 }
 void PowerStatusApp::update(AppContext& context, uint32_t) {
@@ -601,7 +829,7 @@ void AboutApp::onEnter(AppContext& context) {
 void AboutApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
-        context.audio.play(audio::Effect::Back);
+        context.uiSound(audio::Effect::Back);
         context.home();
     }
 }
@@ -615,9 +843,9 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
     panel.draw(canvas, context.theme);
     canvas.draw_text(35, 56, "pogopoOS 2.0", gfx::font5x7(), context.theme.foreground, 2);
     gui::draw_wrapped_text(canvas, {35, 88, 330, 92},
-        "Native ESP-IDF platform with graphics, GUI, input, haptics, mixed I2S audio, SD WAV playback, BMI270 motion and BQ24295 power management.",
+        "Native ESP-IDF platform with graphics, GUI, input, haptics, mixed I2S audio, streaming SD WAV, persistent NVS settings, BMI270 motion and BQ24295 power management.",
         context.theme, 1, 3);
-    canvas.draw_text(35, 183, "Sharp 400x240 / ESP32-S3 / STEP7", gfx::font5x7(), context.theme.foreground);
+    canvas.draw_text(35, 183, "Sharp 400x240 / ESP32-S3 / STEP8", gfx::font5x7(), context.theme.foreground);
     draw_back_footer(context);
 }
 

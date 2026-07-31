@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include "driver/i2s_std.h"
 #include "esp_err.h"
@@ -30,6 +31,16 @@ enum class Effect : uint8_t {
     Coin,
 };
 
+enum class StreamState : uint8_t {
+    Stopped,
+    Opening,
+    Buffering,
+    Playing,
+    Paused,
+    Finished,
+    Error,
+};
+
 struct Stats {
     uint32_t buffers_written = 0;
     uint32_t write_errors = 0;
@@ -38,6 +49,20 @@ struct Stats {
     uint32_t last_write_us = 0;
     uint32_t max_write_us = 0;
     uint8_t active_voices = 0;
+};
+
+struct StreamInfo {
+    StreamState state = StreamState::Stopped;
+    uint32_t position_ms = 0;
+    uint32_t duration_ms = 0;
+    uint32_t buffered_ms = 0;
+    uint32_t sample_rate = 0;
+    uint32_t underruns = 0;
+    uint32_t read_errors = 0;
+    uint32_t dropped_commands = 0;
+    uint8_t channels = 0;
+    uint8_t bits_per_sample = 0;
+    uint8_t volume = 0;
 };
 
 class Audio {
@@ -55,6 +80,13 @@ public:
         uint32_t task_stack = 6144;
         UBaseType_t task_priority = 6;
         BaseType_t task_core = 0;
+
+        uint32_t stream_buffer_frames = 32768;
+        uint16_t stream_prefill_ms = 120;
+        uint8_t stream_queue_depth = 8;
+        uint32_t stream_task_stack = 8192;
+        UBaseType_t stream_task_priority = 4;
+        BaseType_t stream_task_core = 1;
     };
 
     Audio() = default;
@@ -73,11 +105,26 @@ public:
     bool playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume = 80);
     void stopAll();
 
+    bool playStream(const char* path, uint8_t volume = 82);
+    bool pauseStream();
+    bool resumeStream();
+    bool toggleStreamPause();
+    bool stopStream();
+    bool seekStreamMs(uint32_t position_ms);
+    StreamInfo streamInfo() const;
+    StreamState streamState() const;
+    bool streamActive() const;
+    bool streamPlaying() const { return streamState() == StreamState::Playing; }
+
     void setMasterVolume(uint8_t percent);
     uint8_t masterVolume() const { return master_volume_.load(); }
+    void setEnabled(bool enabled);
+    bool enabled() const { return enabled_.load(); }
 
     bool ok() const { return ok_.load(); }
-    bool active() const { return active_voices_.load() != 0 || pcm_active_.load(); }
+    bool active() const {
+        return active_voices_.load() != 0 || pcm_active_.load() || streamActive();
+    }
     uint8_t activeVoices() const { return active_voices_.load(); }
     uint32_t sampleRate() const { return config_.sample_rate; }
     Stats stats() const;
@@ -86,12 +133,22 @@ private:
     static constexpr size_t MAX_VOICES = 4;
     static constexpr size_t SINE_TABLE_SIZE = 256;
     static constexpr size_t MAX_RENDER_FRAMES = 512;
+    static constexpr size_t STREAM_PATH_SIZE = 192;
+    static constexpr size_t STREAM_READ_FRAMES = 1024;
 
     enum class CommandType : uint8_t {
         PlayEffect,
         PlayTone,
         PlayPcm,
         StopAll,
+    };
+
+    enum class StreamCommandType : uint8_t {
+        Play,
+        Pause,
+        Resume,
+        Stop,
+        Seek,
     };
 
     struct Command {
@@ -104,6 +161,13 @@ private:
         int16_t* pcm_samples = nullptr;
         uint32_t pcm_frames = 0;
         uint32_t pcm_sample_rate = 0;
+    };
+
+    struct StreamCommand {
+        StreamCommandType type = StreamCommandType::Stop;
+        uint8_t volume = 82;
+        uint32_t position_ms = 0;
+        char path[STREAM_PATH_SIZE]{};
     };
 
     struct Note {
@@ -141,15 +205,29 @@ private:
         uint32_t serial = 0;
     };
 
+    struct WavHeader {
+        long data_offset = 0;
+        uint32_t data_size = 0;
+        uint32_t sample_rate = 0;
+        uint32_t total_frames = 0;
+        uint16_t block_align = 0;
+        uint8_t channels = 0;
+        uint8_t bits = 0;
+    };
+
     static void task_entry(void* argument);
+    static void stream_task_entry(void* argument);
     void task_loop();
+    void stream_task_loop();
     void processCommands();
     bool enqueue(const Command& command);
+    bool enqueueStream(const StreamCommand& command);
 
     void startEffect(Effect effect);
     void startTone(const Command& command);
     void startPcm(Command& command);
     int32_t renderPcm();
+    int32_t renderStream();
     void clearPcm();
     Voice& chooseVoice(bool custom, Effect effect);
     void loadCurrentNote(Voice& voice);
@@ -161,13 +239,25 @@ private:
     void silenceVoices();
     void updateActiveVoiceCount();
 
+    void handleStreamCommand(const StreamCommand& command);
+    void openStreamFile(const StreamCommand& command);
+    void closeStreamFile();
+    void resetStreamBuffer(uint32_t base_frame, bool preserve_pause);
+    void fillStreamBuffer();
+    void updateStreamBufferingState();
+    esp_err_t parseWavHeader(FILE* file, WavHeader& header) const;
+    int16_t decodeFrame(const uint8_t* frame) const;
+
     void initSineTable();
     void cleanupI2s();
+    void cleanupStreamResources();
 
     Config config_{};
     i2s_chan_handle_t tx_channel_ = nullptr;
     QueueHandle_t queue_ = nullptr;
+    QueueHandle_t stream_queue_ = nullptr;
     TaskHandle_t task_ = nullptr;
+    TaskHandle_t stream_task_ = nullptr;
 
     std::array<int16_t, SINE_TABLE_SIZE> sine_table_{};
     std::array<Voice, MAX_VOICES> voices_{};
@@ -175,7 +265,17 @@ private:
     uint32_t noise_state_ = 0xA5C31E27u;
     PcmVoice pcm_{};
 
+    int16_t* stream_buffer_ = nullptr;
+    FILE* stream_file_ = nullptr;
+    WavHeader stream_header_{};
+    uint32_t stream_source_cursor_ = 0;
+    uint64_t stream_position_q16_ = 0;
+    uint64_t stream_step_q16_ = 0;
+    uint32_t stream_generation_seen_ = 0;
+    bool stream_underrun_latched_ = false;
+
     std::atomic<bool> ok_{false};
+    std::atomic<bool> enabled_{true};
     std::atomic<uint8_t> master_volume_{68};
     std::atomic<uint8_t> active_voices_{0};
     std::atomic<bool> pcm_active_{false};
@@ -185,9 +285,31 @@ private:
     std::atomic<uint32_t> dropped_commands_{0};
     std::atomic<uint32_t> last_write_us_{0};
     std::atomic<uint32_t> max_write_us_{0};
+
+    std::atomic<bool> stream_exit_{false};
+    std::atomic<bool> stream_resetting_{false};
+    std::atomic<bool> stream_paused_{false};
+    std::atomic<bool> stream_eof_{false};
+    std::atomic<uint8_t> stream_state_{static_cast<uint8_t>(StreamState::Stopped)};
+    std::atomic<uint8_t> stream_volume_{82};
+    std::atomic<uint8_t> stream_channels_{0};
+    std::atomic<uint8_t> stream_bits_{0};
+    std::atomic<uint32_t> stream_source_rate_{0};
+    std::atomic<uint32_t> stream_total_frames_{0};
+    std::atomic<uint32_t> stream_base_frame_{0};
+    std::atomic<uint32_t> stream_write_total_{0};
+    std::atomic<uint32_t> stream_consumed_total_{0};
+    std::atomic<uint32_t> stream_generation_{0};
+    std::atomic<uint32_t> stream_position_ms_{0};
+    std::atomic<uint32_t> stream_duration_ms_{0};
+    std::atomic<uint32_t> stream_buffered_ms_{0};
+    std::atomic<uint32_t> stream_underruns_{0};
+    std::atomic<uint32_t> stream_read_errors_{0};
+    std::atomic<uint32_t> stream_dropped_commands_{0};
 };
 
 const char* effect_name(Effect effect);
 const char* waveform_name(Waveform waveform);
+const char* stream_state_name(StreamState state);
 
 } // namespace pogopo::audio

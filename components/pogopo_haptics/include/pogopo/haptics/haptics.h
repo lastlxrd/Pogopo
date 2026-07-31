@@ -42,6 +42,8 @@ public:
     bool play(Effect effect);
     bool pulse(uint16_t duration_ms);
     void clearPending();
+    void setEnabled(bool enabled);
+    bool enabled() const { return enabled_.load(); }
 
     bool ok() const { return ok_.load(); }
     bool active() const { return active_.load(); }
@@ -71,6 +73,7 @@ private:
     TaskHandle_t task_ = nullptr;
     bool gpio_ready_ = false;
     std::atomic<bool> ok_{false};
+    std::atomic<bool> enabled_{true};
     std::atomic<bool> active_{false};
     std::atomic<uint32_t> dropped_{0};
 };
