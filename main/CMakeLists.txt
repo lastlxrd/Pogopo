@@ -8,7 +8,7 @@ idf_component_register(
     REQUIRES
         esp_driver_i2c
         esp_driver_gpio
-        pogopo_sharp
+        pogopo_graphics
         esp_system
         spi_flash
 )

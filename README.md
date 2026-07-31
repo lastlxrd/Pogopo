@@ -1,50 +1,38 @@
-# pogopoOS2.0 — ESP-IDF bring-up, Sharp driver step 1
+# pogopoOS2.0 — Graphics STEP2
 
-This project is the ESP-IDF v6.0.2 hardware bring-up branch for the ESP32-S3 console.
+This archive is based on the exact Sharp CS diagnostic build that displayed
+correctly on the LS027B7DH01.
 
-Working baseline carried over:
+## What changed
 
-- I2C on SDA GPIO8 / SCL GPIO9
-- TCA9555 at 0x20
-- BMI270 at 0x68
-- BQ24295 at 0x6B
-- TCA9555 button polling
-- Flash/PSRAM settings in sdkconfig.defaults
+- `components/pogopo_graphics/` replaces the temporary `pogopo_sharp` component.
+- Working manual active-HIGH SCS timing is preserved.
+- 400x240 1-bit framebuffer remains in PSRAM.
+- DMA transfer buffer remains in internal RAM.
+- Dedicated FreeRTOS VCOM task runs every 500 ms.
+- Dirty rows are packed into one Sharp write transaction, even when they are
+  non-contiguous.
+- Full refresh, row-range refresh, and dirty refresh are available.
+- `Canvas` API adds pixel, line, rectangle, filled rectangle, circle, filled
+  circle, 1-bit bitmap, and 5x7 text.
+- Refresh statistics track time, row count, bytes, total traffic, and VCOM
+  toggles.
+- The demo animates a small square at about 30 FPS and updates a live benchmark.
 
-New in this archive:
+## Expected screen
 
-- `components/pogopo_sharp/`
-- native ESP-IDF Sharp Memory LCD driver for LS027B7DH01
-- PSRAM framebuffer, 400x240 1-bit
-- internal DMA transfer buffer
-- SPI2_HOST at 14 MHz, LSB-first protocol
-- full refresh
-- contiguous row partial refresh API
-- dirty-row refresh API
-- VCOM toggling on refresh / clear / vcom-only command
-- basic drawing: pixel, lines, rects, fill_rect, tiny text
+- `pogopoOS2.0 STEP2`
+- primitive graphics examples
+- a moving black square in the animation lane
+- live FPS, refresh time, rows, and bytes
 
-Build:
+## Expected logs
 
-```powershell
-idf.py set-target esp32s3
-idf.py fullclean
-idf.py build
-idf.py -p COM7 flash monitor
+A line similar to this appears once per second:
+
+```text
+I (...) gfx_demo: FPS=30 last=...us rows=18 bytes=... total_refresh=... vcom=...
 ```
 
-Expected result:
-
-- Serial still shows I2C scan and TCA/BMI/BQ tests.
-- Sharp LCD should show a simple pogopoOS2.0 test screen.
-
-If the screen is blank:
-
-- confirm DISP is actually high on the board
-- confirm EXTMODE is low
-- confirm SCK GPIO12 / MOSI GPIO11 / CS GPIO14
-- if needed, lower `cfg.clock_hz` in `main/app_main.cpp` from 14 MHz to 8 MHz
-
-
-## FIX 2
-Fixed Sharp init order: initialized_ is now set before the first refresh_full(), so refresh_rows() no longer returns ESP_ERR_INVALID_STATE during init.
+The square should move without full-screen flashing. Most animation refreshes
+should report around 18 dirty rows rather than 240.
