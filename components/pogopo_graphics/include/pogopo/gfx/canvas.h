@@ -50,6 +50,12 @@ public:
                             const uint8_t* pixels, int destination_width,
                             int destination_height, bool dither = true,
                             bool invert = false);
+    // Same renderer for four 2-bit indices packed into each source byte.
+    // Pixel 0 occupies bits 1:0, pixel 1 bits 3:2, and so on.
+    void draw_indexed2_packed_fast(int x, int y, int source_width, int source_height,
+                                   const uint8_t* pixels, int destination_width,
+                                   int destination_height, bool dither = true,
+                                   bool invert = false);
     void draw_char(int x, int y, char character,
                    const Font& font = font5x7(), Color color = BLACK,
                    int scale = 1, bool transparent_background = true,

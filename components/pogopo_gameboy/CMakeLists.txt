@@ -12,6 +12,6 @@ idf_component_register(
         heap
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-# Peanut-GB and MiniGB APU are the dominant hot path. Keep the rest of the OS at
-# the project-wide performance setting, but let this component use full -O3.
-target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
+# The interpreter is faster at the project-wide performance level without the
+# code-size and instruction-cache regression observed with STEP9.3's -O3.
+target_compile_options(${COMPONENT_LIB} PRIVATE -O2)

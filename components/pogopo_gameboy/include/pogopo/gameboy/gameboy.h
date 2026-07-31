@@ -35,12 +35,16 @@ struct Stats {
     uint32_t audio_frames_dropped = 0;
     uint32_t cache_hits = 0;
     uint32_t cache_misses = 0;
+    uint32_t cache_fill_us = 0;
     uint32_t save_writes = 0;
     uint32_t last_frame_us = 0;
     uint32_t max_frame_us = 0;
     uint32_t rom_bytes = 0;
     uint32_t save_bytes = 0;
+    uint32_t rom_arena_bytes = 0;
+    uint32_t frame_buffer_bytes = 0;
     uint8_t cache_pages = 0;
+    bool rom_in_arena = false;
     bool rom_in_psram = false;
 };
 
@@ -49,20 +53,21 @@ public:
     static constexpr int SCREEN_WIDTH = 160;
     static constexpr int SCREEN_HEIGHT = 144;
     static constexpr size_t FRAME_PIXELS = SCREEN_WIDTH * SCREEN_HEIGHT;
+    static constexpr size_t FRAME_BYTES = (FRAME_PIXELS + 3U) / 4U;
 
     struct Config {
-        uint32_t internal_rom_limit = 512U * 1024U;
+        // Reserve one contiguous fast-RAM block before the background tasks
+        // fragment the heap. 256 KiB covers Kirby's complete cartridge.
+        uint32_t internal_rom_arena_bytes = 256U * 1024U;
+        uint32_t internal_rom_limit = 256U * 1024U;
         uint32_t save_flush_interval_ms = 0;
         uint8_t realtime_volume = 74;
         uint8_t requested_cache_pages = 4;
         // Keep Peanut-GB LCD rendering enabled every emulated frame for
         // compatibility. The frontend publishes only every Nth frame.
         bool peanut_frame_skip = false;
-        // Large cartridges in PSRAM get render-only frame skip automatically.
-        // CPU/APU still emulate every frame; only every second LCD frame is drawn.
-        bool auto_frame_skip_psram = true;
         uint8_t display_divider = 1;
-        bool dither = false;
+        bool dither = true;
         UBaseType_t task_priority = 6;
         BaseType_t task_core = 1;
         uint32_t task_stack = 8192;

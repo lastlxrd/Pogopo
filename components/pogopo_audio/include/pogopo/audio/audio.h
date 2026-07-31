@@ -58,7 +58,6 @@ struct RealtimeInfo {
     uint32_t source_rate = 0;
     uint32_t underruns = 0;
     uint32_t overruns = 0;
-    uint16_t playback_percent = 100;
     uint8_t volume = 0;
 };
 
@@ -123,10 +122,6 @@ public:
     // at 32768 Hz no interpolation or UI/WAV mixing runs in the hot loop.
     esp_err_t startRealtimeStereo(uint32_t sample_rate = 32768, uint8_t volume = 72);
     void stopRealtime();
-    // Q16 source-frames consumed per I2S output frame. 65536 = normal speed.
-    // The emulator lowers this slightly when it is running below real time so
-    // audio stretches with the game instead of repeatedly underrunning.
-    void setRealtimePlaybackStepQ16(uint32_t step_q16);
     size_t pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames);
     RealtimeInfo realtimeInfo() const;
 
@@ -295,9 +290,11 @@ private:
     int16_t* realtime_buffer_ = nullptr;
     uint32_t realtime_capacity_frames_ = 0;
     uint32_t realtime_fraction_q16_ = 0;
+    uint32_t realtime_step_q16_ = 1U << 16U;
     int32_t realtime_last_left_ = 0;
     int32_t realtime_last_right_ = 0;
     uint16_t realtime_fade_samples_ = 0;
+    uint16_t realtime_fade_in_samples_ = 0;
     bool realtime_underrun_latched_ = false;
 
     int16_t* stream_buffer_ = nullptr;
@@ -324,7 +321,6 @@ private:
     std::atomic<bool> realtime_active_{false};
     std::atomic<uint8_t> realtime_volume_{72};
     std::atomic<uint32_t> realtime_source_rate_{32768};
-    std::atomic<uint32_t> realtime_step_q16_{1U << 16U};
     std::atomic<uint32_t> realtime_write_total_{0};
     std::atomic<uint32_t> realtime_read_total_{0};
     std::atomic<uint32_t> realtime_underruns_{0};

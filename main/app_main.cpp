@@ -105,13 +105,13 @@ esp_err_t start_audio() {
 
 esp_err_t start_gameboy() {
     pogopo::GameBoy::Config config;
-    config.internal_rom_limit = 512U * 1024U;
+    config.internal_rom_arena_bytes = 256U * 1024U;
+    config.internal_rom_limit = 256U * 1024U;
     config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
-    config.requested_cache_pages = 8; // Falls back to 6/4/2 if internal heap is tight.
+    config.requested_cache_pages = 4;
     config.peanut_frame_skip = false;
-    config.auto_frame_skip_psram = true;
     config.display_divider = 1;
-    config.dither = false;
+    config.dither = true;
     config.task_priority = 6;
     config.task_core = 1;
     config.task_stack = 8192;
@@ -268,7 +268,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.3 KIRBY STABILITY");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.4 FIXED AUDIO / DITHER");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -297,5 +297,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.3 ready: PSRAM frame-skip/cache, audio stretch, WDT/input fail-safe");
+    ESP_LOGI(TAG, "STEP9.4 ready: ROM arena, packed dither, fixed-rate audio");
 }

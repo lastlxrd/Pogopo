@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 namespace pogopo::demo {
 namespace {
@@ -137,24 +138,32 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
         const uint32_t lcd_delta = now.displayed_frames - perf_previous_.displayed_frames;
         const uint32_t hit_delta = now.cache_hits - perf_previous_.cache_hits;
         const uint32_t miss_delta = now.cache_misses - perf_previous_.cache_misses;
+        const uint32_t fill_us_delta = now.cache_fill_us - perf_previous_.cache_fill_us;
         const uint32_t drop_delta = now.audio_frames_dropped - perf_previous_.audio_frames_dropped;
         const audio::RealtimeInfo realtime = context.audio.realtimeInfo();
         ESP_LOGI(TAG,
-                 "PERF emu=%lu lcd=%lu frame=%luus max=%luus ROM=%s cache=%lu/%lu "
-                 "audio=%lu/%lu under=%lu over=%lu drop=%lu speed=%u%% i2cerr=%lu",
+                 "PERF emu=%lu lcd=%lu frame=%luus max=%luus ROM=%s arena=%lu "
+                 "fb=%lu cache=%lu/%lu miss_us=%lu audio=%lu/%lu under=%lu "
+                 "over=%lu drop=%lu heap=%lu/%lu i2cerr=%lu",
                  static_cast<unsigned long>(emu_delta),
                  static_cast<unsigned long>(lcd_delta),
                  static_cast<unsigned long>(now.last_frame_us),
                  static_cast<unsigned long>(now.max_frame_us),
-                 now.rom_in_psram ? "PSRAM" : "INT",
+                 now.rom_in_arena ? "ARENA" : (now.rom_in_psram ? "PSRAM" : "INT"),
+                 static_cast<unsigned long>(now.rom_arena_bytes),
+                 static_cast<unsigned long>(now.frame_buffer_bytes),
                  static_cast<unsigned long>(hit_delta),
                  static_cast<unsigned long>(miss_delta),
+                 static_cast<unsigned long>(fill_us_delta),
                  static_cast<unsigned long>(realtime.buffered_frames),
                  static_cast<unsigned long>(realtime.capacity_frames),
                  static_cast<unsigned long>(realtime.underruns),
                  static_cast<unsigned long>(realtime.overruns),
                  static_cast<unsigned long>(drop_delta),
-                 static_cast<unsigned>(realtime.playback_percent),
+                 static_cast<unsigned long>(heap_caps_get_free_size(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned long>(heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  static_cast<unsigned long>(context.input.readErrors()));
         perf_previous_ = now;
         perf_elapsed_ms_ = 0;
