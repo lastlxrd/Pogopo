@@ -117,6 +117,9 @@ private:
     uint32_t last_sequence_ = 0;
     float zero_roll_ = 0;
     float zero_pitch_ = 0;
+    float visual_roll_ = 0;
+    float visual_pitch_ = 0;
+    bool visual_initialized_ = false;
     imu::Sample latest_{};
 };
 

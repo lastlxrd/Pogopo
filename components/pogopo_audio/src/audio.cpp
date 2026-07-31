@@ -480,7 +480,7 @@ uint16_t Audio::envelopeQ15(const Voice& voice) const {
 
 const Audio::Note* Audio::patternForEffect(Effect effect, size_t& count) const {
     static constexpr Note tick[] = {
-        {1900, 22, 32, Waveform::Square, 1, 5},
+        {1900, 22, 24, Waveform::Square, 1, 5},
     };
     static constexpr Note click[] = {
         {1250, 34, 58, Waveform::Triangle, 2, 7},
@@ -496,9 +496,9 @@ const Audio::Note* Audio::patternForEffect(Effect effect, size_t& count) const {
         {360, 72, 62, Waveform::Triangle, 2, 12},
     };
     static constexpr Note error[] = {
-        {190, 92, 49, Waveform::Square, 3, 12},
+        {190, 92, 40, Waveform::Square, 3, 12},
         {0,   34,  0, Waveform::Sine, 0, 0},
-        {145, 125, 52, Waveform::Square, 3, 18},
+        {145, 125, 42, Waveform::Square, 3, 18},
     };
     static constexpr Note startup[] = {
         {523, 72, 58, Waveform::Sine, 4, 10},

@@ -456,7 +456,13 @@ void WavPlayerApp::draw(AppContext& context, const gfx::Rect&) {
 }
 
 void MotionLabApp::onEnter(AppContext& context) {
-    latest_ = context.imu.sample(); last_sequence_ = 0; zero_roll_ = 0; zero_pitch_ = 0;
+    latest_ = context.imu.sample();
+    last_sequence_ = latest_.sequence;
+    zero_roll_ = 0;
+    zero_pitch_ = 0;
+    visual_roll_ = 0;
+    visual_pitch_ = 0;
+    visual_initialized_ = false;
     context.invalidate();
 }
 void MotionLabApp::onEvent(AppContext& context, const input::Event& event) {
@@ -464,15 +470,47 @@ void MotionLabApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click); context.audio.play(audio::Effect::Back); context.home();
     } else if (event.button == input::Button::A) {
-        latest_ = context.imu.sample(); zero_roll_ = latest_.roll; zero_pitch_ = latest_.pitch;
-        context.haptics.play(haptics::Effect::Confirm); context.audio.play(audio::Effect::Confirm); context.invalidate();
+        latest_ = context.imu.sample();
+        zero_roll_ = latest_.roll;
+        zero_pitch_ = latest_.pitch;
+        visual_roll_ = 0;
+        visual_pitch_ = 0;
+        visual_initialized_ = true;
+        context.haptics.play(haptics::Effect::Confirm);
+        context.audio.play(audio::Effect::Confirm);
+        context.invalidate();
     }
 }
-void MotionLabApp::update(AppContext& context, uint32_t) {
+void MotionLabApp::update(AppContext& context, uint32_t dt_ms) {
     const imu::Sample sample = context.imu.sample();
+    bool numbers_changed = false;
     if (sample.sequence != last_sequence_) {
-        latest_ = sample; last_sequence_ = sample.sequence; context.invalidate({15, 37, 370, 177});
+        latest_ = sample;
+        last_sequence_ = sample.sequence;
+        numbers_changed = true;
     }
+
+    // Visual-only filtering: keep the numeric readout immediate, but make the
+    // spirit-level display calm and readable. The signs are intentionally
+    // inverted so the ball follows the physical direction of the tilt.
+    const float target_roll = std::clamp(-(latest_.roll - zero_roll_), -45.0f, 45.0f);
+    const float target_pitch = std::clamp(-(latest_.pitch - zero_pitch_), -45.0f, 45.0f);
+
+    if (!visual_initialized_) {
+        visual_roll_ = target_roll;
+        visual_pitch_ = target_pitch;
+        visual_initialized_ = true;
+    } else {
+        const float dt = std::clamp(static_cast<float>(dt_ms), 1.0f, 50.0f);
+        const float alpha = 1.0f - std::exp(-dt / 170.0f);
+        visual_roll_ += (target_roll - visual_roll_) * alpha;
+        visual_pitch_ += (target_pitch - visual_pitch_) * alpha;
+    }
+
+    const bool visual_moving = std::fabs(target_roll - visual_roll_) > 0.03f ||
+                               std::fabs(target_pitch - visual_pitch_) > 0.03f;
+    if (numbers_changed) context.invalidate({15, 37, 370, 177});
+    else if (visual_moving) context.invalidate({214, 50, 154, 128});
 }
 void MotionLabApp::draw(AppContext& context, const gfx::Rect&) {
     auto& c = context.gfx.canvas(); c.clear_clip(context.theme.background);
@@ -491,16 +529,36 @@ void MotionLabApp::draw(AppContext& context, const gfx::Rect&) {
                   static_cast<unsigned long>(latest_.read_errors));
     c.draw_text(27, 176, line, gfx::font5x7(), context.theme.foreground);
 
-    const gfx::Rect box{220, 57, 142, 112}; c.draw_rect(box.x, box.y, box.w, box.h, context.theme.border);
-    const float a = std::clamp(roll, -45.0f, 45.0f) * 0.01745329252f;
-    const int cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-    const int dx = static_cast<int>(std::cos(a) * 60.0f), dy = static_cast<int>(std::sin(a) * 60.0f);
-    const int py = std::clamp(cy + static_cast<int>(pitch * 1.2f), box.y + 8, box.bottom() - 8);
-    c.draw_line(cx - dx, py - dy, cx + dx, py + dy, context.theme.foreground);
-    const int bx = std::clamp(cx + static_cast<int>(pitch * 1.5f), box.x + 8, box.right() - 8);
-    const int by = std::clamp(cy + static_cast<int>(roll * 1.2f), box.y + 8, box.bottom() - 8);
-    c.fill_circle(bx, by, 5, context.theme.foreground); c.draw_line(cx-5,cy,cx+5,cy,context.theme.foreground);
-    c.draw_line(cx,cy-5,cx,cy+5,context.theme.foreground);
+    const gfx::Rect box{220, 57, 142, 112};
+    c.draw_rect(box.x, box.y, box.w, box.h, context.theme.border);
+    const int cx = box.x + box.w / 2;
+    const int cy = box.y + box.h / 2;
+
+    // Fixed reference marks make the moving horizon much easier to read.
+    for (int x = box.x + 10; x < box.right() - 10; x += 12)
+        c.draw_line(x, cy, std::min(x + 5, box.right() - 10), cy, context.theme.foreground);
+    c.draw_circle(cx, cy, 20, context.theme.foreground);
+    c.draw_circle(cx, cy, 38, context.theme.foreground);
+
+    // Smooth artificial horizon. Its angle and vertical travel are deliberately
+    // limited so it no longer snaps into the frame edges.
+    const float horizon_degrees = std::clamp(visual_roll_, -28.0f, 28.0f);
+    const float a = horizon_degrees * 0.01745329252f;
+    const int horizon_y = cy + static_cast<int>(std::lround(visual_pitch_ * 0.34f));
+    const int half = 52;
+    const int dx = static_cast<int>(std::lround(std::cos(a) * half));
+    const int dy = static_cast<int>(std::lround(std::sin(a) * half));
+    c.draw_line(cx - dx, horizon_y - dy, cx + dx, horizon_y + dy, context.theme.foreground);
+
+    // The ball follows the physical tilt direction, with gentler travel and
+    // rounded coordinates so even small movements around the centre are visible.
+    const int bx = std::clamp(cx + static_cast<int>(std::lround(visual_pitch_ * 0.90f)),
+                              box.x + 9, box.right() - 9);
+    const int by = std::clamp(cy + static_cast<int>(std::lround(visual_roll_ * 0.65f)),
+                              box.y + 9, box.bottom() - 9);
+    c.fill_circle(bx, by, 5, context.theme.foreground);
+    c.draw_line(cx - 5, cy, cx + 5, cy, context.theme.foreground);
+    c.draw_line(cx, cy - 5, cx, cy + 5, context.theme.foreground);
     gui::draw_footer(c, context.theme, "A ZERO  B BACK", "BMI270 100HZ");
 }
 
