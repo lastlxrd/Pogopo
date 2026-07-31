@@ -115,7 +115,7 @@ esp_err_t start_imu() {
     pogopo::Imu::Config config;
     config.bus = i2c_bus_handle(); config.address = 0x68;
     config.interrupt_io = board::IMU_INT; config.sample_period_ms = 20;
-    config.task_core = 1;
+    config.task_core = 0;
     return g_imu.begin(config);
 }
 
@@ -127,7 +127,7 @@ esp_err_t start_power() {
     config.battery_measure_io = board::BAT_MEAS;
     config.battery_gate_io = board::BAT_GATE;
     config.shutdown_hold_ms = 2000;
-    config.task_core = 1;
+    config.task_core = 0;
     return g_power.begin(config);
 }
 
@@ -250,7 +250,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.1");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -272,10 +272,11 @@ extern "C" void app_main(void) {
     if (imu_err != ESP_OK) ESP_LOGW(TAG, "BMI270 unavailable: %s", esp_err_to_name(imu_err));
     ESP_ERROR_CHECK(start_power());
 
-    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 1) != pdPASS) {
+    // Keep Core 1 dedicated to the Game Boy CPU/APU task while a ROM is running.
+    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9 ready: Peanut-GB + ROM browser + realtime stereo audio");
+    ESP_LOGI(TAG, "STEP9.1 ready: dedicated GB core + packed Sharp renderer + realtime stereo audio");
 }

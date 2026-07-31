@@ -32,11 +32,13 @@ private:
     gameboy::GameBoy& emulator_;
     char rom_path_[192]{};
     char display_name_[64]{};
-    gameboy::ScaleMode scale_ = gameboy::ScaleMode::FitHeight;
+    gameboy::ScaleMode scale_ = gameboy::ScaleMode::OneX;
     esp_err_t load_error_ = ESP_ERR_INVALID_STATE;
     uint32_t last_sequence_ = UINT32_MAX;
     uint32_t exit_hold_ms_ = 0;
     bool force_draw_ = true;
+    uint32_t perf_elapsed_ms_ = 0;
+    gameboy::Stats perf_previous_{};
 };
 
 class GameBoyBrowserApp final : public Application {
@@ -60,7 +62,7 @@ private:
     std::array<gui::ListItem, storage::Storage::MAX_FILES> items_{};
     std::array<std::array<char, 32>, storage::Storage::MAX_FILES> subtitles_{};
     size_t file_count_ = 0;
-    gameboy::ScaleMode scale_ = gameboy::ScaleMode::FitHeight;
+    gameboy::ScaleMode scale_ = gameboy::ScaleMode::OneX;
     char status_[80] = "READY";
 };
 

@@ -43,6 +43,13 @@ public:
                               int destination_height,
                               const uint8_t* previous_pixels = nullptr,
                               bool dither = true, bool invert = false);
+    // Fast row-packed path for full-frame indexed images such as Game Boy.
+    // It builds each destination row directly in the Sharp 1-bpp framebuffer,
+    // compares whole rows, and marks only changed rows dirty.
+    void draw_indexed2_fast(int x, int y, int source_width, int source_height,
+                            const uint8_t* pixels, int destination_width,
+                            int destination_height, bool dither = true,
+                            bool invert = false);
     void draw_char(int x, int y, char character,
                    const Font& font = font5x7(), Color color = BLACK,
                    int scale = 1, bool transparent_background = true,

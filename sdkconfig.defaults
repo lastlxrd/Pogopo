@@ -10,3 +10,6 @@ CONFIG_SPIRAM_MEMTEST=y
 
 # STEP9 Game Boy emulator clock
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# STEP9.1 emulator performance: compile application with -O2 instead of -Og.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

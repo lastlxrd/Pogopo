@@ -83,8 +83,8 @@ struct GameBoy::Impl {
     uint8_t* frame_front = nullptr;
     uint8_t* frame_back = nullptr;
     uint8_t* frame_render = nullptr;
-    uint8_t* frame_previous = nullptr;
     bool previous_valid = false;
+    uint8_t lcd_publish_counter = 0;
     ScaleMode previous_scale = ScaleMode::FitHeight;
     uint32_t last_draw_sequence = UINT32_MAX;
 
@@ -119,7 +119,8 @@ esp_err_t GameBoy::begin(audio::Audio& audio) {
 esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     if (initialized_.load() || impl_) return ESP_ERR_INVALID_STATE;
     if (!audio.ok() || config.requested_cache_pages == 0 ||
-        config.requested_cache_pages > MAX_CACHE_PAGES || config.task_stack < 4096) {
+        config.requested_cache_pages > MAX_CACHE_PAGES || config.task_stack < 4096 ||
+        config.display_divider == 0 || config.display_divider > 4) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -175,21 +176,20 @@ void GameBoy::end() {
 
 esp_err_t GameBoy::allocateFrames() {
     if (!impl_) return ESP_ERR_INVALID_STATE;
+    constexpr uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     constexpr uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    constexpr uint32_t normal = MALLOC_CAP_8BIT;
-    impl_->frame_front = allocate_bytes(FRAME_PIXELS, psram, normal);
-    impl_->frame_back = allocate_bytes(FRAME_PIXELS, psram, normal);
-    impl_->frame_render = allocate_bytes(FRAME_PIXELS, psram, normal);
-    impl_->frame_previous = allocate_bytes(FRAME_PIXELS, psram, normal);
-    if (!impl_->frame_front || !impl_->frame_back ||
-        !impl_->frame_render || !impl_->frame_previous) {
+    // These buffers are touched for every LCD line and every displayed frame.
+    // Prefer internal RAM; PSRAM is only a fallback.
+    impl_->frame_front = allocate_bytes(FRAME_PIXELS, internal, psram);
+    impl_->frame_back = allocate_bytes(FRAME_PIXELS, internal, psram);
+    impl_->frame_render = allocate_bytes(FRAME_PIXELS, internal, psram);
+    if (!impl_->frame_front || !impl_->frame_back || !impl_->frame_render) {
         freeFrames();
         return ESP_ERR_NO_MEM;
     }
     std::memset(impl_->frame_front, 0, FRAME_PIXELS);
     std::memset(impl_->frame_back, 0, FRAME_PIXELS);
     std::memset(impl_->frame_render, 0, FRAME_PIXELS);
-    std::memset(impl_->frame_previous, 0, FRAME_PIXELS);
     return ESP_OK;
 }
 
@@ -198,11 +198,9 @@ void GameBoy::freeFrames() {
     if (impl_->frame_front) heap_caps_free(impl_->frame_front);
     if (impl_->frame_back) heap_caps_free(impl_->frame_back);
     if (impl_->frame_render) heap_caps_free(impl_->frame_render);
-    if (impl_->frame_previous) heap_caps_free(impl_->frame_previous);
     impl_->frame_front = nullptr;
     impl_->frame_back = nullptr;
     impl_->frame_render = nullptr;
-    impl_->frame_previous = nullptr;
 }
 
 esp_err_t GameBoy::load(const char* path) {
@@ -213,8 +211,8 @@ esp_err_t GameBoy::load(const char* path) {
 
     unload();
     last_error_.store(ESP_OK);
-    std::strncpy(impl_->rom_path, path, sizeof(impl_->rom_path) - 1U);
-    impl_->rom_path[sizeof(impl_->rom_path) - 1U] = '\0';
+    // The length was validated above, so copy the complete path including NUL.
+    std::memcpy(impl_->rom_path, path, std::strlen(path) + 1U);
 
     esp_err_t error = loadRomFile(path);
     if (error == ESP_OK) error = initializeCore();
@@ -228,6 +226,7 @@ esp_err_t GameBoy::load(const char* path) {
 
     impl_->previous_valid = false;
     impl_->last_draw_sequence = UINT32_MAX;
+    impl_->lcd_publish_counter = 0;
     impl_->emulated_frames.store(0);
     impl_->displayed_frames.store(0);
     impl_->audio_frames_pushed.store(0);
@@ -338,6 +337,10 @@ esp_err_t GameBoy::loadRomFile(const char* path) {
     std::fclose(file);
     if (read != impl_->rom_size) return ESP_ERR_INVALID_SIZE;
 
+    if (impl_->rom_size >= 0x150U) {
+        ESP_LOGI(TAG, "Cart header: type=0x%02X romCode=0x%02X ramCode=0x%02X",
+                 impl_->rom_data[0x147], impl_->rom_data[0x148], impl_->rom_data[0x149]);
+    }
     initializeRomCache();
     return ESP_OK;
 }
@@ -458,23 +461,30 @@ esp_err_t GameBoy::initializeCore() {
             destination[x] = static_cast<uint8_t>(3U - (pixels[x] & 0x03U));
         }
         if (line == SCREEN_HEIGHT - 1) {
-            xSemaphoreTake(self->impl_->frame_mutex, portMAX_DELAY);
-            std::swap(self->impl_->frame_front, self->impl_->frame_back);
-            self->frame_sequence_.fetch_add(1);
-            xSemaphoreGive(self->impl_->frame_mutex);
+            ++self->impl_->lcd_publish_counter;
+            if (self->impl_->lcd_publish_counter >= self->config_.display_divider) {
+                self->impl_->lcd_publish_counter = 0;
+                xSemaphoreTake(self->impl_->frame_mutex, portMAX_DELAY);
+                std::swap(self->impl_->frame_front, self->impl_->frame_back);
+                self->frame_sequence_.fetch_add(1);
+                xSemaphoreGive(self->impl_->frame_mutex);
+            }
         }
     };
     gb_init_lcd(&impl_->core, lcd_line);
-    impl_->core.direct.frame_skip = config_.frame_skip_30fps;
+    impl_->core.direct.frame_skip = config_.peanut_frame_skip;
     impl_->core.direct.interlace = false;
     minigb_apu_audio_init(&impl_->apu);
 
     char title[sizeof(impl_->rom_title)]{};
     const char* result = gb_get_rom_name(&impl_->core, title);
     if (result && *result) {
-        std::strncpy(impl_->rom_title, result, sizeof(impl_->rom_title) - 1U);
+        const size_t title_length = std::min(std::strlen(result), sizeof(impl_->rom_title) - 1U);
+        std::memcpy(impl_->rom_title, result, title_length);
+        impl_->rom_title[title_length] = '\0';
     } else {
-        std::strncpy(impl_->rom_title, "GAME BOY", sizeof(impl_->rom_title) - 1U);
+        constexpr char fallback_title[] = "GAME BOY";
+        std::memcpy(impl_->rom_title, fallback_title, sizeof(fallback_title));
     }
     return ESP_OK;
 }
@@ -697,10 +707,9 @@ bool GameBoy::drawLatest(gfx::Canvas& canvas, ScaleMode mode, bool force_full) {
         y = (canvas.height() - height) / 2;
     }
 
-    canvas.draw_indexed2_scaled(
+    canvas.draw_indexed2_fast(
         x, y, SCREEN_WIDTH, SCREEN_HEIGHT, impl_->frame_render, width, height,
-        full ? nullptr : impl_->frame_previous, config_.dither, false);
-    std::memcpy(impl_->frame_previous, impl_->frame_render, FRAME_PIXELS);
+        config_.dither, false);
     impl_->previous_valid = true;
     impl_->previous_scale = mode;
     impl_->last_draw_sequence = sequence;

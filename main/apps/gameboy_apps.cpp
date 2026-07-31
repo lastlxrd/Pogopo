@@ -57,6 +57,8 @@ void GameBoyApp::onEnter(AppContext& context) {
     exit_hold_ms_ = 0;
     last_sequence_ = UINT32_MAX;
     force_draw_ = true;
+    perf_elapsed_ms_ = 0;
+    perf_previous_ = {};
     load_error_ = ESP_ERR_INVALID_ARG;
 
     context.audio.stopStream();
@@ -126,6 +128,27 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
     if (sequence != last_sequence_) {
         last_sequence_ = sequence;
         context.invalidate({0, 0, context.gfx.width(), context.gfx.height()});
+    }
+
+    perf_elapsed_ms_ += dt_ms;
+    if (perf_elapsed_ms_ >= 1000U) {
+        const gameboy::Stats now = emulator_.stats();
+        const uint32_t emu_delta = now.emulated_frames - perf_previous_.emulated_frames;
+        const uint32_t lcd_delta = now.displayed_frames - perf_previous_.displayed_frames;
+        const uint32_t hit_delta = now.cache_hits - perf_previous_.cache_hits;
+        const uint32_t miss_delta = now.cache_misses - perf_previous_.cache_misses;
+        const uint32_t drop_delta = now.audio_frames_dropped - perf_previous_.audio_frames_dropped;
+        ESP_LOGI(TAG,
+                 "PERF emu=%lu fps lcd=%lu fps frame=%lu us max=%lu us cache=%lu/%lu audioDrop=%lu",
+                 static_cast<unsigned long>(emu_delta),
+                 static_cast<unsigned long>(lcd_delta),
+                 static_cast<unsigned long>(now.last_frame_us),
+                 static_cast<unsigned long>(now.max_frame_us),
+                 static_cast<unsigned long>(hit_delta),
+                 static_cast<unsigned long>(miss_delta),
+                 static_cast<unsigned long>(drop_delta));
+        perf_previous_ = now;
+        perf_elapsed_ms_ = 0;
     }
 }
 
