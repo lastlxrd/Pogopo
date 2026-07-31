@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include "pogopo_app.h"
@@ -83,6 +85,52 @@ private:
     uint32_t stats_accumulator_ms_ = 0;
     uint32_t last_buffers_ = 0;
     uint8_t last_voices_ = 0;
+};
+
+
+class WavPlayerApp final : public Application {
+public:
+    const char* id() const override { return "wav"; }
+    const char* title() const override { return "WAV Player"; }
+    void onEnter(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
+    void rescan(AppContext& context);
+    gui::List list_{{18, 42, 364, 148}};
+    std::array<storage::FileEntry, storage::Storage::MAX_FILES> files_{};
+    std::array<gui::ListItem, storage::Storage::MAX_FILES> items_{};
+    std::array<std::array<char, 32>, storage::Storage::MAX_FILES> subtitles_{};
+    size_t file_count_ = 0;
+    char status_[64] = "READY";
+};
+
+class MotionLabApp final : public Application {
+public:
+    const char* id() const override { return "motion"; }
+    const char* title() const override { return "Motion"; }
+    void onEnter(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
+    uint32_t last_sequence_ = 0;
+    float zero_roll_ = 0;
+    float zero_pitch_ = 0;
+    imu::Sample latest_{};
+};
+
+class PowerStatusApp final : public Application {
+public:
+    const char* id() const override { return "power"; }
+    const char* title() const override { return "Power"; }
+    void onEnter(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
+    uint32_t last_sequence_ = 0;
+    power::State latest_{};
 };
 
 class AboutApp final : public Application {

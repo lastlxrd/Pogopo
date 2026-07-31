@@ -13,6 +13,9 @@ idf_component_register(
         pogopo_input
         pogopo_haptics
         pogopo_audio
+        pogopo_storage
+        pogopo_imu
+        pogopo_power
         pogopo_gui
         pogopo_app
         esp_timer

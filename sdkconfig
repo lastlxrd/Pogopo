@@ -981,6 +981,46 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Sensor Hub Options
+#
+
+#
+# Sensor Build Options
+#
+# default:
+CONFIG_SENSOR_INCLUDED_IMU=y
+# default:
+CONFIG_SENSOR_INCLUDED_HUMITURE=y
+# default:
+CONFIG_SENSOR_INCLUDED_LIGHT=y
+# end of Sensor Build Options
+
+#
+# Sensor Task Options
+#
+# default:
+CONFIG_SENSOR_TASK_PRIORITY_INHERIT=y
+# default:
+CONFIG_SENSOR_TASK_STACK_SIZE=4096
+# end of Sensor Task Options
+
+#
+# Sensor Event Loop Options
+#
+# default:
+CONFIG_SENSORS_EVENT_TASK_PRIORITY_INHERIT=y
+# default:
+CONFIG_SENSOR_EVENT_LOOP_AUTO=y
+# default:
+CONFIG_SENSORS_EVENT_QUEUE_SIZE=32
+# default:
+CONFIG_SENSORS_EVENT_STACK_SIZE=4096
+# default:
+# CONFIG_SENSOR_DEFAULT_HANDLER is not set
+# end of Sensor Event Loop Options
+# end of Sensor Hub Options
+
+#
 # Compiler options
 #
 # default:
@@ -3659,6 +3699,43 @@ CONFIG_WL_SECTOR_SIZE_4096=y
 # default:
 CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
+
+#
+# CMake Utilities
+#
+# default:
+# CONFIG_CU_RELINKER_ENABLE is not set
+# default:
+# CONFIG_CU_DIAGNOSTICS_COLOR_NEVER is not set
+# default:
+CONFIG_CU_DIAGNOSTICS_COLOR_ALWAYS=y
+# default:
+# CONFIG_CU_DIAGNOSTICS_COLOR_AUTO is not set
+# default:
+# CONFIG_CU_GCC_LTO_ENABLE is not set
+# default:
+# CONFIG_CU_GCC_STRING_1BYTE_ALIGN is not set
+# end of CMake Utilities
+
+#
+# Bus Options
+#
+
+#
+# I2C Bus Options
+#
+# default:
+CONFIG_I2C_BUS_DYNAMIC_CONFIG=y
+# default:
+CONFIG_I2C_MS_TO_WAIT=200
+# default:
+# CONFIG_I2C_BUS_BACKWARD_CONFIG is not set
+# default:
+# CONFIG_I2C_BUS_SUPPORT_SOFTWARE is not set
+# default:
+# CONFIG_I2C_BUS_REMOVE_NULL_MEM_ADDR is not set
+# end of I2C Bus Options
+# end of Bus Options
 # end of Component config
 
 # default:

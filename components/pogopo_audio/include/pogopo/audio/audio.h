@@ -68,13 +68,16 @@ public:
     bool play(Effect effect);
     bool tone(uint16_t frequency_hz, uint16_t duration_ms,
               uint8_t volume = 70, Waveform waveform = Waveform::Sine);
+    // Takes ownership of samples allocated with heap_caps_malloc()/malloc-compatible heap.
+    // Mono signed 16-bit PCM; the audio task frees it after playback or StopAll.
+    bool playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume = 80);
     void stopAll();
 
     void setMasterVolume(uint8_t percent);
     uint8_t masterVolume() const { return master_volume_.load(); }
 
     bool ok() const { return ok_.load(); }
-    bool active() const { return active_voices_.load() != 0; }
+    bool active() const { return active_voices_.load() != 0 || pcm_active_.load(); }
     uint8_t activeVoices() const { return active_voices_.load(); }
     uint32_t sampleRate() const { return config_.sample_rate; }
     Stats stats() const;
@@ -87,6 +90,7 @@ private:
     enum class CommandType : uint8_t {
         PlayEffect,
         PlayTone,
+        PlayPcm,
         StopAll,
     };
 
@@ -97,6 +101,9 @@ private:
         uint16_t frequency_hz = 0;
         uint16_t duration_ms = 0;
         uint8_t volume = 0;
+        int16_t* pcm_samples = nullptr;
+        uint32_t pcm_frames = 0;
+        uint32_t pcm_sample_rate = 0;
     };
 
     struct Note {
@@ -106,6 +113,15 @@ private:
         Waveform waveform;
         uint8_t attack_ms;
         uint8_t release_ms;
+    };
+
+    struct PcmVoice {
+        int16_t* samples = nullptr;
+        uint32_t frames = 0;
+        uint64_t position_q16 = 0;
+        uint64_t step_q16 = 0;
+        uint8_t volume = 80;
+        bool active = false;
     };
 
     struct Voice {
@@ -132,6 +148,9 @@ private:
 
     void startEffect(Effect effect);
     void startTone(const Command& command);
+    void startPcm(Command& command);
+    int32_t renderPcm();
+    void clearPcm();
     Voice& chooseVoice(bool custom, Effect effect);
     void loadCurrentNote(Voice& voice);
     void advanceVoice(Voice& voice);
@@ -154,10 +173,12 @@ private:
     std::array<Voice, MAX_VOICES> voices_{};
     uint32_t voice_serial_ = 0;
     uint32_t noise_state_ = 0xA5C31E27u;
+    PcmVoice pcm_{};
 
     std::atomic<bool> ok_{false};
     std::atomic<uint8_t> master_volume_{68};
     std::atomic<uint8_t> active_voices_{0};
+    std::atomic<bool> pcm_active_{false};
     std::atomic<uint32_t> buffers_written_{0};
     std::atomic<uint32_t> write_errors_{0};
     std::atomic<uint32_t> short_writes_{0};

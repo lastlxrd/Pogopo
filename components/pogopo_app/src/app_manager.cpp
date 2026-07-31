@@ -19,9 +19,11 @@ bool Context::launch(const char* id) { return manager.launch(id); }
 bool Context::home() { return manager.home(); }
 
 AppManager::AppManager(gfx::Graphics& graphics, input::Input& input,
-                       haptics::Haptics& haptics, audio::Audio& audio)
+                       haptics::Haptics& haptics, audio::Audio& audio,
+                       storage::Storage& storage, imu::Imu& imu, power::Power& power)
     : gfx_(graphics), input_(input), haptics_(haptics), audio_(audio),
-      context_(graphics, input, haptics, audio, theme_, *this) {}
+      storage_(storage), imu_(imu), power_(power),
+      context_(graphics, input, haptics, audio, storage, imu, power, theme_, *this) {}
 
 bool AppManager::registerApp(Application& app, bool home) {
     if (count_ >= apps_.size() || find(app.id())) return false;
