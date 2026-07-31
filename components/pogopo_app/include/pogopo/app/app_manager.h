@@ -12,7 +12,7 @@ class AppManager {
 public:
     static constexpr size_t MAX_APPS = 12;
 
-    AppManager(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics);
+    AppManager(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics, audio::Audio& audio);
 
     bool registerApp(Application& app, bool home = false);
     bool start(const char* initial_id = nullptr);
@@ -50,6 +50,7 @@ private:
     gfx::Graphics& gfx_;
     input::Input& input_;
     haptics::Haptics& haptics_;
+    audio::Audio& audio_;
     gui::Theme theme_{};
     Context context_;
 

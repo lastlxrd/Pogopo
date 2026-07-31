@@ -1,13 +1,11 @@
 idf_component_register(
     SRCS
-        "src/app_manager.cpp"
+        "src/audio.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        pogopo_graphics
-        pogopo_input
-        pogopo_haptics
-        pogopo_audio
-        pogopo_gui
+        esp_driver_i2s
+        esp_timer
+        freertos
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

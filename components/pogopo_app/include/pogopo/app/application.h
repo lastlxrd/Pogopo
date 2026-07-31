@@ -5,6 +5,7 @@
 #include "pogopo/gfx/gfx.h"
 #include "pogopo_input.h"
 #include "pogopo_haptics.h"
+#include "pogopo_audio.h"
 #include "pogopo_gui.h"
 
 namespace pogopo::app {
@@ -14,8 +15,9 @@ class AppManager;
 class Context {
 public:
     Context(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics,
-            gui::Theme& theme, AppManager& manager)
-        : gfx(graphics), input(input), haptics(haptics), theme(theme), manager(manager) {}
+            audio::Audio& audio, gui::Theme& theme, AppManager& manager)
+        : gfx(graphics), input(input), haptics(haptics), audio(audio),
+          theme(theme), manager(manager) {}
 
     void invalidate();
     void invalidate(const gfx::Rect& region);
@@ -25,6 +27,7 @@ public:
     gfx::Graphics& gfx;
     input::Input& input;
     haptics::Haptics& haptics;
+    audio::Audio& audio;
     gui::Theme& theme;
     AppManager& manager;
 };

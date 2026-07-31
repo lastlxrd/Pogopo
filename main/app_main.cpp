@@ -10,6 +10,7 @@
 #include "pogopo/gfx/gfx.h"
 #include "pogopo_input.h"
 #include "pogopo_haptics.h"
+#include "pogopo_audio.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -26,12 +27,14 @@ static const char* TAG = "app";
 static pogopo::Graphics g_gfx;
 static pogopo::Input g_input;
 static pogopo::Haptics g_haptics;
-static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics);
+static pogopo::Audio g_audio;
+static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio);
 
 static pogopo::demo::LauncherApp g_launcher_app;
 static pogopo::demo::GraphicsDemoApp g_graphics_app;
 static pogopo::demo::InputMonitorApp g_input_app;
 static pogopo::demo::HapticsLabApp g_haptics_app;
+static pogopo::demo::AudioLabApp g_audio_app;
 static pogopo::demo::AboutApp g_about_app;
 
 namespace {
@@ -60,6 +63,22 @@ esp_err_t start_haptics() {
     return g_haptics.begin(config);
 }
 
+
+esp_err_t start_audio() {
+    pogopo::Audio::Config config;
+    config.dout_io = board::AUDIO_DOUT;
+    config.bclk_io = board::AUDIO_BCLK;
+    config.lrck_io = board::AUDIO_LRCK;
+    config.sample_rate = 32768;
+    config.master_volume = 68;
+    config.dma_desc_num = 6;
+    config.dma_frame_num = 256;
+    config.render_frames = 256;
+    config.task_priority = 6;
+    config.task_core = 0;
+    return g_audio.begin(config);
+}
+
 esp_err_t start_input() {
     pogopo::Input::Config config;
     config.bus = i2c_bus_handle();
@@ -84,9 +103,11 @@ void os_task(void*) {
     g_app_manager.registerApp(g_graphics_app);
     g_app_manager.registerApp(g_input_app);
     g_app_manager.registerApp(g_haptics_app);
+    g_app_manager.registerApp(g_audio_app);
     g_app_manager.registerApp(g_about_app);
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
+    g_audio.play(pogopo::AudioEffect::Startup);
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -114,7 +135,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GUI + APPLICATIONS STEP5");
+    ESP_LOGI(TAG, "pogopoOS2.0 AUDIO ENGINE STEP6");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -125,6 +146,7 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(start_graphics());
     ESP_ERROR_CHECK(start_haptics());
+    ESP_ERROR_CHECK(start_audio());
     ESP_ERROR_CHECK(start_input());
 
     if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 1) != pdPASS) {
@@ -132,5 +154,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP5 ready: GUI widgets + launcher + apps + system overlay");
+    ESP_LOGI(TAG, "STEP6 ready: native I2S audio mixer + GUI audio lab + louder haptics");
 }

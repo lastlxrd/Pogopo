@@ -9,6 +9,7 @@ namespace {
 constexpr gui::ListItem kLauncherItems[] = {
     {"Graphics demo", "Sprites + partial redraw", "graphics", true},
     {"Input monitor", "Buttons and event state", "input", true},
+    {"Audio lab", "I2S mixer + generated sounds", "audio", true},
     {"Haptics lab", "Play vibration patterns", "haptics", true},
     {"About Pogopo", "Framework information", "about", true},
 };
@@ -20,6 +21,20 @@ constexpr gui::ListItem kHapticItems[] = {
     {"Confirm", "Positive confirmation", "confirm", true},
     {"Alert", "Attention pattern", "alert", true},
     {"Heavy", "Strong combo effect", "heavy", true},
+};
+
+
+constexpr gui::ListItem kAudioItems[] = {
+    {"UI tick", "Short navigation sound", "tick", true},
+    {"Click", "Normal action sound", "click", true},
+    {"Confirm", "Two-note confirmation", "confirm", true},
+    {"Back", "Descending back sound", "back", true},
+    {"Error", "Low warning pattern", "error", true},
+    {"Startup", "Three-note boot melody", "startup", true},
+    {"Coin", "Arcade-style effect", "coin", true},
+    {"440 Hz sine", "Raw tone generator", "sine440", true},
+    {"880 Hz square", "Raw tone generator", "square880", true},
+    {"Noise burst", "Mixer noise voice", "noise", true},
 };
 
 constexpr uint8_t kSmileData[] = {
@@ -62,14 +77,17 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         const gui::ListItem* item = list_.selectedItem();
         if (item && item->id) {
             context.haptics.play(haptics::Effect::Confirm);
+            context.audio.play(audio::Effect::Confirm);
             context.launch(item->id);
         }
     }
@@ -78,7 +96,7 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
     canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP5");
+    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP6");
     list_.draw(canvas, context.theme);
     gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
 }
@@ -97,10 +115,12 @@ void GraphicsDemoApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type != input::EventType::Pressed) return;
     if (event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
+        context.audio.play(audio::Effect::Back);
         context.home();
     } else if (event.button == input::Button::A) {
         paused_ = !paused_;
         context.haptics.play(paused_ ? haptics::Effect::DoubleClick : haptics::Effect::Confirm);
+        context.audio.play(paused_ ? audio::Effect::Click : audio::Effect::Confirm);
         context.invalidate({12, 27, 376, 196});
     }
 }
@@ -163,6 +183,7 @@ void InputMonitorApp::onEnter(AppContext& context) {
 void InputMonitorApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
+        context.audio.play(audio::Effect::Back);
         context.home();
     }
 }
@@ -216,12 +237,15 @@ void HapticsLabApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
         context.invalidate(list_.bounds());
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
+        context.audio.play(audio::Effect::Back);
         context.home();
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         const size_t selected = list_.selected();
@@ -231,6 +255,7 @@ void HapticsLabApp::onEvent(AppContext& context, const input::Event& event) {
         };
         if (selected < sizeof(effects) / sizeof(effects[0])) {
             context.haptics.play(effects[selected]);
+            context.audio.play(audio::Effect::Click);
             last_effect_ = haptics::effect_name(effects[selected]);
             context.invalidate({20, 198, 360, 20});
         }
@@ -249,6 +274,116 @@ void HapticsLabApp::draw(AppContext& context, const gfx::Rect&) {
     draw_back_footer(context, "A PLAY");
 }
 
+
+AudioLabApp::AudioLabApp() {
+    list_.setItems(kAudioItems, sizeof(kAudioItems) / sizeof(kAudioItems[0]));
+    list_.setRowHeight(24);
+}
+
+void AudioLabApp::onEnter(AppContext& context) {
+    last_sound_ = "READY";
+    stats_accumulator_ms_ = 0;
+    const auto stats = context.audio.stats();
+    last_buffers_ = stats.buffers_written;
+    last_voices_ = stats.active_voices;
+    context.invalidate();
+}
+
+void AudioLabApp::onEvent(AppContext& context, const input::Event& event) {
+    if (!nav_event(event)) return;
+
+    if (event.button == input::Button::Top && list_.move(-1)) {
+        context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
+        context.invalidate(list_.bounds());
+    } else if (event.button == input::Button::Down && list_.move(1)) {
+        context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Tick);
+        context.invalidate(list_.bounds());
+    } else if (event.button == input::Button::Left || event.button == input::Button::Right) {
+        const int delta = event.button == input::Button::Right ? 5 : -5;
+        const int volume = std::clamp<int>(static_cast<int>(context.audio.masterVolume()) + delta, 0, 100);
+        context.audio.setMasterVolume(static_cast<uint8_t>(volume));
+        context.haptics.play(haptics::Effect::Tick);
+        context.audio.play(audio::Effect::Click);
+        context.invalidate({20, 176, 360, 39});
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
+        context.haptics.play(haptics::Effect::Click);
+        context.audio.play(audio::Effect::Back);
+        context.home();
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
+        context.haptics.play(haptics::Effect::Confirm);
+        context.audio.play(audio::Effect::Startup);
+        last_sound_ = "STARTUP";
+        context.invalidate({20, 197, 360, 18});
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
+        const size_t selected = list_.selected();
+        static constexpr audio::Effect effects[] = {
+            audio::Effect::Tick,
+            audio::Effect::Click,
+            audio::Effect::Confirm,
+            audio::Effect::Back,
+            audio::Effect::Error,
+            audio::Effect::Startup,
+            audio::Effect::Coin,
+        };
+
+        bool queued = false;
+        if (selected < sizeof(effects) / sizeof(effects[0])) {
+            queued = context.audio.play(effects[selected]);
+            last_sound_ = audio::effect_name(effects[selected]);
+        } else if (selected == 7) {
+            queued = context.audio.tone(440, 450, 72, audio::Waveform::Sine);
+            last_sound_ = "440 SINE";
+        } else if (selected == 8) {
+            queued = context.audio.tone(880, 260, 62, audio::Waveform::Square);
+            last_sound_ = "880 SQUARE";
+        } else if (selected == 9) {
+            queued = context.audio.tone(1000, 300, 48, audio::Waveform::Noise);
+            last_sound_ = "NOISE";
+        }
+
+        context.haptics.play(queued ? haptics::Effect::Click : haptics::Effect::Alert);
+        if (!queued) last_sound_ = "QUEUE FULL";
+        context.invalidate({20, 197, 360, 18});
+    }
+}
+
+void AudioLabApp::update(AppContext& context, uint32_t dt_ms) {
+    stats_accumulator_ms_ += dt_ms;
+    if (stats_accumulator_ms_ < 100) return;
+    stats_accumulator_ms_ = 0;
+
+    const auto stats = context.audio.stats();
+    if (stats.buffers_written != last_buffers_ || stats.active_voices != last_voices_) {
+        last_buffers_ = stats.buffers_written;
+        last_voices_ = stats.active_voices;
+        context.invalidate({20, 197, 360, 18});
+    }
+}
+
+void AudioLabApp::draw(AppContext& context, const gfx::Rect&) {
+    auto& canvas = context.gfx.canvas();
+    canvas.clear_clip(context.theme.background);
+    gui::draw_header(canvas, context.theme, "AUDIO LAB", context.audio.ok() ? "I2S 32768" : "ERROR");
+    list_.draw(canvas, context.theme);
+
+    gui::ProgressBar volume({22, 179, 356, 14});
+    volume.setRange(0, 100);
+    volume.setValue(context.audio.masterVolume());
+    volume.draw(canvas, context.theme);
+
+    const auto stats = context.audio.stats();
+    char status[96];
+    std::snprintf(status, sizeof(status), "VOL %u%%  %s  V%u E%u D%u",
+                  static_cast<unsigned>(context.audio.masterVolume()), last_sound_,
+                  static_cast<unsigned>(stats.active_voices),
+                  static_cast<unsigned>(stats.write_errors),
+                  static_cast<unsigned>(stats.dropped_commands));
+    canvas.draw_text(24, 199, status, gfx::font5x7(), context.theme.foreground);
+    gui::draw_footer(canvas, context.theme, "A PLAY  L/R VOL  B BACK", "START SONG");
+}
+
 void AboutApp::onEnter(AppContext& context) {
     context.invalidate();
 }
@@ -256,6 +391,7 @@ void AboutApp::onEnter(AppContext& context) {
 void AboutApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
+        context.audio.play(audio::Effect::Back);
         context.home();
     }
 }
@@ -269,9 +405,9 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
     panel.draw(canvas, context.theme);
     canvas.draw_text(35, 56, "pogopoOS 2.0", gfx::font5x7(), context.theme.foreground, 2);
     gui::draw_wrapped_text(canvas, {35, 88, 330, 92},
-        "Native ESP-IDF platform with pogopo::gfx, GUI widgets, input events, haptics and an application manager.",
+        "Native ESP-IDF platform with pogopo::gfx, GUI widgets, input events, haptics, a non-blocking I2S mixer and an application manager.",
         context.theme, 1, 3);
-    canvas.draw_text(35, 183, "Sharp 400x240 / ESP32-S3 / STEP5", gfx::font5x7(), context.theme.foreground);
+    canvas.draw_text(35, 183, "Sharp 400x240 / ESP32-S3 / STEP6", gfx::font5x7(), context.theme.foreground);
     draw_back_footer(context);
 }
 

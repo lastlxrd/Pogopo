@@ -119,32 +119,32 @@ void Haptics::task_loop() {
 void Haptics::run_effect(Effect effect) {
     switch (effect) {
         case Effect::Tick: {
-            const Segment sequence[] = {{true, 18}};
+            const Segment sequence[] = {{true, 24}};
             run_segments(sequence, 1);
             break;
         }
         case Effect::Click: {
-            const Segment sequence[] = {{true, 42}};
+            const Segment sequence[] = {{true, 45}};
             run_segments(sequence, 1);
             break;
         }
         case Effect::DoubleClick: {
-            const Segment sequence[] = {{true, 34}, {false, 48}, {true, 34}};
+            const Segment sequence[] = {{true, 36}, {false, 48}, {true, 36}};
             run_segments(sequence, 3);
             break;
         }
         case Effect::Confirm: {
-            const Segment sequence[] = {{true, 28}, {false, 35}, {true, 72}};
+            const Segment sequence[] = {{true, 30}, {false, 35}, {true, 76}};
             run_segments(sequence, 3);
             break;
         }
         case Effect::Alert: {
-            const Segment sequence[] = {{true, 105}, {false, 65}, {true, 105}};
+            const Segment sequence[] = {{true, 110}, {false, 65}, {true, 110}};
             run_segments(sequence, 3);
             break;
         }
         case Effect::Heavy: {
-            const Segment sequence[] = {{true, 165}};
+            const Segment sequence[] = {{true, 174}};
             run_segments(sequence, 1);
             break;
         }
