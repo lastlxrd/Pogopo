@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "apps/demo_apps.cpp"
         "i2c_bus.cpp"
         "peripheral_tests.cpp"
         "tasks.cpp"
@@ -11,6 +12,9 @@ idf_component_register(
         pogopo_graphics
         pogopo_input
         pogopo_haptics
+        pogopo_gui
+        pogopo_app
+        esp_timer
         esp_system
         spi_flash
 )

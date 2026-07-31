@@ -1,34 +1,35 @@
-# pogopoOS2.0 STEP4 — Input + Haptics
+# pogopoOS2.0 STEP5 — GUI + Application Framework
 
-This build keeps the working `pogopo::gfx` previous commit engine and adds two native
+STEP5 keeps the proven previous commit graphics/input/haptics stack and adds two native
 ESP-IDF components:
 
-- `pogopo_input`: persistent TCA9555 device, active-low buttons, 4 ms polling,
-  GPIO21 interrupt wake-up, per-button debounce, held/pressed/released,
-  repeat, long-press and a FreeRTOS event queue.
-- `pogopo_haptics`: asynchronous GPIO3 vibration motor task with queued effects.
+- `pogopo_gui`: Theme, Widget, Label, Panel, ProgressBar, List, Dialog, header,
+  footer and wrapped-text helpers.
+- `pogopo_app`: Application lifecycle, AppContext, AppManager, dirty-region
+  invalidation, launcher switching and a modal system menu.
 
-## Test controls
+## Demo applications
 
-- D-pad: move the sprite.
-- A: click vibration.
-- B: double-click vibration.
-- Start: center the sprite + confirm pattern.
-- Hold Menu for 700 ms: alert pattern.
-- A+B together: heavy pattern.
+- **Launcher** — move with Top/Down, open with A.
+- **Graphics demo** — animated sprite and progress bar; A pauses, B returns.
+- **Input monitor** — live button state, raw TCA9555 value and counters.
+- **Haptics lab** — select and play every vibration pattern.
+- **About** — framework information.
 
-The screen shows held/raw masks, the last event, input queue/error counters,
-vibration state, FPS and Sharp dirty-row transfer statistics.
+Press **Menu** in any application to open the system overlay. Use Top/Down and A,
+or close it with B/Menu.
 
-## Button mapping
+## Components
 
-- P8 Top
-- P9 Down
-- P10 Left
-- P11 Right
-- P12 B
-- P13 A
-- P14 Menu
-- P15 Start
+```text
+components/
+  pogopo_graphics/
+  pogopo_input/
+  pogopo_haptics/
+  pogopo_gui/
+  pogopo_app/
+```
 
-All buttons are active LOW. The vibration motor is active HIGH on GPIO3.
+The main task runs on core 1. Input, VCOM and haptics stay asynchronous on core 0.
+The GUI only refreshes when an application invalidates a region, so idle screens
+produce no unnecessary display traffic.

@@ -1,0 +1,45 @@
+#pragma once
+
+#include <cstdint>
+
+#include "pogopo/gfx/gfx.h"
+#include "pogopo_input.h"
+#include "pogopo_haptics.h"
+#include "pogopo_gui.h"
+
+namespace pogopo::app {
+
+class AppManager;
+
+class Context {
+public:
+    Context(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics,
+            gui::Theme& theme, AppManager& manager)
+        : gfx(graphics), input(input), haptics(haptics), theme(theme), manager(manager) {}
+
+    void invalidate();
+    void invalidate(const gfx::Rect& region);
+    bool launch(const char* id);
+    bool home();
+
+    gfx::Graphics& gfx;
+    input::Input& input;
+    haptics::Haptics& haptics;
+    gui::Theme& theme;
+    AppManager& manager;
+};
+
+class Application {
+public:
+    virtual ~Application() = default;
+    virtual const char* id() const = 0;
+    virtual const char* title() const = 0;
+
+    virtual void onEnter(Context&) {}
+    virtual void onExit(Context&) {}
+    virtual void onEvent(Context&, const input::Event&) {}
+    virtual void update(Context&, uint32_t /*dt_ms*/) {}
+    virtual void draw(Context&, const gfx::Rect& dirty_region) = 0;
+};
+
+} // namespace pogopo::app
