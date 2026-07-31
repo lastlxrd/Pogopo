@@ -1,0 +1,25 @@
+# ESP-IDF build output
+build/
+
+# ESP-IDF generated/temporary configuration
+sdkconfig.old
+
+# Managed components downloaded by ESP-IDF
+managed_components/
+
+# VS Code local settings
+.vscode/
+*.code-workspace
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Windows junk
+Thumbs.db
+.DS_Store
