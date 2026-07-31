@@ -63,13 +63,15 @@ esp_err_t Audio::begin(const Config& config) {
     initSineTable();
 
     realtime_capacity_frames_ = config_.realtime_buffer_frames;
+    // Emulator audio is touched continuously by two cores. Keep its compact
+    // ring in internal RAM first; PSRAM is only a fallback.
     realtime_buffer_ = static_cast<int16_t*>(heap_caps_malloc(
         static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!realtime_buffer_) {
         realtime_buffer_ = static_cast<int16_t*>(heap_caps_malloc(
             static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t),
-            MALLOC_CAP_8BIT));
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     }
     if (!realtime_buffer_) {
         return ESP_ERR_NO_MEM;
@@ -337,19 +339,22 @@ size_t Audio::pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frame
     const uint32_t free_frames = used < realtime_capacity_frames_
         ? realtime_capacity_frames_ - used
         : 0;
-    const size_t accepted = std::min<size_t>(frames, free_frames);
-    if (accepted < frames) {
-        realtime_overruns_.fetch_add(static_cast<uint32_t>(frames - accepted));
+    // Never write half of a Game Boy frame packet. A partial packet creates a
+    // discontinuity in the middle of the stream and is heard as a sharp crack.
+    // Like the stable Arduino queue, drop the complete newest packet instead.
+    if (frames > free_frames) {
+        realtime_overruns_.fetch_add(static_cast<uint32_t>(frames));
+        return 0;
     }
 
-    for (size_t i = 0; i < accepted; ++i) {
+    for (size_t i = 0; i < frames; ++i) {
         const uint32_t slot = (write + static_cast<uint32_t>(i)) % realtime_capacity_frames_;
         realtime_buffer_[slot * 2U] = interleaved_stereo[i * 2U];
         realtime_buffer_[slot * 2U + 1U] = interleaved_stereo[i * 2U + 1U];
     }
-    realtime_write_total_.store(write + static_cast<uint32_t>(accepted),
+    realtime_write_total_.store(write + static_cast<uint32_t>(frames),
                                 std::memory_order_release);
-    return accepted;
+    return frames;
 }
 
 RealtimeInfo Audio::realtimeInfo() const {
@@ -515,24 +520,42 @@ void Audio::task_loop() {
     while (true) {
         processCommands();
 
-        for (size_t frame = 0; frame < config_.render_frames; ++frame) {
-            int32_t mono = 0;
-            for (auto& voice : voices_) {
-                mono += renderVoice(voice);
+        const bool realtime_exclusive = realtime_active_.load(std::memory_order_acquire);
+        if (realtime_exclusive) {
+            // Game Boy owns the audio path. Do not spend 32768 iterations/s on
+            // four synth voices, WAV streaming and the generic mixer.
+            silenceVoices();
+            clearPcm();
+            active_voices_.store(0);
+            for (size_t frame = 0; frame < config_.render_frames; ++frame) {
+                int32_t left = 0;
+                int32_t right = 0;
+                renderRealtime(left, right);
+                output[frame * 2U] = static_cast<int16_t>(
+                    std::clamp<int32_t>(left, -32767, 32767));
+                output[frame * 2U + 1U] = static_cast<int16_t>(
+                    std::clamp<int32_t>(right, -32767, 32767));
             }
-            mono += renderPcm();
-            mono += renderStream();
+        } else {
+            for (size_t frame = 0; frame < config_.render_frames; ++frame) {
+                int32_t mono = 0;
+                for (auto& voice : voices_) {
+                    mono += renderVoice(voice);
+                }
+                mono += renderPcm();
+                mono += renderStream();
 
-            int32_t realtime_left = 0;
-            int32_t realtime_right = 0;
-            renderRealtime(realtime_left, realtime_right);
+                int32_t realtime_left = 0;
+                int32_t realtime_right = 0;
+                renderRealtime(realtime_left, realtime_right);
 
-            const int32_t left = std::clamp<int32_t>(mono + realtime_left, -32767, 32767);
-            const int32_t right = std::clamp<int32_t>(mono + realtime_right, -32767, 32767);
-            output[frame * 2U] = static_cast<int16_t>(left);
-            output[frame * 2U + 1U] = static_cast<int16_t>(right);
+                const int32_t left = std::clamp<int32_t>(mono + realtime_left, -32767, 32767);
+                const int32_t right = std::clamp<int32_t>(mono + realtime_right, -32767, 32767);
+                output[frame * 2U] = static_cast<int16_t>(left);
+                output[frame * 2U + 1U] = static_cast<int16_t>(right);
+            }
+            updateActiveVoiceCount();
         }
-        updateActiveVoiceCount();
 
         const size_t requested_bytes =
             static_cast<size_t>(config_.render_frames) * 2U * sizeof(int16_t);
@@ -816,11 +839,24 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
 
     realtime_underrun_latched_ = false;
     const uint32_t first_slot = read % realtime_capacity_frames_;
+    const int32_t scale = static_cast<int32_t>(realtime_volume_.load()) *
+                          static_cast<int32_t>(master_volume_.load());
+
+    // The Game Boy path is 32768 -> 32768. Avoid interpolation, a second ring
+    // read and 64-bit blend math for every output sample.
+    if (realtime_step_q16_ == (1U << 16U)) {
+        const int32_t raw_left = realtime_buffer_[first_slot * 2U];
+        const int32_t raw_right = realtime_buffer_[first_slot * 2U + 1U];
+        left = static_cast<int32_t>((static_cast<int64_t>(raw_left) * scale) / 10000LL);
+        right = static_cast<int32_t>((static_cast<int64_t>(raw_right) * scale) / 10000LL);
+        realtime_read_total_.store(read + 1U, std::memory_order_release);
+        return;
+    }
+
     const uint32_t second_slot = available > 1U
         ? (read + 1U) % realtime_capacity_frames_
         : first_slot;
     const uint32_t fraction = realtime_fraction_q16_;
-
     const int32_t first_left = realtime_buffer_[first_slot * 2U];
     const int32_t first_right = realtime_buffer_[first_slot * 2U + 1U];
     const int32_t second_left = realtime_buffer_[second_slot * 2U];
@@ -831,9 +867,6 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
     const int32_t raw_right = static_cast<int32_t>(
         (static_cast<int64_t>(first_right) * (65536U - fraction) +
          static_cast<int64_t>(second_right) * fraction) >> 16U);
-
-    const int32_t scale = static_cast<int32_t>(realtime_volume_.load()) *
-                          static_cast<int32_t>(master_volume_.load());
     left = static_cast<int32_t>((static_cast<int64_t>(raw_left) * scale) / 10000LL);
     right = static_cast<int32_t>((static_cast<int64_t>(raw_right) * scale) / 10000LL);
 

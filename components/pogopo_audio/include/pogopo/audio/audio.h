@@ -84,14 +84,14 @@ public:
         uint32_t sample_rate = 32768;
         uint8_t master_volume = 68;
         uint8_t queue_depth = 16;
-        uint8_t dma_desc_num = 6;
-        uint16_t dma_frame_num = 256;
-        uint16_t render_frames = 256;
-        uint32_t task_stack = 6144;
-        UBaseType_t task_priority = 6;
+        uint8_t dma_desc_num = 8;
+        uint16_t dma_frame_num = 512;
+        uint16_t render_frames = 512;
+        uint32_t task_stack = 8192;
+        UBaseType_t task_priority = 8;
         BaseType_t task_core = 0;
 
-        uint32_t realtime_buffer_frames = 8192;
+        uint32_t realtime_buffer_frames = 4096;
 
         uint32_t stream_buffer_frames = 32768;
         uint16_t stream_prefill_ms = 120;
@@ -118,8 +118,8 @@ public:
     void stopAll();
 
     // Low-latency stereo PCM ring used by emulators. The producer may run on
-    // another core; the I2S task resamples it to the hardware rate and mixes
-    // it with UI effects and WAV streaming.
+    // another core. When active it gets an exclusive fast path in the I2S task;
+    // at 32768 Hz no interpolation or UI/WAV mixing runs in the hot loop.
     esp_err_t startRealtimeStereo(uint32_t sample_rate = 32768, uint8_t volume = 72);
     void stopRealtime();
     size_t pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames);

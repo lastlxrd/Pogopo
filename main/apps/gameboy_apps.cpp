@@ -138,14 +138,21 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
         const uint32_t hit_delta = now.cache_hits - perf_previous_.cache_hits;
         const uint32_t miss_delta = now.cache_misses - perf_previous_.cache_misses;
         const uint32_t drop_delta = now.audio_frames_dropped - perf_previous_.audio_frames_dropped;
+        const audio::RealtimeInfo realtime = context.audio.realtimeInfo();
         ESP_LOGI(TAG,
-                 "PERF emu=%lu fps lcd=%lu fps frame=%lu us max=%lu us cache=%lu/%lu audioDrop=%lu",
+                 "PERF emu=%lu lcd=%lu frame=%luus max=%luus ROM=%s cache=%lu/%lu "
+                 "audio=%lu/%lu under=%lu over=%lu drop=%lu",
                  static_cast<unsigned long>(emu_delta),
                  static_cast<unsigned long>(lcd_delta),
                  static_cast<unsigned long>(now.last_frame_us),
                  static_cast<unsigned long>(now.max_frame_us),
+                 now.rom_in_psram ? "PSRAM" : "INT",
                  static_cast<unsigned long>(hit_delta),
                  static_cast<unsigned long>(miss_delta),
+                 static_cast<unsigned long>(realtime.buffered_frames),
+                 static_cast<unsigned long>(realtime.capacity_frames),
+                 static_cast<unsigned long>(realtime.underruns),
+                 static_cast<unsigned long>(realtime.overruns),
                  static_cast<unsigned long>(drop_delta));
         perf_previous_ = now;
         perf_elapsed_ms_ = 0;

@@ -90,17 +90,31 @@ esp_err_t start_audio() {
     config.lrck_io = board::AUDIO_LRCK;
     config.sample_rate = 32768;
     config.master_volume = g_settings.volume();
-    config.dma_desc_num = 6;
-    config.dma_frame_num = 256;
-    config.render_frames = 256;
-    config.realtime_buffer_frames = 8192;
-    config.task_priority = 6;
+    config.dma_desc_num = 8;
+    config.dma_frame_num = 512;
+    config.render_frames = 512;
+    config.realtime_buffer_frames = 4096;
+    config.task_priority = 8;
+    config.task_stack = 8192;
     config.task_core = 0;
     const esp_err_t err = g_audio.begin(config);
     if (err == ESP_OK) g_audio.setEnabled(g_settings.audioEnabled());
     return err;
 }
 
+
+esp_err_t start_gameboy() {
+    pogopo::GameBoy::Config config;
+    config.internal_rom_limit = 512U * 1024U;
+    config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
+    config.requested_cache_pages = 4;
+    config.display_divider = 1;
+    config.dither = false;
+    config.task_priority = 6;
+    config.task_core = 1;
+    config.task_stack = 8192;
+    return g_gameboy.begin(g_audio, config);
+}
 
 esp_err_t start_storage() {
     pogopo::Storage::Config config;
@@ -115,7 +129,7 @@ esp_err_t start_imu() {
     pogopo::Imu::Config config;
     config.bus = i2c_bus_handle(); config.address = 0x68;
     config.interrupt_io = board::IMU_INT; config.sample_period_ms = 20;
-    config.task_core = 0;
+    config.task_core = 1;
     return g_imu.begin(config);
 }
 
@@ -182,8 +196,8 @@ esp_err_t start_input() {
     config.repeat_delay_ms = 450;
     config.repeat_period_ms = 100;
     config.long_press_ms = 700;
-    config.task_priority = 5;
-    config.task_core = 0;
+    config.task_priority = 7;
+    config.task_core = 1;
     return g_input.begin(config);
 }
 
@@ -250,7 +264,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.1");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.2 AUDIO/CORE RESTORE");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -263,7 +277,7 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(start_graphics());
     ESP_ERROR_CHECK(start_haptics());
     ESP_ERROR_CHECK(start_audio());
-    ESP_ERROR_CHECK(g_gameboy.begin(g_audio));
+    ESP_ERROR_CHECK(start_gameboy());
     ESP_ERROR_CHECK(start_input());
 
     const esp_err_t sd_err = start_storage();
@@ -272,11 +286,12 @@ extern "C" void app_main(void) {
     if (imu_err != ESP_OK) ESP_LOGW(TAG, "BMI270 unavailable: %s", esp_err_to_name(imu_err));
     ESP_ERROR_CHECK(start_power());
 
-    // Keep Core 1 dedicated to the Game Boy CPU/APU task while a ROM is running.
-    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 0) != pdPASS) {
+    // Stable pogopoOS1.0 split: Core 1 runs high-priority input + emulator;
+    // Core 0 runs high-priority I2S and low-priority GUI/Sharp presentation.
+    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.1 ready: dedicated GB core + packed Sharp renderer + realtime stereo audio");
+    ESP_LOGI(TAG, "STEP9.2 ready: Core1 input/GB, Core0 priority-8 I2S + priority-1 display");
 }

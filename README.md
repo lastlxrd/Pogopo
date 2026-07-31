@@ -1,14 +1,36 @@
-# STEP9.1 Game Boy performance / compatibility patch
+# STEP9.2 — Game Boy audio/core restore
 
-Changes:
-- Core 1 is dedicated to Peanut-GB; OS/render/IMU/power run on Core 0.
-- Peanut-GB frame skip disabled for compatibility (notably games that stalled visually).
-- Frontend publishes every second LCD frame, keeping a 30 FPS display target.
-- Game Boy frame buffers prefer internal RAM instead of PSRAM.
-- New row-packed Sharp renderer avoids per-pixel drawing calls.
-- 1X FAST is now the default because the 2 MHz Sharp link can sustain it near 30 FPS.
-- FIT 240 remains available but is physically limited to roughly 20 FPS by full-frame SPI traffic.
-- Serial monitor prints separate EMU FPS and LCD FPS once per second.
+This patch ports the scheduling and audio rhythm from the last stable Arduino pogopoOS1.0 build into ESP-IDF.
 
-Expected serial line:
-`PERF emu=59 fps lcd=29 fps frame=... cache=... audioDrop=0`
+## Stable core split restored
+
+- Core 1 priority 7: TCA9555 input
+- Core 1 priority 6: Peanut-GB CPU + MiniGB APU producer
+- Core 0 priority 8: I2S audio output
+- Core 0 priority 1: GUI + Sharp presentation
+
+## Audio path
+
+- Exact 32768 Hz source and hardware rate
+- Exact 16724 us Game Boy frame pacing
+- 8 x 512 I2S DMA configuration
+- 4096-frame internal-RAM stereo ring
+- Four silent packets prefilled at launch
+- Game Boy realtime audio gets an exclusive mixer fast path
+- No resampling at 32768 -> 32768
+- Whole frame packets are accepted or dropped; partial packets are forbidden
+
+## Emulator hot-path fixes
+
+- Display publish divider removed (every emulated frame may be presented)
+- Binary 1-bit shade conversion like pogopoOS1.0
+- Render scratch buffer moved to PSRAM first
+- Internal ROM allocation attempted up to 512 KiB
+- PSRAM ROM cache defaults to 4 x 16 KiB in internal RAM
+- Octal PSRAM speed raised from 40 MHz to 80 MHz for large cartridges
+- Cache statistics no longer perform atomics on every ROM byte
+- Automatic save writes during gameplay disabled; saves flush on exit/power-off
+
+## Serial diagnostic
+
+`PERF emu=... lcd=... frame=... ROM=INT/PSRAM cache=... audio=buffer/cap under=... over=... drop=...`

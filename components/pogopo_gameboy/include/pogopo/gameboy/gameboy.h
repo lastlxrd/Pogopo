@@ -51,16 +51,16 @@ public:
     static constexpr size_t FRAME_PIXELS = SCREEN_WIDTH * SCREEN_HEIGHT;
 
     struct Config {
-        uint32_t internal_rom_limit = 128U * 1024U;
-        uint32_t save_flush_interval_ms = 15000;
+        uint32_t internal_rom_limit = 512U * 1024U;
+        uint32_t save_flush_interval_ms = 0;
         uint8_t realtime_volume = 74;
-        uint8_t requested_cache_pages = 8;
+        uint8_t requested_cache_pages = 4;
         // Keep Peanut-GB LCD rendering enabled every emulated frame for
         // compatibility. The frontend publishes only every Nth frame.
         bool peanut_frame_skip = false;
-        uint8_t display_divider = 2;
-        bool dither = true;
-        UBaseType_t task_priority = 5;
+        uint8_t display_divider = 1;
+        bool dither = false;
+        UBaseType_t task_priority = 6;
         BaseType_t task_core = 1;
         uint32_t task_stack = 8192;
     };

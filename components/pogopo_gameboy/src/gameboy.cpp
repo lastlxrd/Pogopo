@@ -27,15 +27,15 @@ namespace {
 constexpr char TAG[] = "pogopo_gb";
 constexpr uint32_t ROM_CACHE_PAGE_SIZE = 16U * 1024U;
 constexpr uint8_t MAX_CACHE_PAGES = 8;
-constexpr int64_t FRAME_PERIOD_US = 16743; // 59.7275 Hz DMG, rounded to microseconds.
+// Keep the exact frame/audio rhythm used by the last stable Arduino build:
+// 548 stereo frames at 32768 Hz = 16.7236 ms.
+constexpr int64_t FRAME_PERIOD_US = 16724;
 constexpr uint32_t MAX_SAVE_BYTES = 128U * 1024U;
-// MiniGB emits AUDIO_SAMPLES once per 59.7275 Hz DMG frame. That producer
-// clock is ~32730.7 stereo frames/s, slightly below the nominal 32768 Hz APU
-// compile-time rate. Feeding the real producer rate to pogopo_audio prevents
-// a periodic underrun without changing the hardware I2S rate.
-constexpr uint32_t GB_AUDIO_SOURCE_RATE = 32730;
+// MiniGB APU and MAX98357A both run at the same exact rate. No resampler is
+// used in Game Boy mode; this mirrors the stable pogopoOS1.0 audio path.
+constexpr uint32_t GB_AUDIO_SOURCE_RATE = 32768;
 
-std::atomic<pogopo::gameboy::GameBoy*> g_active_gameboy{nullptr};
+pogopo::gameboy::GameBoy* g_active_gameboy = nullptr;
 
 uint8_t* allocate_bytes(size_t size, uint32_t preferred_caps, uint32_t fallback_caps) {
     auto* memory = static_cast<uint8_t*>(heap_caps_malloc(size, preferred_caps));
@@ -48,12 +48,12 @@ uint8_t* allocate_bytes(size_t size, uint32_t preferred_caps, uint32_t fallback_
 } // namespace
 
 extern "C" uint8_t audio_read(uint16_t address) {
-    auto* gameboy = g_active_gameboy.load(std::memory_order_acquire);
+    auto* gameboy = g_active_gameboy;
     return gameboy ? gameboy->apuRead(address) : 0xFF;
 }
 
 extern "C" void audio_write(uint16_t address, uint8_t value) {
-    auto* gameboy = g_active_gameboy.load(std::memory_order_acquire);
+    auto* gameboy = g_active_gameboy;
     if (gameboy) gameboy->apuWrite(address, value);
 }
 
@@ -101,6 +101,11 @@ struct GameBoy::Impl {
     std::atomic<uint32_t> displayed_frames{0};
     std::atomic<uint32_t> audio_frames_pushed{0};
     std::atomic<uint32_t> audio_frames_dropped{0};
+    // ROM reads are the hottest path in Peanut-GB. Increment plain counters
+    // there and publish atomics once per emulated frame instead of doing an
+    // expensive cross-core atomic operation for practically every ROM byte.
+    uint32_t cache_hits_local = 0;
+    uint32_t cache_misses_local = 0;
     std::atomic<uint32_t> cache_hits{0};
     std::atomic<uint32_t> cache_misses{0};
     std::atomic<uint32_t> save_writes{0};
@@ -157,7 +162,7 @@ void GameBoy::end() {
     unload();
     initialized_.store(false);
     audio_ = nullptr;
-    g_active_gameboy.store(nullptr, std::memory_order_release);
+    g_active_gameboy = nullptr;
 
     if (!impl_) return;
     freeFrames();
@@ -178,11 +183,12 @@ esp_err_t GameBoy::allocateFrames() {
     if (!impl_) return ESP_ERR_INVALID_STATE;
     constexpr uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     constexpr uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    // These buffers are touched for every LCD line and every displayed frame.
-    // Prefer internal RAM; PSRAM is only a fallback.
+    // The producer front/back pair is hot and stays in internal RAM when
+    // possible. The temporary render copy is read only by Core 0 and may live
+    // in PSRAM, freeing ~23 KiB of internal RAM for ROM/cache/audio.
     impl_->frame_front = allocate_bytes(FRAME_PIXELS, internal, psram);
     impl_->frame_back = allocate_bytes(FRAME_PIXELS, internal, psram);
-    impl_->frame_render = allocate_bytes(FRAME_PIXELS, internal, psram);
+    impl_->frame_render = allocate_bytes(FRAME_PIXELS, psram, internal);
     if (!impl_->frame_front || !impl_->frame_back || !impl_->frame_render) {
         freeFrames();
         return ESP_ERR_NO_MEM;
@@ -219,7 +225,7 @@ esp_err_t GameBoy::load(const char* path) {
     if (error == ESP_OK) error = initializeSaveRam();
     if (error != ESP_OK) {
         last_error_.store(error);
-        g_active_gameboy.store(nullptr, std::memory_order_release);
+        g_active_gameboy = nullptr;
         freeRomAndSave();
         return error;
     }
@@ -231,6 +237,8 @@ esp_err_t GameBoy::load(const char* path) {
     impl_->displayed_frames.store(0);
     impl_->audio_frames_pushed.store(0);
     impl_->audio_frames_dropped.store(0);
+    impl_->cache_hits_local = 0;
+    impl_->cache_misses_local = 0;
     impl_->cache_hits.store(0);
     impl_->cache_misses.store(0);
     impl_->save_writes.store(0);
@@ -240,24 +248,24 @@ esp_err_t GameBoy::load(const char* path) {
     button_mask_.store(0);
     stop_requested_.store(false);
     loaded_.store(true);
-    g_active_gameboy.store(this, std::memory_order_release);
+    g_active_gameboy = this;
 
     error = audio_->startRealtimeStereo(GB_AUDIO_SOURCE_RATE, config_.realtime_volume);
     if (error != ESP_OK) {
         loaded_.store(false);
-        g_active_gameboy.store(nullptr, std::memory_order_release);
+        g_active_gameboy = nullptr;
         freeRomAndSave();
         last_error_.store(error);
         return error;
     }
 
-    // Start with a tiny silent cushion so the independent Core 0 I2S task does
-    // not underrun while the first emulated frame is being produced.
+    // Four frame packets (~67 ms) reproduce the stable queue cushion from
+    // pogopoOS1.0 and let the high-priority Core 0 I2S task start cleanly.
     std::memset(impl_->audio_samples, 0, sizeof(impl_->audio_samples));
-    audio_->pushRealtimeStereo(
-        reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
-    audio_->pushRealtimeStereo(
-        reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
+    for (int packet = 0; packet < 4; ++packet) {
+        audio_->pushRealtimeStereo(
+            reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
+    }
 
     task_running_.store(true);
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -267,7 +275,7 @@ esp_err_t GameBoy::load(const char* path) {
         task_running_.store(false);
         audio_->stopRealtime();
         loaded_.store(false);
-        g_active_gameboy.store(nullptr, std::memory_order_release);
+        g_active_gameboy = nullptr;
         freeRomAndSave();
         last_error_.store(ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
@@ -298,7 +306,7 @@ void GameBoy::unload() {
     if (audio_) audio_->stopRealtime();
     if (loaded_.load()) flushSave();
     loaded_.store(false);
-    g_active_gameboy.store(nullptr, std::memory_order_release);
+    g_active_gameboy = nullptr;
     freeRomAndSave();
     stop_requested_.store(false);
     button_mask_.store(0);
@@ -319,6 +327,9 @@ esp_err_t GameBoy::loadRomFile(const char* path) {
     std::rewind(file);
     impl_->rom_size = static_cast<uint32_t>(length);
 
+    // Always try the fast internal heap first for ROMs within the configured
+    // ceiling. 256 KiB cartridges often fit after moving the render scratch
+    // buffer to PSRAM; larger cartridges fall back to PSRAM + internal cache.
     if (impl_->rom_size <= config_.internal_rom_limit) {
         impl_->rom_data = static_cast<uint8_t*>(heap_caps_malloc(
             impl_->rom_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -372,25 +383,26 @@ uint8_t GameBoy::readRom(uint32_t address) {
 
     const uint32_t page = address / ROM_CACHE_PAGE_SIZE;
     const uint32_t offset = address & (ROM_CACHE_PAGE_SIZE - 1U);
-    ++impl_->cache_tick;
 
+    // Most instruction fetches stay in the same 16 KiB bank. Keep this path
+    // to two comparisons + one indexed load: no atomics, no age/counter write.
     if (page == impl_->cache_last_page && impl_->cache_last_pointer) {
-        impl_->cache_hits.fetch_add(1);
         return impl_->cache_last_pointer[offset];
     }
 
+    const uint32_t access_tick = ++impl_->cache_tick;
     for (uint8_t i = 0; i < impl_->rom_cache_pages; ++i) {
         if (impl_->cache_page_index[i] == page) {
-            impl_->cache_age[i] = impl_->cache_tick;
+            impl_->cache_age[i] = access_tick;
             impl_->cache_last_page = page;
             impl_->cache_last_pointer = impl_->rom_cache +
                 static_cast<size_t>(i) * ROM_CACHE_PAGE_SIZE;
-            impl_->cache_hits.fetch_add(1);
+            ++impl_->cache_hits_local; // Counts page switches, not every byte.
             return impl_->cache_last_pointer[offset];
         }
     }
 
-    impl_->cache_misses.fetch_add(1);
+    ++impl_->cache_misses_local;
     uint8_t slot = 0;
     for (uint8_t i = 1; i < impl_->rom_cache_pages; ++i) {
         if (impl_->cache_page_index[i] == UINT32_MAX ||
@@ -409,7 +421,7 @@ uint8_t GameBoy::readRom(uint32_t address) {
         std::memset(destination + copy_bytes, 0xFF, ROM_CACHE_PAGE_SIZE - copy_bytes);
     }
     impl_->cache_page_index[slot] = page;
-    impl_->cache_age[slot] = impl_->cache_tick;
+    impl_->cache_age[slot] = access_tick;
     impl_->cache_last_page = page;
     impl_->cache_last_pointer = destination;
     return destination[offset];
@@ -418,7 +430,7 @@ uint8_t GameBoy::readRom(uint32_t address) {
 esp_err_t GameBoy::initializeCore() {
     std::memset(&impl_->core, 0, sizeof(impl_->core));
     std::memset(&impl_->apu, 0, sizeof(impl_->apu));
-    g_active_gameboy.store(this, std::memory_order_release);
+    g_active_gameboy = this;
 
     const auto rom_read = [](gb_s* core, const uint_fast32_t address) -> uint8_t {
         auto* self = static_cast<GameBoy*>(core->direct.priv);
@@ -456,9 +468,11 @@ esp_err_t GameBoy::initializeCore() {
         uint8_t* destination = self->impl_->frame_back +
             static_cast<size_t>(line) * SCREEN_WIDTH;
         for (int x = 0; x < SCREEN_WIDTH; ++x) {
-            // Peanut-GB uses 0=black ... 3=white. Pogopo's generic indexed
-            // renderer uses 0=white ... 3=black, so normalize once here.
-            destination[x] = static_cast<uint8_t>(3U - (pixels[x] & 0x03U));
+            // Match the last stable 1-bit Arduino frontend: dark two shades
+            // become black, light two become white. This avoids per-pixel
+            // dithering work in the frontend and keeps the Playdate-like look.
+            static constexpr uint8_t one_bit[4] = {3, 3, 0, 0};
+            destination[x] = one_bit[pixels[x] & 0x03U];
         }
         if (line == SCREEN_HEIGHT - 1) {
             ++self->impl_->lcd_publish_counter;
@@ -542,6 +556,10 @@ void GameBoy::freeRomAndSave() {
     impl_->save_path[0] = '\0';
     impl_->rom_title[0] = '\0';
     impl_->cache_tick = 0;
+    impl_->cache_hits_local = 0;
+    impl_->cache_misses_local = 0;
+    impl_->cache_hits.store(0);
+    impl_->cache_misses.store(0);
     impl_->cache_last_page = UINT32_MAX;
     impl_->cache_last_pointer = nullptr;
     for (uint8_t i = 0; i < MAX_CACHE_PAGES; ++i) {
@@ -628,6 +646,8 @@ void GameBoy::taskLoop() {
         pushAudioFrame();
         xSemaphoreGive(impl_->core_mutex);
 
+        impl_->cache_hits.store(impl_->cache_hits_local, std::memory_order_relaxed);
+        impl_->cache_misses.store(impl_->cache_misses_local, std::memory_order_relaxed);
         impl_->emulated_frames.fetch_add(1);
         const uint32_t elapsed = static_cast<uint32_t>(esp_timer_get_time() - frame_start);
         impl_->last_frame_us.store(elapsed);
