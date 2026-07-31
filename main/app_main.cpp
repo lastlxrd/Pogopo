@@ -2,7 +2,7 @@
 #include "peripheral_tests.h"
 #include "tasks.h"
 #include "board_pins.h"
-#include "pogopo_graphics.h"
+#include "pogopo/gfx/gfx.h"
 
 #include <cstdio>
 
@@ -14,125 +14,127 @@
 #include "freertos/task.h"
 
 static const char* TAG = "app";
-static const char* GFX_TAG = "gfx_demo";
+static const char* GFX_TAG = "gfx_step3";
 
-static pogopo::SharpDisplay g_display;
-static pogopo::Canvas g_canvas(g_display);
+static pogopo::Graphics g_gfx;
 
-static void draw_static_graphics_demo() {
-    using Canvas = pogopo::Canvas;
+// 16x16 transparent sprite, MSB-first, two bytes per row.
+static constexpr uint8_t kPogopoSpriteData[] = {
+    0x03,0xC0, 0x0F,0xF0, 0x1C,0x38, 0x30,0x0C,
+    0x63,0xC6, 0x47,0xE2, 0xC6,0x63, 0xC0,0x03,
+    0xC0,0x03, 0xC4,0x23, 0x66,0x66, 0x33,0xCC,
+    0x1C,0x38, 0x0F,0xF0, 0x03,0xC0, 0x00,0x00,
+};
+static const pogopo::Bitmap kPogopoSprite =
+    pogopo::gfx::make_bitmap_1bpp(16, 16, kPogopoSpriteData);
 
-    g_canvas.clear(Canvas::WHITE);
-    g_canvas.rect(0, 0, g_canvas.width(), g_canvas.height(), Canvas::BLACK);
-    g_canvas.text(16, 14, "pogopoOS2.0 STEP2", Canvas::BLACK, 2);
-    g_canvas.text(16, 42, "ESP-IDF graphics engine", Canvas::BLACK, 1);
-    g_canvas.text(16, 58, "PSRAM framebuffer + dirty rows", Canvas::BLACK, 1);
+static void draw_static_demo() {
+    using G = pogopo::Graphics;
 
-    // Primitive demo.
-    g_canvas.line(18, 82, 82, 112, Canvas::BLACK);
-    g_canvas.rect(96, 80, 38, 28, Canvas::BLACK);
-    g_canvas.fill_rect(148, 80, 38, 28, Canvas::BLACK);
-    g_canvas.circle(218, 94, 15, Canvas::BLACK);
-    g_canvas.fill_circle(270, 94, 15, Canvas::BLACK);
+    g_gfx.clear(G::WHITE);
+    g_gfx.drawRect(0, 0, g_gfx.width(), g_gfx.height(), G::BLACK);
+    g_gfx.drawText(14, 12, "pogopoOS2.0 STEP3", G::BLACK, 2);
+    g_gfx.drawText(14, 39, "pogopo::gfx  /  Graphics facade", G::BLACK, 1);
+    g_gfx.drawText(14, 54, "Canvas Font Bitmap Sprite Clip", G::BLACK, 1);
 
-    // Animation lane. Only its changed rows should be sent each frame.
-    g_canvas.rect(16, 124, 368, 34, Canvas::BLACK);
-    g_canvas.text(22, 132, "DIRTY ROW ANIMATION", Canvas::BLACK, 1);
+    // GFX facade primitive test.
+    g_gfx.drawLine(18, 78, 74, 104, G::BLACK);
+    g_gfx.drawRect(88, 75, 34, 26, G::BLACK);
+    g_gfx.fillRect(134, 75, 34, 26, G::BLACK);
+    g_gfx.drawCircle(202, 88, 14, G::BLACK);
+    g_gfx.fillCircle(246, 88, 14, G::BLACK);
+    g_gfx.drawBitmap(282, 72, kPogopoSprite, G::BLACK, true);
 
-    g_canvas.text(16, 176, "FPS:", Canvas::BLACK, 1);
-    g_canvas.text(16, 190, "Frame us:", Canvas::BLACK, 1);
-    g_canvas.text(16, 204, "Rows:", Canvas::BLACK, 1);
-    g_canvas.text(16, 218, "Bytes:", Canvas::BLACK, 1);
+    // Clip test area. The moving sprite is deliberately allowed to cross the
+    // logical edges, but pixels outside this rectangle must never appear.
+    g_gfx.drawRect(14, 116, 372, 42, G::BLACK);
+    g_gfx.drawText(20, 122, "CLIPPED SPRITE + DIRTY ROWS", G::BLACK, 1);
 
-    ESP_ERROR_CHECK(g_canvas.present_full());
+    g_gfx.drawText(14, 174, "FPS:", G::BLACK, 1);
+    g_gfx.drawText(14, 188, "Refresh us:", G::BLACK, 1);
+    g_gfx.drawText(14, 202, "Rows:", G::BLACK, 1);
+    g_gfx.drawText(14, 216, "Bytes:", G::BLACK, 1);
+
+    ESP_ERROR_CHECK(g_gfx.presentFull());
 }
 
-static void graphics_demo_task(void*) {
-    using Canvas = pogopo::Canvas;
+static void graphics_step3_task(void*) {
+    using G = pogopo::Graphics;
 
-    constexpr int square_w = 18;
-    constexpr int square_h = 18;
-    constexpr int lane_x0 = 190;
-    constexpr int lane_x1 = 358;
-    constexpr int lane_y = 132;
+    constexpr pogopo::Rect clip_area{168, 136, 202, 17};
+    constexpr int sprite_y = 136;
+    constexpr int x_min = 158; // deliberately 10 px outside clip
+    constexpr int x_max = 365; // deliberately outside clip on right
 
-    int x = lane_x0;
-    int previous_x = x;
+    pogopo::Sprite sprite;
+    sprite.bitmap = kPogopoSprite;
+    sprite.x = x_min;
+    sprite.y = sprite_y;
+    sprite.foreground = G::BLACK;
+    sprite.transparent_background = true;
+
+    int previous_x = sprite.x;
     int direction = 1;
-
     uint32_t frames = 0;
-    uint32_t last_fps = 0;
+    uint32_t shown_fps = 0;
     int64_t stats_window_start = esp_timer_get_time();
     TickType_t wake = xTaskGetTickCount();
 
     while (true) {
-        // Erase only the previous square and draw the new one. The driver marks
-        // just these rows dirty and packs all dirty lines into one SPI command.
-        g_canvas.fill_rect(previous_x, lane_y, square_w, square_h, Canvas::WHITE);
-        g_canvas.rect(previous_x, lane_y, square_w, square_h, Canvas::WHITE);
+        g_gfx.set_clip(clip_area);
+        g_gfx.fillRect(previous_x, sprite_y, 16, 16, G::WHITE);
 
-        x += direction * 3;
-        if (x >= lane_x1 - square_w) {
-            x = lane_x1 - square_w;
-            direction = -1;
-        } else if (x <= lane_x0) {
-            x = lane_x0;
-            direction = 1;
-        }
+        sprite.x += direction * 3;
+        if (sprite.x >= x_max) { sprite.x = x_max; direction = -1; }
+        else if (sprite.x <= x_min) { sprite.x = x_min; direction = 1; }
 
-        g_canvas.fill_rect(x, lane_y, square_w, square_h, Canvas::BLACK);
-        previous_x = x;
+        g_gfx.drawSprite(sprite);
+        g_gfx.reset_clip();
+        previous_x = sprite.x;
 
-        esp_err_t err = g_canvas.present();
+        const esp_err_t err = g_gfx.present();
         if (err != ESP_OK) {
-            ESP_LOGW(GFX_TAG, "Partial refresh failed: %s", esp_err_to_name(err));
+            ESP_LOGW(GFX_TAG, "present failed: %s", esp_err_to_name(err));
         }
         ++frames;
 
         const int64_t now = esp_timer_get_time();
         if (now - stats_window_start >= 1000000) {
-            last_fps = frames;
+            shown_fps = frames;
             frames = 0;
             stats_window_start = now;
 
-            const auto stats = g_display.get_stats();
+            const auto stats = g_gfx.stats();
             char value[32];
+            g_gfx.fillRect(102, 171, 270, 56, G::WHITE);
 
-            // Clear only the value column; labels remain untouched.
-            g_canvas.fill_rect(82, 174, 290, 54, Canvas::WHITE);
-
-            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(last_fps));
-            g_canvas.text(82, 176, value, Canvas::BLACK, 1);
-
+            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(shown_fps));
+            g_gfx.drawText(102, 174, value, G::BLACK, 1);
             std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_refresh_us));
-            g_canvas.text(82, 190, value, Canvas::BLACK, 1);
-
+            g_gfx.drawText(102, 188, value, G::BLACK, 1);
             std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_rows));
-            g_canvas.text(82, 204, value, Canvas::BLACK, 1);
-
+            g_gfx.drawText(102, 202, value, G::BLACK, 1);
             std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_bytes));
-            g_canvas.text(82, 218, value, Canvas::BLACK, 1);
-
-            ESP_ERROR_CHECK_WITHOUT_ABORT(g_canvas.present());
+            g_gfx.drawText(102, 216, value, G::BLACK, 1);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(g_gfx.present());
 
             ESP_LOGI(GFX_TAG,
-                     "FPS=%u last=%uus rows=%u bytes=%u total_refresh=%llu total_rows=%llu total_bytes=%llu vcom=%llu",
-                     static_cast<unsigned>(last_fps),
+                     "FPS=%u refresh=%uus rows=%u bytes=%u total=%llu vcom=%llu clip=[%d,%d,%d,%d]",
+                     static_cast<unsigned>(shown_fps),
                      static_cast<unsigned>(stats.last_refresh_us),
                      static_cast<unsigned>(stats.last_rows),
                      static_cast<unsigned>(stats.last_bytes),
                      static_cast<unsigned long long>(stats.total_refreshes),
-                     static_cast<unsigned long long>(stats.total_rows),
-                     static_cast<unsigned long long>(stats.total_bytes),
-                     static_cast<unsigned long long>(stats.vcom_toggles));
+                     static_cast<unsigned long long>(stats.vcom_toggles),
+                     clip_area.x, clip_area.y, clip_area.w, clip_area.h);
         }
 
-        vTaskDelayUntil(&wake, pdMS_TO_TICKS(33)); // target about 30 FPS
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(33));
     }
 }
 
-static void start_graphics_step2() {
-    pogopo::SharpDisplay::Config cfg;
+static void start_graphics_step3() {
+    pogopo::Graphics::Config cfg;
     cfg.sck_io = board::LCD_SCK;
     cfg.mosi_io = board::LCD_MOSI;
     cfg.cs_io = board::LCD_CS;
@@ -144,30 +146,29 @@ static void start_graphics_step2() {
     cfg.vcom_task_priority = 4;
     cfg.vcom_task_core = 0;
 
-    const esp_err_t err = g_display.init(cfg);
+    const esp_err_t err = g_gfx.begin(cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Graphics init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Graphics begin failed: %s", esp_err_to_name(err));
         return;
     }
 
-    draw_static_graphics_demo();
-    g_display.reset_stats();
+    draw_static_demo();
+    g_gfx.resetStats();
 
     const BaseType_t result = xTaskCreatePinnedToCore(
-        graphics_demo_task, "graphics_demo", 4096, nullptr, 3, nullptr, 1);
+        graphics_step3_task, "gfx_step3_demo", 4096, nullptr, 3, nullptr, 1);
     if (result != pdPASS) {
-        ESP_LOGE(TAG, "Could not start graphics demo task");
+        ESP_LOGE(TAG, "Could not start STEP3 graphics task");
     }
 }
 
 extern "C" void app_main(void) {
     esp_chip_info_t chip = {};
     esp_chip_info(&chip);
-
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GRAPHICS STEP2");
+    ESP_LOGI(TAG, "pogopoOS2.0 GRAPHICS STEP3");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -175,8 +176,8 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(i2c_bus_init());
     i2c_scan();
     run_peripheral_tests();
-    start_graphics_step2();
+    start_graphics_step3();
     start_system_tasks();
 
-    ESP_LOGI(TAG, "STEP2 running: VCOM task + Canvas + dirty-row animation + benchmark");
+    ESP_LOGI(TAG, "STEP3 running: namespace + Graphics facade + Canvas + Font + Bitmap + Sprite + Clip");
 }
