@@ -58,6 +58,9 @@ public:
         // Keep Peanut-GB LCD rendering enabled every emulated frame for
         // compatibility. The frontend publishes only every Nth frame.
         bool peanut_frame_skip = false;
+        // Large cartridges in PSRAM get render-only frame skip automatically.
+        // CPU/APU still emulate every frame; only every second LCD frame is drawn.
+        bool auto_frame_skip_psram = true;
         uint8_t display_divider = 1;
         bool dither = false;
         UBaseType_t task_priority = 6;

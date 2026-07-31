@@ -107,7 +107,9 @@ esp_err_t start_gameboy() {
     pogopo::GameBoy::Config config;
     config.internal_rom_limit = 512U * 1024U;
     config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
-    config.requested_cache_pages = 4;
+    config.requested_cache_pages = 8; // Falls back to 6/4/2 if internal heap is tight.
+    config.peanut_frame_skip = false;
+    config.auto_frame_skip_psram = true;
     config.display_divider = 1;
     config.dither = false;
     config.task_priority = 6;
@@ -129,7 +131,9 @@ esp_err_t start_imu() {
     pogopo::Imu::Config config;
     config.bus = i2c_bus_handle(); config.address = 0x68;
     config.interrupt_io = board::IMU_INT; config.sample_period_ms = 20;
-    config.task_core = 1;
+    // Keep Core 1 for input + emulator. BMI270 comfortably fits on Core 0
+    // underneath the blocking priority-8 I2S writer.
+    config.task_core = 0;
     return g_imu.begin(config);
 }
 
@@ -264,7 +268,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.2 AUDIO/CORE RESTORE");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.3 KIRBY STABILITY");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -293,5 +297,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.2 ready: Core1 input/GB, Core0 priority-8 I2S + priority-1 display");
+    ESP_LOGI(TAG, "STEP9.3 ready: PSRAM frame-skip/cache, audio stretch, WDT/input fail-safe");
 }

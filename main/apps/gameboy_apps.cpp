@@ -141,7 +141,7 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
         const audio::RealtimeInfo realtime = context.audio.realtimeInfo();
         ESP_LOGI(TAG,
                  "PERF emu=%lu lcd=%lu frame=%luus max=%luus ROM=%s cache=%lu/%lu "
-                 "audio=%lu/%lu under=%lu over=%lu drop=%lu",
+                 "audio=%lu/%lu under=%lu over=%lu drop=%lu speed=%u%% i2cerr=%lu",
                  static_cast<unsigned long>(emu_delta),
                  static_cast<unsigned long>(lcd_delta),
                  static_cast<unsigned long>(now.last_frame_us),
@@ -153,7 +153,9 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
                  static_cast<unsigned long>(realtime.capacity_frames),
                  static_cast<unsigned long>(realtime.underruns),
                  static_cast<unsigned long>(realtime.overruns),
-                 static_cast<unsigned long>(drop_delta));
+                 static_cast<unsigned long>(drop_delta),
+                 static_cast<unsigned>(realtime.playback_percent),
+                 static_cast<unsigned long>(context.input.readErrors()));
         perf_previous_ = now;
         perf_elapsed_ms_ = 0;
     }

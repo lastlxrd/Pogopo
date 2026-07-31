@@ -309,8 +309,11 @@ esp_err_t Audio::startRealtimeStereo(uint32_t sample_rate, uint8_t volume) {
     realtime_volume_.store(std::min<uint8_t>(volume, 100));
     realtime_source_rate_.store(sample_rate);
     realtime_fraction_q16_ = 0;
-    realtime_step_q16_ = static_cast<uint32_t>(std::max<uint64_t>(
-        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate));
+    realtime_step_q16_.store(static_cast<uint32_t>(std::max<uint64_t>(
+        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate)));
+    realtime_last_left_ = 0;
+    realtime_last_right_ = 0;
+    realtime_fade_samples_ = 0;
     realtime_underrun_latched_ = false;
     std::memset(realtime_buffer_, 0,
                 static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t));
@@ -323,8 +326,20 @@ void Audio::stopRealtime() {
     realtime_write_total_.store(0);
     realtime_read_total_.store(0);
     realtime_fraction_q16_ = 0;
-    realtime_step_q16_ = 1U << 16U;
+    realtime_step_q16_.store(1U << 16U);
+    realtime_last_left_ = 0;
+    realtime_last_right_ = 0;
+    realtime_fade_samples_ = 0;
     realtime_underrun_latched_ = false;
+}
+
+void Audio::setRealtimePlaybackStepQ16(uint32_t step_q16) {
+    // Keep emergency stretching bounded between 50% and 106.25% speed.
+    // Normal games remain exactly 1.0x; this only masks sustained slow frames.
+    constexpr uint32_t MIN_STEP_Q16 = 1U << 15U;
+    constexpr uint32_t MAX_STEP_Q16 = (1U << 16U) + (1U << 12U);
+    realtime_step_q16_.store(std::clamp(step_q16, MIN_STEP_Q16, MAX_STEP_Q16),
+                             std::memory_order_release);
 }
 
 size_t Audio::pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames) {
@@ -367,6 +382,8 @@ RealtimeInfo Audio::realtimeInfo() const {
     info.source_rate = realtime_source_rate_.load();
     info.underruns = realtime_underruns_.load();
     info.overruns = realtime_overruns_.load();
+    info.playback_percent = static_cast<uint16_t>(
+        (static_cast<uint64_t>(realtime_step_q16_.load()) * 100U + 32768U) >> 16U);
     info.volume = realtime_volume_.load();
     return info;
 }
@@ -834,6 +851,15 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
             realtime_underruns_.fetch_add(1);
             realtime_underrun_latched_ = true;
         }
+        // A short fade-to-zero is much less audible than an abrupt cut from an
+        // arbitrary PCM sample to digital silence.
+        if (realtime_fade_samples_ > 0) {
+            left = static_cast<int32_t>(
+                (static_cast<int64_t>(realtime_last_left_) * realtime_fade_samples_) / 64);
+            right = static_cast<int32_t>(
+                (static_cast<int64_t>(realtime_last_right_) * realtime_fade_samples_) / 64);
+            --realtime_fade_samples_;
+        }
         return;
     }
 
@@ -842,13 +868,19 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
     const int32_t scale = static_cast<int32_t>(realtime_volume_.load()) *
                           static_cast<int32_t>(master_volume_.load());
 
-    // The Game Boy path is 32768 -> 32768. Avoid interpolation, a second ring
-    // read and 64-bit blend math for every output sample.
-    if (realtime_step_q16_ == (1U << 16U)) {
+    const uint32_t playback_step_q16 =
+        realtime_step_q16_.load(std::memory_order_acquire);
+
+    // The normal Game Boy path is 32768 -> 32768. Avoid interpolation, a second
+    // ring read and 64-bit blend math while the emulator is keeping real time.
+    if (playback_step_q16 == (1U << 16U)) {
         const int32_t raw_left = realtime_buffer_[first_slot * 2U];
         const int32_t raw_right = realtime_buffer_[first_slot * 2U + 1U];
         left = static_cast<int32_t>((static_cast<int64_t>(raw_left) * scale) / 10000LL);
         right = static_cast<int32_t>((static_cast<int64_t>(raw_right) * scale) / 10000LL);
+        realtime_last_left_ = left;
+        realtime_last_right_ = right;
+        realtime_fade_samples_ = 64;
         realtime_read_total_.store(read + 1U, std::memory_order_release);
         return;
     }
@@ -870,7 +902,11 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
     left = static_cast<int32_t>((static_cast<int64_t>(raw_left) * scale) / 10000LL);
     right = static_cast<int32_t>((static_cast<int64_t>(raw_right) * scale) / 10000LL);
 
-    const uint32_t advanced_q16 = realtime_fraction_q16_ + realtime_step_q16_;
+    realtime_last_left_ = left;
+    realtime_last_right_ = right;
+    realtime_fade_samples_ = 64;
+
+    const uint32_t advanced_q16 = realtime_fraction_q16_ + playback_step_q16;
     uint32_t advance = advanced_q16 >> 16U;
     realtime_fraction_q16_ = advanced_q16 & 0xFFFFU;
     advance = std::min<uint32_t>(advance, available);

@@ -111,6 +111,9 @@ struct GameBoy::Impl {
     std::atomic<uint32_t> save_writes{0};
     std::atomic<uint32_t> last_frame_us{0};
     std::atomic<uint32_t> max_frame_us{0};
+    int64_t last_audio_push_us = 0;
+    uint32_t audio_interval_ema_us = static_cast<uint32_t>(FRAME_PERIOD_US);
+    uint32_t behind_yield_counter = 0;
 };
 
 GameBoy::~GameBoy() {
@@ -244,6 +247,9 @@ esp_err_t GameBoy::load(const char* path) {
     impl_->save_writes.store(0);
     impl_->last_frame_us.store(0);
     impl_->max_frame_us.store(0);
+    impl_->last_audio_push_us = 0;
+    impl_->audio_interval_ema_us = static_cast<uint32_t>(FRAME_PERIOD_US);
+    impl_->behind_yield_counter = 0;
     frame_sequence_.store(0);
     button_mask_.store(0);
     stop_requested_.store(false);
@@ -486,8 +492,11 @@ esp_err_t GameBoy::initializeCore() {
         }
     };
     gb_init_lcd(&impl_->core, lcd_line);
-    impl_->core.direct.frame_skip = config_.peanut_frame_skip;
+    impl_->core.direct.frame_skip = config_.peanut_frame_skip ||
+        (config_.auto_frame_skip_psram && impl_->rom_in_psram);
     impl_->core.direct.interlace = false;
+    ESP_LOGI(TAG, "LCD render frame skip: %s",
+             impl_->core.direct.frame_skip ? "ON (30 FPS target)" : "OFF");
     minigb_apu_audio_init(&impl_->apu);
 
     char title[sizeof(impl_->rom_title)]{};
@@ -679,6 +688,13 @@ void GameBoy::taskLoop() {
         while (!stop_requested_.load() && esp_timer_get_time() < next_frame_us) {
             taskYIELD();
         }
+
+        // If a demanding game is continuously late, taskYIELD() cannot run the
+        // lower-priority IDLE1 task. Give it one real tick periodically so the
+        // task watchdog is serviced without adding meaningful frame overhead.
+        if (remaining <= 0 && (++impl_->behind_yield_counter & 0x0FU) == 0U) {
+            vTaskDelay(1);
+        }
         if (esp_timer_get_time() - next_frame_us > FRAME_PERIOD_US * 3) {
             next_frame_us = esp_timer_get_time();
         }
@@ -690,6 +706,23 @@ void GameBoy::taskLoop() {
 
 void GameBoy::pushAudioFrame() {
     if (!audio_ || !audio_->enabled()) return;
+
+    // Track the real wall-clock interval between emulated audio packets. When a
+    // game falls below 59.7 FPS, play the same packet slightly slower instead of
+    // draining the ring and producing repeated hard underruns/crackle.
+    const int64_t now_us = esp_timer_get_time();
+    if (impl_->last_audio_push_us != 0) {
+        const uint32_t interval_us = static_cast<uint32_t>(std::clamp<int64_t>(
+            now_us - impl_->last_audio_push_us, FRAME_PERIOD_US / 2, FRAME_PERIOD_US * 2));
+        impl_->audio_interval_ema_us =
+            (impl_->audio_interval_ema_us * 7U + interval_us) / 8U;
+        const uint32_t playback_step_q16 = static_cast<uint32_t>(
+            (static_cast<uint64_t>(FRAME_PERIOD_US) << 16U) /
+            std::max<uint32_t>(1U, impl_->audio_interval_ema_us));
+        audio_->setRealtimePlaybackStepQ16(playback_step_q16);
+    }
+    impl_->last_audio_push_us = now_us;
+
     minigb_apu_audio_callback(&impl_->apu, impl_->audio_samples);
     const size_t pushed = audio_->pushRealtimeStereo(
         reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
