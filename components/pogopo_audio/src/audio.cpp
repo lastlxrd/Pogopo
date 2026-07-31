@@ -41,6 +41,7 @@ esp_err_t Audio::begin(const Config& config) {
         config.sample_rate < 8000 || config.queue_depth == 0 ||
         config.dma_desc_num < 2 || config.dma_frame_num == 0 ||
         config.render_frames == 0 || config.render_frames > MAX_RENDER_FRAMES ||
+        config.realtime_buffer_frames < 1024 ||
         config.stream_buffer_frames < 2048 || config.stream_queue_depth == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -61,6 +62,22 @@ esp_err_t Audio::begin(const Config& config) {
     clearPcm();
     initSineTable();
 
+    realtime_capacity_frames_ = config_.realtime_buffer_frames;
+    realtime_buffer_ = static_cast<int16_t*>(heap_caps_malloc(
+        static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!realtime_buffer_) {
+        realtime_buffer_ = static_cast<int16_t*>(heap_caps_malloc(
+            static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t),
+            MALLOC_CAP_8BIT));
+    }
+    if (!realtime_buffer_) {
+        return ESP_ERR_NO_MEM;
+    }
+    std::memset(realtime_buffer_, 0,
+                static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t));
+    stopRealtime();
+
     stream_buffer_ = static_cast<int16_t*>(heap_caps_malloc(
         static_cast<size_t>(config_.stream_buffer_frames) * sizeof(int16_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -70,6 +87,7 @@ esp_err_t Audio::begin(const Config& config) {
             MALLOC_CAP_8BIT));
     }
     if (!stream_buffer_) {
+        cleanupStreamResources();
         return ESP_ERR_NO_MEM;
     }
     std::memset(stream_buffer_, 0,
@@ -165,10 +183,10 @@ esp_err_t Audio::begin(const Config& config) {
 
     ok_.store(true);
     ESP_LOGI(TAG,
-             "Audio ready: %lu Hz, I2S stereo, stream ring=%lu frames (%lu KB)",
+             "Audio ready: %lu Hz, realtime=%lu stereo frames, WAV stream=%lu mono frames",
              static_cast<unsigned long>(config_.sample_rate),
-             static_cast<unsigned long>(config_.stream_buffer_frames),
-             static_cast<unsigned long>((config_.stream_buffer_frames * sizeof(int16_t)) / 1024U));
+             static_cast<unsigned long>(realtime_capacity_frames_),
+             static_cast<unsigned long>(config_.stream_buffer_frames));
     return ESP_OK;
 }
 
@@ -267,10 +285,85 @@ bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate
 }
 
 void Audio::stopAll() {
+    stopRealtime();
     Command command;
     command.type = CommandType::StopAll;
     enqueue(command);
     stopStream();
+}
+
+esp_err_t Audio::startRealtimeStereo(uint32_t sample_rate, uint8_t volume) {
+    if (!ok_.load() || !realtime_buffer_ || realtime_capacity_frames_ == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (sample_rate < 8000U || sample_rate > 96000U || config_.sample_rate == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    realtime_active_.store(false);
+    realtime_write_total_.store(0);
+    realtime_read_total_.store(0);
+    realtime_underruns_.store(0);
+    realtime_overruns_.store(0);
+    realtime_volume_.store(std::min<uint8_t>(volume, 100));
+    realtime_source_rate_.store(sample_rate);
+    realtime_fraction_q16_ = 0;
+    realtime_step_q16_ = static_cast<uint32_t>(std::max<uint64_t>(
+        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate));
+    realtime_underrun_latched_ = false;
+    std::memset(realtime_buffer_, 0,
+                static_cast<size_t>(realtime_capacity_frames_) * 2U * sizeof(int16_t));
+    realtime_active_.store(true);
+    return ESP_OK;
+}
+
+void Audio::stopRealtime() {
+    realtime_active_.store(false);
+    realtime_write_total_.store(0);
+    realtime_read_total_.store(0);
+    realtime_fraction_q16_ = 0;
+    realtime_step_q16_ = 1U << 16U;
+    realtime_underrun_latched_ = false;
+}
+
+size_t Audio::pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames) {
+    if (!interleaved_stereo || frames == 0 || !realtime_active_.load() ||
+        !realtime_buffer_ || realtime_capacity_frames_ == 0 || !enabled_.load()) {
+        return 0;
+    }
+
+    const uint32_t read = realtime_read_total_.load(std::memory_order_acquire);
+    const uint32_t write = realtime_write_total_.load(std::memory_order_relaxed);
+    const uint32_t used = write - read;
+    const uint32_t free_frames = used < realtime_capacity_frames_
+        ? realtime_capacity_frames_ - used
+        : 0;
+    const size_t accepted = std::min<size_t>(frames, free_frames);
+    if (accepted < frames) {
+        realtime_overruns_.fetch_add(static_cast<uint32_t>(frames - accepted));
+    }
+
+    for (size_t i = 0; i < accepted; ++i) {
+        const uint32_t slot = (write + static_cast<uint32_t>(i)) % realtime_capacity_frames_;
+        realtime_buffer_[slot * 2U] = interleaved_stereo[i * 2U];
+        realtime_buffer_[slot * 2U + 1U] = interleaved_stereo[i * 2U + 1U];
+    }
+    realtime_write_total_.store(write + static_cast<uint32_t>(accepted),
+                                std::memory_order_release);
+    return accepted;
+}
+
+RealtimeInfo Audio::realtimeInfo() const {
+    RealtimeInfo info;
+    info.active = realtime_active_.load();
+    const uint32_t write = realtime_write_total_.load();
+    const uint32_t read = realtime_read_total_.load();
+    info.buffered_frames = write - read;
+    info.capacity_frames = realtime_capacity_frames_;
+    info.source_rate = realtime_source_rate_.load();
+    info.underruns = realtime_underruns_.load();
+    info.overruns = realtime_overruns_.load();
+    info.volume = realtime_volume_.load();
+    return info;
 }
 
 bool Audio::playStream(const char* path, uint8_t volume) {
@@ -423,16 +516,21 @@ void Audio::task_loop() {
         processCommands();
 
         for (size_t frame = 0; frame < config_.render_frames; ++frame) {
-            int32_t mix = 0;
+            int32_t mono = 0;
             for (auto& voice : voices_) {
-                mix += renderVoice(voice);
+                mono += renderVoice(voice);
             }
-            mix += renderPcm();
-            mix += renderStream();
-            mix = std::clamp<int32_t>(mix, -32767, 32767);
-            const int16_t sample = static_cast<int16_t>(mix);
-            output[frame * 2U] = sample;
-            output[frame * 2U + 1U] = sample;
+            mono += renderPcm();
+            mono += renderStream();
+
+            int32_t realtime_left = 0;
+            int32_t realtime_right = 0;
+            renderRealtime(realtime_left, realtime_right);
+
+            const int32_t left = std::clamp<int32_t>(mono + realtime_left, -32767, 32767);
+            const int32_t right = std::clamp<int32_t>(mono + realtime_right, -32767, 32767);
+            output[frame * 2U] = static_cast<int16_t>(left);
+            output[frame * 2U + 1U] = static_cast<int16_t>(right);
         }
         updateActiveVoiceCount();
 
@@ -696,6 +794,54 @@ int32_t Audio::renderStream() {
         stream_buffered_ms_.store(0);
     }
     return sample;
+}
+
+void Audio::renderRealtime(int32_t& left, int32_t& right) {
+    left = 0;
+    right = 0;
+    if (!realtime_active_.load() || !realtime_buffer_ || !enabled_.load()) {
+        return;
+    }
+
+    const uint32_t read = realtime_read_total_.load(std::memory_order_relaxed);
+    const uint32_t write = realtime_write_total_.load(std::memory_order_acquire);
+    const uint32_t available = write - read;
+    if (available == 0) {
+        if (!realtime_underrun_latched_) {
+            realtime_underruns_.fetch_add(1);
+            realtime_underrun_latched_ = true;
+        }
+        return;
+    }
+
+    realtime_underrun_latched_ = false;
+    const uint32_t first_slot = read % realtime_capacity_frames_;
+    const uint32_t second_slot = available > 1U
+        ? (read + 1U) % realtime_capacity_frames_
+        : first_slot;
+    const uint32_t fraction = realtime_fraction_q16_;
+
+    const int32_t first_left = realtime_buffer_[first_slot * 2U];
+    const int32_t first_right = realtime_buffer_[first_slot * 2U + 1U];
+    const int32_t second_left = realtime_buffer_[second_slot * 2U];
+    const int32_t second_right = realtime_buffer_[second_slot * 2U + 1U];
+    const int32_t raw_left = static_cast<int32_t>(
+        (static_cast<int64_t>(first_left) * (65536U - fraction) +
+         static_cast<int64_t>(second_left) * fraction) >> 16U);
+    const int32_t raw_right = static_cast<int32_t>(
+        (static_cast<int64_t>(first_right) * (65536U - fraction) +
+         static_cast<int64_t>(second_right) * fraction) >> 16U);
+
+    const int32_t scale = static_cast<int32_t>(realtime_volume_.load()) *
+                          static_cast<int32_t>(master_volume_.load());
+    left = static_cast<int32_t>((static_cast<int64_t>(raw_left) * scale) / 10000LL);
+    right = static_cast<int32_t>((static_cast<int64_t>(raw_right) * scale) / 10000LL);
+
+    const uint32_t advanced_q16 = realtime_fraction_q16_ + realtime_step_q16_;
+    uint32_t advance = advanced_q16 >> 16U;
+    realtime_fraction_q16_ = advanced_q16 & 0xFFFFU;
+    advance = std::min<uint32_t>(advance, available);
+    realtime_read_total_.store(read + advance, std::memory_order_release);
 }
 
 void Audio::clearPcm() {
@@ -1254,6 +1400,13 @@ void Audio::cleanupI2s() {
 }
 
 void Audio::cleanupStreamResources() {
+    stopRealtime();
+    if (realtime_buffer_) {
+        heap_caps_free(realtime_buffer_);
+        realtime_buffer_ = nullptr;
+    }
+    realtime_capacity_frames_ = 0;
+
     if (stream_buffer_) {
         heap_caps_free(stream_buffer_);
         stream_buffer_ = nullptr;

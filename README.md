@@ -1,111 +1,112 @@
-# pogopoOS2.0 STEP8 — Streaming Audio + Persistent Settings
+# pogopoOS2.0 — STEP9 Game Boy
 
-This project is based on the fully tested STEP7.1 build.
+This step integrates a native Game Boy application into the existing Pogopo app framework.
+It is not the old Arduino monolith: emulation, display, input, audio, storage, saves and UI
+remain separate components.
 
-## 1. Streaming WAV engine
+## What is included
 
-The old WAV test loaded the whole file into PSRAM and intentionally rejected files above 4 MiB. STEP8 replaces the WAV Player path with a streaming engine inside `pogopo_audio`.
+- `pogopo_gameboy` component based on Peanut-GB and MiniGB APU.
+- `/gameboy` ROM browser on the SD card.
+- `.gb` DMG ROM loading from SD into internal RAM or PSRAM.
+- 8 x 16 KiB internal-ROM cache when a ROM lives in PSRAM.
+- Emulator task on Core 1 at approximately 59.7 emulated frames per second.
+- Sharp LCD output at about 30 submitted frames per second through Peanut frame skip.
+- Two display modes:
+  - `FIT 240`: 160x144 -> 267x240, centred.
+  - `1X FAST`: native 160x144, centred; useful when maximum display speed matters.
+- Four Game Boy shades converted to the monochrome Sharp display with ordered dithering.
+- Realtime stereo audio ring mixed by the existing Core 0 I2S audio task.
+- A small realtime resampler fixes the slight MiniGB-per-frame sample-rate mismatch.
+- Battery-backed RAM saves beside the ROM as `.sav`.
+- Periodic save flush and flush again when leaving a game or powering off.
+- 240 MHz CPU configuration.
+- Requested haptics tuning: `Tick = 55 ms`, `Click = 64 ms`.
 
-Architecture:
+## SD card layout
 
-```text
-SD card / FILE reader task (Core 1)
-        ↓
-32768-frame mono ring buffer in PSRAM
-        ↓
-linear sample-rate conversion
-        ↓
-I2S mixer task (Core 0)
-        ↓
-MAX98357A at 32768 Hz
-```
-
-The generated system voices remain active while music is playing, so menu clicks and alerts are mixed over the track.
-
-Supported stream format:
-
-- RIFF/WAVE PCM, format code 1
-- 8-bit or 16-bit
-- mono or stereo (stereo is downmixed to mono)
-- 8–96 kHz
-- large files are supported; the file is not copied into RAM
-
-Compressed WAV, MP3, AAC and FLAC are not supported in this step.
-
-## 2. WAV Player controls
+Put uncompressed original Game Boy ROMs here:
 
 ```text
-TOP / DOWN   select a WAV file
-A            start or restart selected file
-START        pause / resume
-LEFT         seek back 5 seconds
-RIGHT        seek forward 5 seconds
-B            return home; music keeps playing
-MENU         open the system overlay
+/gameboy/
+    Tetris.gb
+    Super Mario Land.gb
+    Zelda.gb
 ```
 
-The screen shows:
+No ROM files are included in this archive.
 
-- playback state
-- position and duration
-- buffered milliseconds
-- source sample rate / channels / bit depth
-- underrun and SD read-error counters
+Supported in this first port:
 
-Copy `COPY_TO_SD/pogopo` to the root of the SD card. A generated `stream_long_70s.wav` file is included; it is larger than the old 4 MiB loader limit and is the main streaming test.
+- `.gb` files
+- classic monochrome Game Boy / DMG software
+- ROM sizes up to 8 MiB
+- supported Peanut-GB cartridge controllers
 
-## 3. Persistent `pogopo_settings`
+Not supported yet:
 
-A new NVS-backed component stores:
+- `.gbc`
+- `.zip`
+- link cable
+- save states
+- RTC persistence for clock-based cartridges
+
+## Controls in ROM browser
 
 ```text
-master volume
-Audio output ON/OFF
-UI sounds ON/OFF
-Haptics ON/OFF
-Motion sensitivity LOW/NORMAL/HIGH
+TOP / DOWN     select ROM
+A              launch ROM
+LEFT / RIGHT   switch FIT 240 / 1X FAST
+START          rescan /gameboy
+B              return to Launcher
 ```
 
-Open **Settings** in the Launcher. Changes are applied immediately and committed to NVS after a short delay. Pressing B also saves before leaving. START restores defaults.
-
-The volume changed in Audio Lab is also written to the same persistent setting.
-
-## 4. Haptic tuning
-
-Requested tuning is included:
+## Controls in a game
 
 ```text
-Tick   45 ms   (same feel as the previous Click)
-Click  55 ms   (slightly more pronounced)
+D-pad          Game Boy D-pad
+A / B          Game Boy A / B
+START          Game Boy Start
+MENU           Game Boy Select
+B + START      hold about 0.65 s to save and exit
 ```
 
-All other haptic patterns remain unchanged. Disabling Haptics in Settings suppresses all patterns at the component level.
+`MENU` is reserved as Select while the emulator is running, so the normal Pogopo system
+overlay is intentionally disabled inside a Game Boy game.
 
-## 5. Motion setting
+## First test order
 
-Motion Lab keeps the smooth STEP7.1 visual filter. The saved motion-sensitivity setting changes only the visual response:
+1. Start with a small, known-good `.gb` ROM such as a simple puzzle/platform title.
+2. Test `1X FAST` first if `FIT 240` feels visually slower.
+3. Check that audio remains smooth while moving through a busy scene.
+4. Make an in-game save, exit with `B + START`, then launch again and verify the save.
+5. Watch the serial log for ROM location, cache page count, save size and errors.
+
+## Architecture
 
 ```text
-LOW      ×0.65
-NORMAL   ×1.00
-HIGH     ×1.45
+Core 0:
+    pogopo_audio -> I2S DMA -> MAX98357A
+    UI sounds + Game Boy stereo mixer
+
+Core 1:
+    Peanut-GB CPU/LCD frame loop
+    MiniGB APU frame generation
+
+OS task:
+    input mapping
+    app lifecycle
+    latest-frame copy
+    Sharp framebuffer + dirty-row present
 ```
 
-The numeric BMI270 values remain immediate and unfiltered.
+The display driver remains at the known-good 2 MHz Sharp configuration. `FIT 240` can touch
+all 240 panel rows during a busy frame, so the emulator continues near 60 Hz independently
+while the display presents the newest available frame. This prevents video traffic from
+slowing the emulated CPU or starving audio.
 
-## Recommended test order
+## Third-party code
 
-1. Copy the included `pogopo` folder to the SD-card root.
-2. Boot and open **Settings**. Change volume and motion sensitivity, reboot, and verify that the values remain saved.
-3. Open **WAV Player** and play `stream_long_70s.wav`.
-4. While it plays, seek with LEFT/RIGHT and pause/resume with START.
-5. Press B and navigate the Launcher while the music continues underneath the UI sounds.
-6. Open Motion Lab during playback and verify that graphics, BMI270 sampling, audio and input remain responsive.
-7. Open Haptics Lab and compare the new Tick and Click.
-
-## Notes
-
-- Do not physically remove the SD card while a stream is playing. Stop/reboot first.
-- An unsupported or damaged WAV enters the visible ERROR state and plays the system error feedback when UI sounds are enabled.
-- SD and BMI270 initialization remain non-fatal. Power/BQ24295 initialization remains required.
-- The old small-file `Storage::loadWav()` API is still present for future short assets, but the WAV Player uses the new streaming path.
+See `components/pogopo_gameboy/THIRD_PARTY.md`. Peanut-GB and MiniGB APU source notices are
+preserved. The Pogopo frontend, FreeRTOS task split, PSRAM/cache strategy, Sharp renderer,
+input mapping, save handling and realtime audio bridge are project code.

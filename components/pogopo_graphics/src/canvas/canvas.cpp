@@ -169,6 +169,62 @@ void Canvas::draw_sprite(const Sprite& sprite) {
                 sprite.transparent_background, sprite.background);
 }
 
+void Canvas::draw_indexed2_scaled(int x, int y, int source_width, int source_height,
+                                  const uint8_t* pixels, int destination_width,
+                                  int destination_height,
+                                  const uint8_t* previous_pixels,
+                                  bool dither, bool invert) {
+    if (!pixels || source_width <= 0 || source_height <= 0 ||
+        destination_width <= 0 || destination_height <= 0) {
+        return;
+    }
+
+    static constexpr uint8_t bayer2x2[4] = {0, 2, 3, 1};
+    static constexpr uint8_t black_levels[4] = {0, 1, 3, 4};
+
+    display_.lock();
+    for (int sy = 0; sy < source_height; ++sy) {
+        const int y0 = y + (sy * destination_height) / source_height;
+        const int y1 = y + ((sy + 1) * destination_height) / source_height;
+        if (y1 <= clip_.y || y0 >= clip_.bottom()) continue;
+
+        for (int sx = 0; sx < source_width; ++sx) {
+            const int source_index = sy * source_width + sx;
+            const uint8_t original = static_cast<uint8_t>(pixels[source_index] & 0x03U);
+            if (previous_pixels &&
+                original == static_cast<uint8_t>(previous_pixels[source_index] & 0x03U)) {
+                continue;
+            }
+
+            const uint8_t shade = invert ? static_cast<uint8_t>(3U - original) : original;
+            const int x0 = x + (sx * destination_width) / source_width;
+            const int x1 = x + ((sx + 1) * destination_width) / source_width;
+            const Rect destination = clipped_rect(x0, y0,
+                                                   std::max(1, x1 - x0),
+                                                   std::max(1, y1 - y0));
+            if (destination.empty()) continue;
+
+            if (!dither || shade == 0 || shade == 3) {
+                const bool black = shade == 3 || (!dither && shade >= 2);
+                display_.fill_rect_unlocked(destination.x, destination.y,
+                                            destination.w, destination.h,
+                                            black ? BLACK : WHITE);
+                continue;
+            }
+
+            const uint8_t level = black_levels[shade];
+            for (int py = destination.y; py < destination.bottom(); ++py) {
+                for (int px = destination.x; px < destination.right(); ++px) {
+                    const uint8_t threshold = bayer2x2[((py & 1) << 1) | (px & 1)];
+                    display_.set_pixel_unlocked(px, py,
+                                                threshold < level ? BLACK : WHITE);
+                }
+            }
+        }
+    }
+    display_.unlock();
+}
+
 void Canvas::draw_char_unlocked(int x, int y, char character, const Font& font,
                                 Color color, int scale,
                                 bool transparent_background, Color background) {

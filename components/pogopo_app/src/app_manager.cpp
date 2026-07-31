@@ -75,7 +75,8 @@ void AppManager::processInput() {
             handleSystemMenu(event);
             continue;
         }
-        if (event.type == input::EventType::Pressed && event.button == input::Button::Menu) {
+        if (event.type == input::EventType::Pressed && event.button == input::Button::Menu &&
+            (!active_ || !active_->capturesMenuButton())) {
             openSystemMenu();
             continue;
         }

@@ -47,6 +47,8 @@ public:
     virtual ~Application() = default;
     virtual const char* id() const = 0;
     virtual const char* title() const = 0;
+    // Emulators may reserve MENU as a game button (for example GB Select).
+    virtual bool capturesMenuButton() const { return false; }
 
     virtual void onEnter(Context&) {}
     virtual void onExit(Context&) {}

@@ -35,6 +35,14 @@ public:
                      bool transparent_background = true,
                      Color background = WHITE);
     void draw_sprite(const Sprite& sprite);
+    // Draw a 2-bit indexed image (0=white, 3=black) using nearest-neighbour
+    // scaling and an optional 2x2 ordered dither for the two middle shades.
+    // When previous_pixels is supplied, unchanged source pixels are skipped.
+    void draw_indexed2_scaled(int x, int y, int source_width, int source_height,
+                              const uint8_t* pixels, int destination_width,
+                              int destination_height,
+                              const uint8_t* previous_pixels = nullptr,
+                              bool dither = true, bool invert = false);
     void draw_char(int x, int y, char character,
                    const Font& font = font5x7(), Color color = BLACK,
                    int scale = 1, bool transparent_background = true,
