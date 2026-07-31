@@ -6,6 +6,10 @@
 static const char* TAG = "i2c";
 static i2c_master_bus_handle_t s_bus = nullptr;
 
+i2c_master_bus_handle_t i2c_bus_handle() {
+    return s_bus;
+}
+
 esp_err_t i2c_bus_init() {
     if (s_bus) return ESP_OK;
 

@@ -2,9 +2,15 @@
 #include "peripheral_tests.h"
 #include "tasks.h"
 #include "board_pins.h"
-#include "pogopo/gfx/gfx.h"
+#include "system_state.h"
 
+#include "pogopo/gfx/gfx.h"
+#include "pogopo_input.h"
+#include "pogopo_haptics.h"
+
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -14,11 +20,13 @@
 #include "freertos/task.h"
 
 static const char* TAG = "app";
-static const char* GFX_TAG = "gfx_step3";
+static const char* DEMO_TAG = "step4";
 
 static pogopo::Graphics g_gfx;
+static pogopo::Input g_input;
+static pogopo::Haptics g_haptics;
 
-// 16x16 transparent sprite, MSB-first, two bytes per row.
+// 16x16 transparent smile sprite, MSB-first, two bytes per row.
 static constexpr uint8_t kPogopoSpriteData[] = {
     0x03,0xC0, 0x0F,0xF0, 0x1C,0x38, 0x30,0x0C,
     0x63,0xC6, 0x47,0xE2, 0xC6,0x63, 0xC0,0x03,
@@ -28,139 +36,273 @@ static constexpr uint8_t kPogopoSpriteData[] = {
 static const pogopo::Bitmap kPogopoSprite =
     pogopo::gfx::make_bitmap_1bpp(16, 16, kPogopoSpriteData);
 
-static void draw_static_demo() {
+namespace {
+constexpr pogopo::Rect kPlayfield{14, 58, 246, 104};
+constexpr int kSpriteMinX = kPlayfield.x + 2;
+constexpr int kSpriteMaxX = kPlayfield.x + kPlayfield.w - 18;
+constexpr int kSpriteMinY = kPlayfield.y + 18;
+constexpr int kSpriteMaxY = kPlayfield.y + kPlayfield.h - 18;
+
+struct ButtonWidget {
+    pogopo::Button button;
+    int x;
+    int y;
+    const char* label;
+};
+
+constexpr ButtonWidget kButtonWidgets[] = {
+    {pogopo::Button::Top,   300, 62,  "T"},
+    {pogopo::Button::Left,  280, 82,  "L"},
+    {pogopo::Button::Down,  300, 82,  "D"},
+    {pogopo::Button::Right, 320, 82,  "R"},
+    {pogopo::Button::B,     350, 76,  "B"},
+    {pogopo::Button::A,     372, 66,  "A"},
+    {pogopo::Button::Menu,  278, 116, "M"},
+    {pogopo::Button::Start, 326, 116, "S"},
+};
+
+void draw_button_widget(const ButtonWidget& widget, bool pressed) {
+    constexpr int w = 18;
+    constexpr int h = 17;
+    g_gfx.fillRect(widget.x, widget.y, w, h,
+                   pressed ? pogopo::Graphics::BLACK : pogopo::Graphics::WHITE);
+    g_gfx.drawRect(widget.x, widget.y, w, h, pogopo::Graphics::BLACK);
+    g_gfx.drawText(widget.x + 6, widget.y + 5, widget.label,
+                   pressed ? pogopo::Graphics::WHITE : pogopo::Graphics::BLACK, 1);
+}
+
+void draw_static_screen() {
     using G = pogopo::Graphics;
 
     g_gfx.clear(G::WHITE);
     g_gfx.drawRect(0, 0, g_gfx.width(), g_gfx.height(), G::BLACK);
-    g_gfx.drawText(14, 12, "pogopoOS2.0 STEP3", G::BLACK, 2);
-    g_gfx.drawText(14, 39, "pogopo::gfx  /  Graphics facade", G::BLACK, 1);
-    g_gfx.drawText(14, 54, "Canvas Font Bitmap Sprite Clip", G::BLACK, 1);
+    g_gfx.drawText(12, 10, "pogopoOS2.0 STEP4", G::BLACK, 2);
+    g_gfx.drawText(12, 36, "pogopo::input + pogopo::haptics", G::BLACK, 1);
 
-    // GFX facade primitive test.
-    g_gfx.drawLine(18, 78, 74, 104, G::BLACK);
-    g_gfx.drawRect(88, 75, 34, 26, G::BLACK);
-    g_gfx.fillRect(134, 75, 34, 26, G::BLACK);
-    g_gfx.drawCircle(202, 88, 14, G::BLACK);
-    g_gfx.fillCircle(246, 88, 14, G::BLACK);
-    g_gfx.drawBitmap(282, 72, kPogopoSprite, G::BLACK, true);
+    g_gfx.drawRect(kPlayfield.x, kPlayfield.y, kPlayfield.w, kPlayfield.h, G::BLACK);
+    g_gfx.drawText(kPlayfield.x + 6, kPlayfield.y + 5,
+                   "D-PAD MOVES  A/B VIBRO", G::BLACK, 1);
 
-    // Clip test area. The moving sprite is deliberately allowed to cross the
-    // logical edges, but pixels outside this rectangle must never appear.
-    g_gfx.drawRect(14, 116, 372, 42, G::BLACK);
-    g_gfx.drawText(20, 122, "CLIPPED SPRITE + DIRTY ROWS", G::BLACK, 1);
+    g_gfx.drawText(276, 48, "BUTTONS", G::BLACK, 1);
+    for (const auto& widget : kButtonWidgets) {
+        draw_button_widget(widget, false);
+    }
+    g_gfx.drawText(276, 140, "A+B: HEAVY", G::BLACK, 1);
+    g_gfx.drawText(276, 152, "LONG M: ALERT", G::BLACK, 1);
 
-    g_gfx.drawText(14, 174, "FPS:", G::BLACK, 1);
-    g_gfx.drawText(14, 188, "Refresh us:", G::BLACK, 1);
-    g_gfx.drawText(14, 202, "Rows:", G::BLACK, 1);
-    g_gfx.drawText(14, 216, "Bytes:", G::BLACK, 1);
+    g_gfx.drawText(14, 174, "Event:", G::BLACK, 1);
+    g_gfx.drawText(14, 188, "Held/Raw:", G::BLACK, 1);
+    g_gfx.drawText(14, 202, "Input drop/err:", G::BLACK, 1);
+    g_gfx.drawText(14, 216, "Vibro  FPS Rows Bytes:", G::BLACK, 1);
 
     ESP_ERROR_CHECK(g_gfx.presentFull());
 }
 
-static void graphics_step3_task(void*) {
+void set_event_text(const pogopo::InputEvent& event, char* output, size_t output_size) {
+    if (event.type == pogopo::InputEventType::Released ||
+        event.type == pogopo::InputEventType::LongPress ||
+        event.type == pogopo::InputEventType::Repeat) {
+        std::snprintf(output, output_size, "%s %s %ums",
+                      pogopo::event_type_name(event.type),
+                      pogopo::button_name(event.button),
+                      static_cast<unsigned>(event.held_ms));
+    } else {
+        std::snprintf(output, output_size, "%s %s",
+                      pogopo::event_type_name(event.type),
+                      pogopo::button_name(event.button));
+    }
+}
+
+void input_haptics_demo_task(void*) {
     using G = pogopo::Graphics;
 
-    constexpr pogopo::Rect clip_area{168, 136, 202, 17};
-    constexpr int sprite_y = 136;
-    constexpr int x_min = 158; // deliberately 10 px outside clip
-    constexpr int x_max = 365; // deliberately outside clip on right
+    int sprite_x = kPlayfield.x + kPlayfield.w / 2 - 8;
+    int sprite_y = kPlayfield.y + kPlayfield.h / 2;
+    int previous_x = -100; // force initial sprite draw
+    int previous_y = -100;
+    uint8_t previous_held = 0xFF; // force first redraw
+    bool combo_latched = false;
+    bool previous_haptic_active = false;
+    bool status_dirty = true;
+    char last_event[64] = "READY";
 
-    pogopo::Sprite sprite;
-    sprite.bitmap = kPogopoSprite;
-    sprite.x = x_min;
-    sprite.y = sprite_y;
-    sprite.foreground = G::BLACK;
-    sprite.transparent_background = true;
-
-    int previous_x = sprite.x;
-    int direction = 1;
     uint32_t frames = 0;
     uint32_t shown_fps = 0;
-    int64_t stats_window_start = esp_timer_get_time();
+    int64_t stats_start = esp_timer_get_time();
     TickType_t wake = xTaskGetTickCount();
 
+    // Small boot acknowledgement; confirms the corrected GPIO3 transistor path.
+    g_haptics.play(pogopo::HapticEffect::Tick);
+
     while (true) {
-        g_gfx.set_clip(clip_area);
-        g_gfx.fillRect(previous_x, sprite_y, 16, 16, G::WHITE);
+        pogopo::InputEvent event;
+        while (g_input.nextEvent(event, 0)) {
+            set_event_text(event, last_event, sizeof(last_event));
+            status_dirty = true;
+            ESP_LOGI(DEMO_TAG, "%s held=0x%02X raw=0x%02X",
+                     last_event, event.held, g_input.rawPort());
 
-        sprite.x += direction * 3;
-        if (sprite.x >= x_max) { sprite.x = x_max; direction = -1; }
-        else if (sprite.x <= x_min) { sprite.x = x_min; direction = 1; }
+            if (event.type == pogopo::InputEventType::Pressed) {
+                switch (event.button) {
+                    case pogopo::Button::A:
+                        g_haptics.play(pogopo::HapticEffect::Click);
+                        break;
+                    case pogopo::Button::B:
+                        g_haptics.play(pogopo::HapticEffect::DoubleClick);
+                        break;
+                    case pogopo::Button::Start:
+                        sprite_x = kPlayfield.x + kPlayfield.w / 2 - 8;
+                        sprite_y = kPlayfield.y + kPlayfield.h / 2;
+                        g_haptics.play(pogopo::HapticEffect::Confirm);
+                        break;
+                    default:
+                        break;
+                }
+            }
 
-        g_gfx.drawSprite(sprite);
-        g_gfx.reset_clip();
-        previous_x = sprite.x;
-
-        const esp_err_t err = g_gfx.present();
-        if (err != ESP_OK) {
-            ESP_LOGW(GFX_TAG, "present failed: %s", esp_err_to_name(err));
+            if (event.type == pogopo::InputEventType::LongPress &&
+                event.button == pogopo::Button::Menu) {
+                g_haptics.play(pogopo::HapticEffect::Alert);
+            }
         }
-        ++frames;
 
+        const uint8_t held = g_input.heldMask();
+        if (held & pogopo::mask(pogopo::Button::Left))  sprite_x -= 3;
+        if (held & pogopo::mask(pogopo::Button::Right)) sprite_x += 3;
+        if (held & pogopo::mask(pogopo::Button::Top))   sprite_y -= 3;
+        if (held & pogopo::mask(pogopo::Button::Down))  sprite_y += 3;
+        sprite_x = std::clamp(sprite_x, kSpriteMinX, kSpriteMaxX);
+        sprite_y = std::clamp(sprite_y, kSpriteMinY, kSpriteMaxY);
+
+        const pogopo::ButtonMask combo_mask = static_cast<pogopo::ButtonMask>(
+            pogopo::mask(pogopo::Button::A) | pogopo::mask(pogopo::Button::B));
+        const bool combo_now = g_input.comboHeld(combo_mask);
+        if (combo_now && !combo_latched) {
+            combo_latched = true;
+            std::snprintf(last_event, sizeof(last_event), "COMBO A+B HEAVY");
+            status_dirty = true;
+            g_haptics.play(pogopo::HapticEffect::Heavy);
+        } else if (!combo_now) {
+            combo_latched = false;
+        }
+
+        if (sprite_x != previous_x || sprite_y != previous_y) {
+            g_gfx.set_clip(kPlayfield);
+            g_gfx.fillRect(previous_x, previous_y, 16, 16, G::WHITE);
+            pogopo::Sprite sprite;
+            sprite.bitmap = kPogopoSprite;
+            sprite.x = sprite_x;
+            sprite.y = sprite_y;
+            sprite.foreground = G::BLACK;
+            sprite.transparent_background = true;
+            g_gfx.drawSprite(sprite);
+            g_gfx.reset_clip();
+            previous_x = sprite_x;
+            previous_y = sprite_y;
+        }
+
+        if (held != previous_held) {
+            for (const auto& widget : kButtonWidgets) {
+                draw_button_widget(widget, (held & pogopo::mask(widget.button)) != 0);
+            }
+            previous_held = held;
+            status_dirty = true;
+        }
+
+        const bool haptic_active = g_haptics.active();
+        if (haptic_active != previous_haptic_active) {
+            previous_haptic_active = haptic_active;
+            status_dirty = true;
+        }
+
+        g_system_state.buttons_port.store(g_input.rawPort());
+        g_system_state.buttons_ok.store(g_input.ok());
+
+        ++frames;
         const int64_t now = esp_timer_get_time();
-        if (now - stats_window_start >= 1000000) {
+        if (now - stats_start >= 1000000) {
             shown_fps = frames;
             frames = 0;
-            stats_window_start = now;
+            stats_start = now;
+            status_dirty = true;
+        }
 
-            const auto stats = g_gfx.stats();
-            char value[32];
-            g_gfx.fillRect(102, 171, 270, 56, G::WHITE);
+        if (status_dirty) {
+            const auto stats_before = g_gfx.stats();
+            char value[128];
 
-            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(shown_fps));
-            g_gfx.drawText(102, 174, value, G::BLACK, 1);
-            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_refresh_us));
-            g_gfx.drawText(102, 188, value, G::BLACK, 1);
-            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_rows));
-            g_gfx.drawText(102, 202, value, G::BLACK, 1);
-            std::snprintf(value, sizeof(value), "%u", static_cast<unsigned>(stats.last_bytes));
-            g_gfx.drawText(102, 216, value, G::BLACK, 1);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(g_gfx.present());
+            g_gfx.fillRect(70, 170, 316, 59, G::WHITE);
+            g_gfx.drawText(70, 174, last_event, G::BLACK, 1);
 
-            ESP_LOGI(GFX_TAG,
-                     "FPS=%u refresh=%uus rows=%u bytes=%u total=%llu vcom=%llu clip=[%d,%d,%d,%d]",
-                     static_cast<unsigned>(shown_fps),
-                     static_cast<unsigned>(stats.last_refresh_us),
-                     static_cast<unsigned>(stats.last_rows),
-                     static_cast<unsigned>(stats.last_bytes),
-                     static_cast<unsigned long long>(stats.total_refreshes),
-                     static_cast<unsigned long long>(stats.vcom_toggles),
-                     clip_area.x, clip_area.y, clip_area.w, clip_area.h);
+            std::snprintf(value, sizeof(value), "0x%02X / 0x%02X",
+                          static_cast<unsigned>(held),
+                          static_cast<unsigned>(g_input.rawPort()));
+            g_gfx.drawText(92, 188, value, G::BLACK, 1);
+
+            std::snprintf(value, sizeof(value), "%u / %u",
+                          static_cast<unsigned>(g_input.droppedEvents()),
+                          static_cast<unsigned>(g_input.readErrors()));
+            g_gfx.drawText(112, 202, value, G::BLACK, 1);
+
+            std::snprintf(value, sizeof(value), "%s  %u  %u  %u",
+                          haptic_active ? "ON" : "OFF",
+                          static_cast<unsigned>(shown_fps),
+                          static_cast<unsigned>(stats_before.last_rows),
+                          static_cast<unsigned>(stats_before.last_bytes));
+            g_gfx.drawText(148, 216, value, G::BLACK, 1);
+            status_dirty = false;
+        }
+
+        const esp_err_t present_err = g_gfx.present();
+        if (present_err != ESP_OK) {
+            ESP_LOGW(DEMO_TAG, "present failed: %s", esp_err_to_name(present_err));
         }
 
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(33));
     }
 }
 
-static void start_graphics_step3() {
-    pogopo::Graphics::Config cfg;
-    cfg.sck_io = board::LCD_SCK;
-    cfg.mosi_io = board::LCD_MOSI;
-    cfg.cs_io = board::LCD_CS;
-    cfg.disp_io = -1;
-    cfg.extmode_io = -1;
-    cfg.clock_hz = 2000000;
-    cfg.enable_vcom_task = true;
-    cfg.vcom_period_ms = 500;
-    cfg.vcom_task_priority = 4;
-    cfg.vcom_task_core = 0;
-
-    const esp_err_t err = g_gfx.begin(cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Graphics begin failed: %s", esp_err_to_name(err));
-        return;
-    }
-
-    draw_static_demo();
-    g_gfx.resetStats();
-
-    const BaseType_t result = xTaskCreatePinnedToCore(
-        graphics_step3_task, "gfx_step3_demo", 4096, nullptr, 3, nullptr, 1);
-    if (result != pdPASS) {
-        ESP_LOGE(TAG, "Could not start STEP3 graphics task");
-    }
+esp_err_t start_graphics() {
+    pogopo::Graphics::Config config;
+    config.sck_io = board::LCD_SCK;
+    config.mosi_io = board::LCD_MOSI;
+    config.cs_io = board::LCD_CS;
+    config.disp_io = -1;
+    config.extmode_io = -1;
+    config.clock_hz = 2000000;
+    config.enable_vcom_task = true;
+    config.vcom_period_ms = 500;
+    config.vcom_task_priority = 4;
+    config.vcom_task_core = 0;
+    return g_gfx.begin(config);
 }
+
+esp_err_t start_haptics() {
+    pogopo::Haptics::Config config;
+    config.motor_io = board::VIBRO;
+    config.active_high = true;
+    config.task_priority = 4;
+    config.task_core = 0;
+    return g_haptics.begin(config);
+}
+
+esp_err_t start_input() {
+    pogopo::Input::Config config;
+    config.bus = i2c_bus_handle();
+    config.address = 0x20;
+    config.interrupt_io = board::TCA9555_INT;
+    config.active_low = true;
+    config.poll_period_ms = 4;
+    config.debounce_samples = 3;
+    config.repeat_delay_ms = 450;
+    config.repeat_period_ms = 100;
+    config.long_press_ms = 700;
+    config.task_priority = 5;
+    config.task_core = 0;
+    return g_input.begin(config);
+}
+
+} // namespace
 
 extern "C" void app_main(void) {
     esp_chip_info_t chip = {};
@@ -168,7 +310,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GRAPHICS STEP3");
+    ESP_LOGI(TAG, "pogopoOS2.0 INPUT + HAPTICS STEP4");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -176,8 +318,24 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(i2c_bus_init());
     i2c_scan();
     run_peripheral_tests();
-    start_graphics_step3();
-    start_system_tasks();
 
-    ESP_LOGI(TAG, "STEP3 running: namespace + Graphics facade + Canvas + Font + Bitmap + Sprite + Clip");
+    ESP_ERROR_CHECK(start_graphics());
+    ESP_ERROR_CHECK(start_haptics());
+    ESP_ERROR_CHECK(start_input());
+
+    draw_static_screen();
+    g_gfx.resetStats();
+
+    if (xTaskCreatePinnedToCore(input_haptics_demo_task,
+                                "step4_demo",
+                                6144,
+                                nullptr,
+                                3,
+                                nullptr,
+                                1) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create STEP4 demo task");
+    }
+
+    start_system_tasks();
+    ESP_LOGI(TAG, "STEP4 ready: events + debounce + repeat + long press + queue + GPIO3 haptics");
 }

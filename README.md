@@ -1,50 +1,34 @@
-# pogopoOS2.0 — Graphics Step 3
+# pogopoOS2.0 STEP4 — Input + Haptics
 
-This build keeps the working Sharp LS027B7DH01 transport from the previous commit and adds a structured graphics layer.
+This build keeps the working `pogopo::gfx` previous commit engine and adds two native
+ESP-IDF components:
 
-## Public API
+- `pogopo_input`: persistent TCA9555 device, active-low buttons, 4 ms polling,
+  GPIO21 interrupt wake-up, per-button debounce, held/pressed/released,
+  repeat, long-press and a FreeRTOS event queue.
+- `pogopo_haptics`: asynchronous GPIO3 vibration motor task with queued effects.
 
-```cpp
-#include "pogopo/gfx/gfx.h"
+## Test controls
 
-pogopo::Graphics gfx;
-gfx.begin(config);
-gfx.clear();
-gfx.drawText(10, 10, "hello");
-gfx.drawSprite(sprite);
-gfx.present();
-```
+- D-pad: move the sprite.
+- A: click vibration.
+- B: double-click vibration.
+- Start: center the sprite + confirm pattern.
+- Hold Menu for 700 ms: alert pattern.
+- A+B together: heavy pattern.
 
-Everything also exists in the explicit `pogopo::gfx` namespace.
+The screen shows held/raw masks, the last event, input queue/error counters,
+vibration state, FPS and Sharp dirty-row transfer statistics.
 
-## Component layout
+## Button mapping
 
-```text
-components/pogopo_graphics/
-├── include/pogopo/gfx/
-│   ├── types.h
-│   ├── bitmap.h
-│   ├── sprite.h
-│   ├── font.h
-│   ├── sharp_display.h
-│   ├── canvas.h
-│   ├── graphics.h
-│   └── gfx.h
-└── src/
-    ├── drivers/sharp_display.cpp
-    ├── canvas/canvas.cpp
-    ├── font/font5x7.cpp
-    └── core/graphics.cpp
-```
+- P8 Top
+- P9 Down
+- P10 Left
+- P11 Right
+- P12 B
+- P13 A
+- P14 Menu
+- P15 Start
 
-## Included in this commit
-
-- `pogopo::gfx` namespace and friendly top-level aliases
-- `Graphics` facade (`gfx.drawLine`, `gfx.drawText`, `gfx.present`)
-- `Canvas` drawing layer
-- `Rect` clipping
-- 1-bit `Bitmap` with MSB/LSB bit order
-- `Sprite`
-- standalone `Font` abstraction and built-in 5x7 font
-- Sharp driver, PSRAM framebuffer, dirty rows and VCOM task preserved
-- test screen with a sprite deliberately crossing the clipping bounds
+All buttons are active LOW. The vibration motor is active HIGH on GPIO3.

@@ -112,17 +112,9 @@ void run_peripheral_tests() {
 }
 
 void peripheral_poll() {
-    uint8_t buttons = 0xFF;
-    if (read8(TCA9555_ADDR, 0x01, buttons)) {
-        const uint8_t prev = g_system_state.buttons_port.exchange(buttons);
-        g_system_state.buttons_ok = true;
-        if (buttons != prev) {
-            ESP_LOGI(TAG, "BUTTON CHANGE: 0x%02X -> 0x%02X", prev, buttons);
-        }
-    } else {
-        g_system_state.buttons_ok = false;
-    }
-
+    // TCA9555 button polling is owned by the pogopo_input component from STEP4.
+    // Keep this background poll focused on charger state so two independent
+    // tasks do not repeatedly read the same input register.
     uint8_t status = 0, fault = 0;
     if (read8(BQ24295_ADDR, 0x08, status) &&
         read8(BQ24295_ADDR, 0x09, fault)) {

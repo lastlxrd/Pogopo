@@ -9,6 +9,8 @@ idf_component_register(
         esp_driver_i2c
         esp_driver_gpio
         pogopo_graphics
+        pogopo_input
+        pogopo_haptics
         esp_system
         spi_flash
 )
