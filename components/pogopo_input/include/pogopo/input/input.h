@@ -143,3 +143,4 @@ const char* button_name(Button button);
 const char* event_type_name(EventType type);
 
 } // namespace pogopo::input
+

@@ -149,3 +149,4 @@ void minigb_apu_audio_write(struct minigb_apu_ctx *ctx,
  * \param ctx Library context.
  */
 void minigb_apu_audio_init(struct minigb_apu_ctx *ctx);
+

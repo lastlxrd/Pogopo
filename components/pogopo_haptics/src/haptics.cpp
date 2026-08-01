@@ -192,3 +192,4 @@ const char* effect_name(Effect effect) {
 }
 
 } // namespace pogopo::haptics
+

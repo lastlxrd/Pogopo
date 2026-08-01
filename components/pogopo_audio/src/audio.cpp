@@ -355,10 +355,17 @@ size_t Audio::pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frame
         return 0;
     }
 
-    for (size_t i = 0; i < frames; ++i) {
-        const uint32_t slot = (write + static_cast<uint32_t>(i)) % realtime_capacity_frames_;
-        realtime_buffer_[slot * 2U] = interleaved_stereo[i * 2U];
-        realtime_buffer_[slot * 2U + 1U] = interleaved_stereo[i * 2U + 1U];
+    // Copy at most two contiguous spans instead of doing a modulo operation
+    // for every stereo frame. This producer runs on the same core as I2S.
+    const uint32_t slot = write % realtime_capacity_frames_;
+    const size_t first_frames = std::min<size_t>(
+        frames, static_cast<size_t>(realtime_capacity_frames_ - slot));
+    std::memcpy(realtime_buffer_ + static_cast<size_t>(slot) * 2U,
+                interleaved_stereo, first_frames * 2U * sizeof(int16_t));
+    const size_t second_frames = frames - first_frames;
+    if (second_frames > 0) {
+        std::memcpy(realtime_buffer_, interleaved_stereo + first_frames * 2U,
+                    second_frames * 2U * sizeof(int16_t));
     }
     realtime_write_total_.store(write + static_cast<uint32_t>(frames),
                                 std::memory_order_release);

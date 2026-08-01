@@ -4042,3 +4042,4 @@ void gb_set_bootrom(struct gb_s *gb,
 #undef PGB_GET_ARITH
 #undef PGB_GET_ZERO
 #endif //PEANUT_GB_H
+

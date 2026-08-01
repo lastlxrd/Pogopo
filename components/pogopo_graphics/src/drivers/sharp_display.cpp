@@ -106,12 +106,15 @@ esp_err_t SharpDisplay::init(const Config& cfg) {
     gpio_set_level(static_cast<gpio_num_t>(cfg_.cs_io), 0);
     esp_rom_delay_us(2);
 
+    // The stable Arduino driver kept this compact 12 KiB framebuffer in fast
+    // RAM. Prefer internal memory so dithering and dirty-row scans do not
+    // contend with PSRAM ROM traffic on the other core.
     fb_ = static_cast<uint8_t*>(heap_caps_malloc(
-        FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        FRAMEBUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!fb_) {
-        ESP_LOGW(TAG, "PSRAM framebuffer allocation failed; trying internal RAM");
+        ESP_LOGW(TAG, "Internal framebuffer allocation failed; trying PSRAM");
         fb_ = static_cast<uint8_t*>(heap_caps_malloc(
-            FRAMEBUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            FRAMEBUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     }
     if (!fb_) {
         ESP_LOGE(TAG, "Framebuffer allocation failed (%u bytes)",
@@ -185,7 +188,7 @@ esp_err_t SharpDisplay::init(const Config& cfg) {
     }
 
     ESP_LOGI(TAG,
-             "Sharp LS027B7DH01 ready: fb=%uB PSRAM, tx=%uB DMA, SPI=%dHz, VCOM=%ums",
+             "Sharp LS027B7DH01 ready: fb=%uB, tx=%uB DMA, SPI=%dHz, VCOM=%ums",
              static_cast<unsigned>(FRAMEBUFFER_SIZE),
              static_cast<unsigned>(tx_capacity_), cfg_.clock_hz,
              static_cast<unsigned>(cfg_.vcom_period_ms));

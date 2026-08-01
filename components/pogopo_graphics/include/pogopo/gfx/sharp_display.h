@@ -26,7 +26,9 @@ public:
         int cs_io = 14;
         int disp_io = -1;
         int extmode_io = -1;
-        int clock_hz = 2000000;
+        // Proven stable by the pre-IDF Arduino firmware on this exact panel
+        // and wiring. 2 MHz capped full-frame updates near 20 FPS.
+        int clock_hz = 14000000;
 
         bool enable_vcom_task = true;
         uint32_t vcom_period_ms = 500;

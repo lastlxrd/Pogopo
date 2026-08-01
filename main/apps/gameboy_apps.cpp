@@ -143,7 +143,7 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
         const audio::RealtimeInfo realtime = context.audio.realtimeInfo();
         ESP_LOGI(TAG,
                  "PERF emu=%lu lcd=%lu frame=%luus max=%luus ROM=%s arena=%lu "
-                 "fb=%lu cache=%lu/%lu miss_us=%lu audio=%lu/%lu under=%lu "
+                 "fb=%lu cache=%u:%lu/%lu miss_us=%lu audio=%lu/%lu under=%lu "
                  "over=%lu drop=%lu heap=%lu/%lu i2cerr=%lu",
                  static_cast<unsigned long>(emu_delta),
                  static_cast<unsigned long>(lcd_delta),
@@ -152,6 +152,7 @@ void GameBoyApp::update(AppContext& context, uint32_t dt_ms) {
                  now.rom_in_arena ? "ARENA" : (now.rom_in_psram ? "PSRAM" : "INT"),
                  static_cast<unsigned long>(now.rom_arena_bytes),
                  static_cast<unsigned long>(now.frame_buffer_bytes),
+                 static_cast<unsigned>(now.cache_pages),
                  static_cast<unsigned long>(hit_delta),
                  static_cast<unsigned long>(miss_delta),
                  static_cast<unsigned long>(fill_us_delta),

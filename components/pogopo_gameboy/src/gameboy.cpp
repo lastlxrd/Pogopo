@@ -26,7 +26,7 @@ void audio_write(uint16_t address, uint8_t value);
 namespace {
 constexpr char TAG[] = "pogopo_gb";
 constexpr uint32_t ROM_CACHE_PAGE_SIZE = 16U * 1024U;
-constexpr uint8_t MAX_CACHE_PAGES = 4;
+constexpr uint8_t MAX_CACHE_PAGES = 8;
 // Keep the exact frame/audio rhythm used by the last stable Arduino build:
 // 548 stereo frames at 32768 Hz = 16.7236 ms.
 constexpr int64_t FRAME_PERIOD_US = 16724;
@@ -34,6 +34,7 @@ constexpr uint32_t MAX_SAVE_BYTES = 128U * 1024U;
 // MiniGB APU and MAX98357A both run at the same exact rate. No resampler is
 // used in Game Boy mode; this mirrors the stable pogopoOS1.0 audio path.
 constexpr uint32_t GB_AUDIO_SOURCE_RATE = 32768;
+constexpr uint32_t AUDIO_TARGET_PACKETS = 4;
 
 pogopo::gameboy::GameBoy* g_active_gameboy = nullptr;
 
@@ -72,6 +73,7 @@ struct GameBoy::Impl {
 
     uint8_t* rom_cache = nullptr;
     uint8_t rom_cache_pages = 0;
+    bool rom_cache_uses_arena = false;
     uint32_t cache_page_index[MAX_CACHE_PAGES]{};
     uint32_t cache_age[MAX_CACHE_PAGES]{};
     uint32_t cache_tick = 0;
@@ -93,6 +95,7 @@ struct GameBoy::Impl {
 
     SemaphoreHandle_t frame_mutex = nullptr;
     SemaphoreHandle_t core_mutex = nullptr;
+    SemaphoreHandle_t apu_mutex = nullptr;
 
     audio_sample_t audio_samples[AUDIO_SAMPLES_TOTAL]{};
 
@@ -131,7 +134,9 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     if (initialized_.load() || impl_) return ESP_ERR_INVALID_STATE;
     if (!audio.ok() || config.requested_cache_pages == 0 ||
         config.requested_cache_pages > MAX_CACHE_PAGES || config.task_stack < 4096 ||
-        config.display_divider == 0 || config.display_divider > 4) {
+        config.audio_task_stack < 3072 ||
+        config.display_divider == 0 || config.display_divider > 4 ||
+        config.internal_rom_arena_min_bytes > config.internal_rom_arena_bytes) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -142,24 +147,46 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     audio_ = &audio;
 
     if (config_.internal_rom_arena_bytes > 0) {
-        impl_->rom_arena = static_cast<uint8_t*>(heap_caps_malloc(
-            config_.internal_rom_arena_bytes,
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        constexpr uint32_t internal_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        const uint32_t free_internal = static_cast<uint32_t>(
+            heap_caps_get_free_size(internal_caps));
+        const uint32_t largest_internal = static_cast<uint32_t>(
+            heap_caps_get_largest_free_block(internal_caps));
+        const uint32_t safe_budget = free_internal > config_.internal_rom_headroom_bytes
+            ? free_internal - config_.internal_rom_headroom_bytes : 0;
+        uint32_t candidate = std::min({config_.internal_rom_arena_bytes,
+                                       largest_internal, safe_budget});
+        candidate -= candidate % ROM_CACHE_PAGE_SIZE;
+        uint32_t minimum = std::max<uint32_t>(
+            ROM_CACHE_PAGE_SIZE, config_.internal_rom_arena_min_bytes);
+        minimum -= minimum % ROM_CACHE_PAGE_SIZE;
+        while (candidate >= minimum && !impl_->rom_arena) {
+            impl_->rom_arena = static_cast<uint8_t*>(heap_caps_malloc(
+                candidate, internal_caps));
+            if (!impl_->rom_arena) candidate -= ROM_CACHE_PAGE_SIZE;
+        }
         if (impl_->rom_arena) {
-            impl_->rom_arena_size = config_.internal_rom_arena_bytes;
-            ESP_LOGI(TAG, "Reserved internal ROM arena: %lu bytes (largest free=%lu)",
+            impl_->rom_arena_size = candidate;
+            ESP_LOGI(TAG,
+                     "Reserved adaptive ROM arena: %lu bytes (%lu cache pages, free=%lu largest=%lu)",
                      static_cast<unsigned long>(impl_->rom_arena_size),
+                     static_cast<unsigned long>(impl_->rom_arena_size / ROM_CACHE_PAGE_SIZE),
+                     static_cast<unsigned long>(heap_caps_get_free_size(internal_caps)),
                      static_cast<unsigned long>(heap_caps_get_largest_free_block(
-                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+                         internal_caps)));
         } else {
-            ESP_LOGW(TAG, "Could not reserve %lu-byte ROM arena; PSRAM fallback remains available",
-                     static_cast<unsigned long>(config_.internal_rom_arena_bytes));
+            ESP_LOGW(TAG,
+                     "Could not reserve adaptive ROM arena (free=%lu largest=%lu headroom=%lu)",
+                     static_cast<unsigned long>(free_internal),
+                     static_cast<unsigned long>(largest_internal),
+                     static_cast<unsigned long>(config_.internal_rom_headroom_bytes));
         }
     }
 
     impl_->frame_mutex = xSemaphoreCreateMutex();
     impl_->core_mutex = xSemaphoreCreateMutex();
-    if (!impl_->frame_mutex || !impl_->core_mutex) {
+    impl_->apu_mutex = xSemaphoreCreateMutex();
+    if (!impl_->frame_mutex || !impl_->core_mutex || !impl_->apu_mutex) {
         end();
         return ESP_ERR_NO_MEM;
     }
@@ -201,6 +228,10 @@ void GameBoy::end() {
         vSemaphoreDelete(impl_->core_mutex);
         impl_->core_mutex = nullptr;
     }
+    if (impl_->apu_mutex) {
+        vSemaphoreDelete(impl_->apu_mutex);
+        impl_->apu_mutex = nullptr;
+    }
     impl_->~Impl();
     heap_caps_free(impl_);
     impl_ = nullptr;
@@ -210,11 +241,12 @@ esp_err_t GameBoy::allocateFrames() {
     if (!impl_) return ESP_ERR_INVALID_STATE;
     constexpr uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     constexpr uint32_t psram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    // Four original DMG shades are packed at 2 bpp. This keeps dithering while
-    // reducing the triple-buffer footprint from 69120 to 17280 bytes.
+    // Four original DMG shades are packed at 2 bpp. At only 5760 bytes each,
+    // all three hot frame buffers fit in internal RAM; reading the render copy
+    // from PSRAM on Core 0 used to contend with PSRAM-backed ROM reads.
     impl_->frame_front = allocate_bytes(FRAME_BYTES, internal, psram);
     impl_->frame_back = allocate_bytes(FRAME_BYTES, internal, psram);
-    impl_->frame_render = allocate_bytes(FRAME_BYTES, psram, internal);
+    impl_->frame_render = allocate_bytes(FRAME_BYTES, internal, psram);
     if (!impl_->frame_front || !impl_->frame_back || !impl_->frame_render) {
         freeFrames();
         return ESP_ERR_NO_MEM;
@@ -296,16 +328,43 @@ esp_err_t GameBoy::load(const char* path) {
             reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
     }
 
+    // Start the APU producer separately, exactly like the stable Arduino
+    // build. Its rate is governed by the fixed 32768 Hz I2S consumer and does
+    // not collapse when one emulated video frame takes longer than 16.7 ms.
+    audio_task_running_.store(true);
+    const BaseType_t audio_created = xTaskCreatePinnedToCore(
+        audioTaskEntry, "pogopo_gb_apu", config_.audio_task_stack, this,
+        config_.audio_task_priority, &audio_task_, config_.audio_task_core);
+    if (audio_created != pdPASS) {
+        audio_task_running_.store(false);
+        audio_->stopRealtime();
+        loaded_.store(false);
+        g_active_gameboy = nullptr;
+        freeRomAndSave();
+        last_error_.store(ESP_ERR_NO_MEM);
+        return ESP_ERR_NO_MEM;
+    }
+
     task_running_.store(true);
     const BaseType_t created = xTaskCreatePinnedToCore(
         taskEntry, "pogopo_gb", config_.task_stack, this,
         config_.task_priority, &task_, config_.task_core);
     if (created != pdPASS) {
         task_running_.store(false);
+        stop_requested_.store(true);
+        for (int wait = 0; wait < 100 && audio_task_running_.load(); ++wait) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        if (audio_task_running_.load() && audio_task_) {
+            vTaskDelete(audio_task_);
+            audio_task_running_.store(false);
+        }
+        audio_task_ = nullptr;
         audio_->stopRealtime();
         loaded_.store(false);
         g_active_gameboy = nullptr;
         freeRomAndSave();
+        stop_requested_.store(false);
         last_error_.store(ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
@@ -326,7 +385,8 @@ void GameBoy::unload() {
     if (!impl_) return;
 
     stop_requested_.store(true);
-    for (int wait = 0; wait < 150 && task_running_.load(); ++wait) {
+    for (int wait = 0; wait < 150 &&
+         (task_running_.load() || audio_task_running_.load()); ++wait) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (task_running_.load() && task_) {
@@ -334,6 +394,11 @@ void GameBoy::unload() {
         task_running_.store(false);
     }
     task_ = nullptr;
+    if (audio_task_running_.load() && audio_task_) {
+        vTaskDelete(audio_task_);
+        audio_task_running_.store(false);
+    }
+    audio_task_ = nullptr;
 
     if (audio_) audio_->stopRealtime();
     if (loaded_.load()) flushSave();
@@ -395,29 +460,53 @@ bool GameBoy::initializeRomCache() {
     if (!impl_->rom_in_psram) return true;
 
     const uint8_t requested = std::min(config_.requested_cache_pages, MAX_CACHE_PAGES);
-    for (int candidate = requested; candidate >= 1; --candidate) {
-        const uint8_t pages = static_cast<uint8_t>(candidate);
-        impl_->rom_cache = static_cast<uint8_t*>(heap_caps_malloc(
-            static_cast<size_t>(pages) * ROM_CACHE_PAGE_SIZE,
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        if (impl_->rom_cache) {
-            impl_->rom_cache_pages = pages;
-            const uint32_t copy_bytes = std::min<uint32_t>(ROM_CACHE_PAGE_SIZE,
-                                                            impl_->rom_size);
-            std::memcpy(impl_->rom_cache, impl_->rom_data, copy_bytes);
-            if (copy_bytes < ROM_CACHE_PAGE_SIZE) {
-                std::memset(impl_->rom_cache + copy_bytes, 0xFF,
-                            ROM_CACHE_PAGE_SIZE - copy_bytes);
-            }
-            impl_->cache_page_index[0] = 0;
-            impl_->cache_age[0] = ++impl_->cache_tick;
-            impl_->cache_last_page = 0;
-            impl_->cache_last_pointer = impl_->rom_cache;
-            return true;
+    // STEP9.4 previously left the 256 KiB arena unused whenever a ROM was
+    // larger than the arena, then tried to allocate a second cache block. That
+    // starved large Kirby cartridges of fast cache memory. Reuse the arena as
+    // the stable Arduino-style 8 x 16 KiB bank cache instead.
+    if (impl_->rom_arena && !impl_->rom_uses_arena) {
+        const uint8_t arena_pages = static_cast<uint8_t>(std::min<uint32_t>(
+            requested, impl_->rom_arena_size / ROM_CACHE_PAGE_SIZE));
+        if (arena_pages > 0) {
+            impl_->rom_cache = impl_->rom_arena;
+            impl_->rom_cache_pages = arena_pages;
+            impl_->rom_cache_uses_arena = true;
         }
     }
-    impl_->rom_cache_pages = 0;
-    return false;
+
+    if (!impl_->rom_cache) {
+        for (int candidate = requested; candidate >= 1; --candidate) {
+            const uint8_t pages = static_cast<uint8_t>(candidate);
+            impl_->rom_cache = static_cast<uint8_t*>(heap_caps_malloc(
+                static_cast<size_t>(pages) * ROM_CACHE_PAGE_SIZE,
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            if (impl_->rom_cache) {
+                impl_->rom_cache_pages = pages;
+                break;
+            }
+        }
+    }
+
+    if (!impl_->rom_cache || impl_->rom_cache_pages == 0) {
+        impl_->rom_cache_pages = 0;
+        return false;
+    }
+
+    const uint32_t copy_bytes = std::min<uint32_t>(ROM_CACHE_PAGE_SIZE,
+                                                    impl_->rom_size);
+    std::memcpy(impl_->rom_cache, impl_->rom_data, copy_bytes);
+    if (copy_bytes < ROM_CACHE_PAGE_SIZE) {
+        std::memset(impl_->rom_cache + copy_bytes, 0xFF,
+                    ROM_CACHE_PAGE_SIZE - copy_bytes);
+    }
+    impl_->cache_page_index[0] = 0;
+    impl_->cache_age[0] = ++impl_->cache_tick;
+    impl_->cache_last_page = 0;
+    impl_->cache_last_pointer = impl_->rom_cache;
+    ESP_LOGI(TAG, "PSRAM ROM cache: %u x 16 KiB (%s)",
+             static_cast<unsigned>(impl_->rom_cache_pages),
+             impl_->rom_cache_uses_arena ? "reserved arena" : "internal heap");
+    return true;
 }
 
 uint8_t GameBoy::readRom(uint32_t address) {
@@ -597,7 +686,9 @@ esp_err_t GameBoy::initializeSaveRam() {
 void GameBoy::freeRomAndSave() {
     if (!impl_) return;
     if (impl_->rom_data && !impl_->rom_uses_arena) heap_caps_free(impl_->rom_data);
-    if (impl_->rom_cache) heap_caps_free(impl_->rom_cache);
+    if (impl_->rom_cache && !impl_->rom_cache_uses_arena) {
+        heap_caps_free(impl_->rom_cache);
+    }
     if (impl_->save_data) heap_caps_free(impl_->save_data);
     impl_->rom_data = nullptr;
     impl_->rom_cache = nullptr;
@@ -607,6 +698,7 @@ void GameBoy::freeRomAndSave() {
     impl_->rom_uses_arena = false;
     impl_->rom_in_psram = false;
     impl_->rom_cache_pages = 0;
+    impl_->rom_cache_uses_arena = false;
     impl_->save_dirty = false;
     impl_->rom_path[0] = '\0';
     impl_->save_path[0] = '\0';
@@ -657,7 +749,9 @@ void GameBoy::reset() {
     if (!impl_ || !loaded_.load()) return;
     xSemaphoreTake(impl_->core_mutex, portMAX_DELAY);
     gb_reset(&impl_->core);
+    xSemaphoreTake(impl_->apu_mutex, portMAX_DELAY);
     minigb_apu_audio_init(&impl_->apu);
+    xSemaphoreGive(impl_->apu_mutex);
     xSemaphoreGive(impl_->core_mutex);
     if (audio_) audio_->startRealtimeStereo(GB_AUDIO_SOURCE_RATE, config_.realtime_volume);
     impl_->previous_valid = false;
@@ -691,6 +785,10 @@ void GameBoy::taskEntry(void* argument) {
     static_cast<GameBoy*>(argument)->taskLoop();
 }
 
+void GameBoy::audioTaskEntry(void* argument) {
+    static_cast<GameBoy*>(argument)->audioTaskLoop();
+}
+
 void GameBoy::taskLoop() {
     int64_t next_frame_us = esp_timer_get_time();
 
@@ -701,7 +799,6 @@ void GameBoy::taskLoop() {
         xSemaphoreTake(impl_->core_mutex, portMAX_DELAY);
         setCoreButtons(button_mask_.load(std::memory_order_acquire));
         gb_run_frame(&impl_->core);
-        pushAudioFrame();
         xSemaphoreGive(impl_->core_mutex);
 
         impl_->cache_hits.store(impl_->cache_hits_local, std::memory_order_relaxed);
@@ -740,9 +837,9 @@ void GameBoy::taskLoop() {
         }
 
         // If a demanding game is continuously late, taskYIELD() cannot run the
-        // lower-priority IDLE1 task. Give it one real tick periodically so the
-        // task watchdog is serviced without adding meaningful frame overhead.
-        if (remaining <= 0 && (++impl_->behind_yield_counter & 0x0FU) == 0U) {
+        // lower-priority IDLE1 task. One real tick roughly once per second is
+        // enough for the watchdog without taxing every sixteenth slow frame.
+        if (remaining <= 0 && (++impl_->behind_yield_counter & 0x3FU) == 0U) {
             vTaskDelay(1);
         }
         if (esp_timer_get_time() - next_frame_us > FRAME_PERIOD_US * 3) {
@@ -754,10 +851,42 @@ void GameBoy::taskLoop() {
     vTaskDelete(nullptr);
 }
 
+void GameBoy::audioTaskLoop() {
+    while (!stop_requested_.load()) {
+        if (!loaded_.load() || !audio_ || !audio_->enabled()) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        const audio::RealtimeInfo info = audio_->realtimeInfo();
+        if (!info.active || info.capacity_frames < AUDIO_SAMPLES) {
+            vTaskDelay(1);
+            continue;
+        }
+
+        // Keep the same four-packet cushion as the Arduino build, but only
+        // generate when a complete packet fits below the target watermark.
+        // The fixed-rate I2S reader therefore paces APU time at exactly
+        // 32768 Hz without tying pitch or continuity to video FPS.
+        const uint32_t target_frames = std::min<uint32_t>(
+            info.capacity_frames, AUDIO_TARGET_PACKETS * AUDIO_SAMPLES);
+        if (info.buffered_frames + AUDIO_SAMPLES <= target_frames) {
+            pushAudioFrame();
+        } else {
+            vTaskDelay(1);
+        }
+    }
+
+    audio_task_running_.store(false);
+    vTaskDelete(nullptr);
+}
+
 void GameBoy::pushAudioFrame() {
     if (!audio_ || !audio_->enabled()) return;
 
+    xSemaphoreTake(impl_->apu_mutex, portMAX_DELAY);
     minigb_apu_audio_callback(&impl_->apu, impl_->audio_samples);
+    xSemaphoreGive(impl_->apu_mutex);
     const size_t pushed = audio_->pushRealtimeStereo(
         reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
     impl_->audio_frames_pushed.fetch_add(static_cast<uint32_t>(pushed));
@@ -794,9 +923,12 @@ bool GameBoy::drawLatest(gfx::Canvas& canvas, ScaleMode mode, bool force_full) {
         y = (canvas.height() - height) / 2;
     }
 
+    // Peanut-GB emits 0=black, 1=dark, 2=light, 3=white. Canvas' indexed
+    // convention is the opposite, so inversion is required to reproduce the
+    // STEP9/9.1 2x2 ordered texture instead of reversing all four shades.
     canvas.draw_indexed2_packed_fast(
         x, y, SCREEN_WIDTH, SCREEN_HEIGHT, impl_->frame_render, width, height,
-        config_.dither, false);
+        config_.dither, true);
     impl_->previous_valid = true;
     impl_->previous_scale = mode;
     impl_->last_draw_sequence = sequence;
@@ -805,11 +937,18 @@ bool GameBoy::drawLatest(gfx::Canvas& canvas, ScaleMode mode, bool force_full) {
 }
 
 uint8_t GameBoy::apuRead(uint16_t address) {
-    return impl_ ? minigb_apu_audio_read(&impl_->apu, address) : 0xFF;
+    if (!impl_) return 0xFF;
+    xSemaphoreTake(impl_->apu_mutex, portMAX_DELAY);
+    const uint8_t value = minigb_apu_audio_read(&impl_->apu, address);
+    xSemaphoreGive(impl_->apu_mutex);
+    return value;
 }
 
 void GameBoy::apuWrite(uint16_t address, uint8_t value) {
-    if (impl_) minigb_apu_audio_write(&impl_->apu, address, value);
+    if (!impl_) return;
+    xSemaphoreTake(impl_->apu_mutex, portMAX_DELAY);
+    minigb_apu_audio_write(&impl_->apu, address, value);
+    xSemaphoreGive(impl_->apu_mutex);
 }
 
 const char* GameBoy::romTitle() const {

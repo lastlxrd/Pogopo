@@ -851,3 +851,4 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
 }
 
 } // namespace pogopo::demo
+

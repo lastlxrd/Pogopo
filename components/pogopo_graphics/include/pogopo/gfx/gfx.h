@@ -23,3 +23,4 @@ using Color = gfx::Color;
 inline constexpr Color BLACK = gfx::BLACK;
 inline constexpr Color WHITE = gfx::WHITE;
 } // namespace pogopo
+

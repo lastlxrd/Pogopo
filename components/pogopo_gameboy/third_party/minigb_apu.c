@@ -540,3 +540,4 @@ void minigb_apu_audio_init(struct minigb_apu_ctx *ctx)
 			minigb_apu_audio_write(ctx, 0xFF30 + i, wave_init[i]);
 	}
 }
+

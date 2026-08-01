@@ -16,3 +16,4 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # STEP9.2: the N16R8 Octal PSRAM path is used for large ROMs.
 # 80 MHz is the normal non-experimental performance setting for ESP32-S3 MSPI RAM.
+

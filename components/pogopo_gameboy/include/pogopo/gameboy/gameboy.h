@@ -56,21 +56,31 @@ public:
     static constexpr size_t FRAME_BYTES = (FRAME_PIXELS + 3U) / 4U;
 
     struct Config {
-        // Reserve one contiguous fast-RAM block before the background tasks
-        // fragment the heap. 256 KiB covers Kirby's complete cartridge.
-        uint32_t internal_rom_arena_bytes = 256U * 1024U;
+        // Reserve as much of this fast-RAM budget as is safe before the
+        // background tasks fragment the heap. Small ROMs run directly from
+        // it; PSRAM ROMs reuse it as a 16 KiB bank cache.
+        uint32_t internal_rom_arena_bytes = 128U * 1024U;
+        uint32_t internal_rom_arena_min_bytes = 32U * 1024U;
+        uint32_t internal_rom_headroom_bytes = 128U * 1024U;
         uint32_t internal_rom_limit = 256U * 1024U;
         uint32_t save_flush_interval_ms = 0;
         uint8_t realtime_volume = 74;
-        uint8_t requested_cache_pages = 4;
+        // The stable Arduino build used up to eight 16 KiB internal cache
+        // pages for cartridges that had to remain in PSRAM.
+        uint8_t requested_cache_pages = 8;
         // Keep Peanut-GB LCD rendering enabled every emulated frame for
         // compatibility. The frontend publishes only every Nth frame.
-        bool peanut_frame_skip = false;
+        bool peanut_frame_skip = true;
         uint8_t display_divider = 1;
         bool dither = true;
         UBaseType_t task_priority = 6;
         BaseType_t task_core = 1;
         uint32_t task_stack = 8192;
+        // Match the stable Arduino split: MiniGB APU generation is paced by
+        // the fixed-rate I2S consumer on Core 0, not by emulator frame time.
+        UBaseType_t audio_task_priority = 7;
+        BaseType_t audio_task_core = 0;
+        uint32_t audio_task_stack = 4096;
     };
 
     GameBoy() = default;
@@ -107,7 +117,9 @@ private:
     struct Impl;
 
     static void taskEntry(void* argument);
+    static void audioTaskEntry(void* argument);
     void taskLoop();
+    void audioTaskLoop();
     esp_err_t allocateFrames();
     void freeFrames();
     esp_err_t loadRomFile(const char* path);
@@ -123,10 +135,12 @@ private:
     audio::Audio* audio_ = nullptr;
     Impl* impl_ = nullptr;
     TaskHandle_t task_ = nullptr;
+    TaskHandle_t audio_task_ = nullptr;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> loaded_{false};
     std::atomic<bool> task_running_{false};
+    std::atomic<bool> audio_task_running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<uint8_t> button_mask_{0};
     std::atomic<uint32_t> frame_sequence_{0};

@@ -38,3 +38,4 @@ inline Bitmap make_bitmap_1bpp(int width, int height, const uint8_t* data,
 }
 
 } // namespace pogopo::gfx
+

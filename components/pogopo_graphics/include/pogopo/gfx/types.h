@@ -46,3 +46,4 @@ enum class BitOrder : uint8_t {
 };
 
 } // namespace pogopo::gfx
+

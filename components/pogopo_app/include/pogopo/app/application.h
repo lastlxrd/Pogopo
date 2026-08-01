@@ -58,3 +58,4 @@ public:
 };
 
 } // namespace pogopo::app
+

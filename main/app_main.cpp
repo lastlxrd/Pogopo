@@ -63,7 +63,9 @@ esp_err_t start_graphics() {
     config.cs_io = board::LCD_CS;
     config.disp_io = -1;
     config.extmode_io = -1;
-    config.clock_hz = 2000000;
+    // Same clock that was stable in the Arduino/Adafruit_SharpMem build.
+    // At 2 MHz a full 400x240 transfer alone took about 49 ms.
+    config.clock_hz = 14000000;
     config.enable_vcom_task = true;
     config.vcom_period_ms = 500;
     config.vcom_task_priority = 4;
@@ -90,7 +92,8 @@ esp_err_t start_audio() {
     config.lrck_io = board::AUDIO_LRCK;
     config.sample_rate = 32768;
     config.master_volume = g_settings.volume();
-    config.dma_desc_num = 8;
+    // Match the stable Arduino Game Boy I2S path.
+    config.dma_desc_num = 12;
     config.dma_frame_num = 512;
     config.render_frames = 512;
     config.realtime_buffer_frames = 4096;
@@ -105,16 +108,24 @@ esp_err_t start_audio() {
 
 esp_err_t start_gameboy() {
     pogopo::GameBoy::Config config;
-    config.internal_rom_arena_bytes = 256U * 1024U;
+    config.internal_rom_arena_bytes = 128U * 1024U;
+    config.internal_rom_arena_min_bytes = 32U * 1024U;
+    config.internal_rom_headroom_bytes = 128U * 1024U;
     config.internal_rom_limit = 256U * 1024U;
     config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
-    config.requested_cache_pages = 4;
-    config.peanut_frame_skip = false;
+    config.requested_cache_pages = 8;
+    // The Sharp frontend can present about 30 full scaled frames per second.
+    // Skip only Peanut's expensive LCD drawing on alternate frames while the
+    // CPU/APU still emulate every 59.7 Hz Game Boy frame.
+    config.peanut_frame_skip = true;
     config.display_divider = 1;
     config.dither = true;
     config.task_priority = 6;
     config.task_core = 1;
     config.task_stack = 8192;
+    config.audio_task_priority = 7;
+    config.audio_task_core = 0;
+    config.audio_task_stack = 4096;
     return g_gameboy.begin(g_audio, config);
 }
 
@@ -268,7 +279,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.4 FIXED AUDIO / DITHER");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.4 ARDUINO-REFERENCE OPTIMIZED");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -278,10 +289,12 @@ extern "C" void app_main(void) {
     i2c_scan();
     run_peripheral_tests();
 
-    ESP_ERROR_CHECK(start_graphics());
-    ESP_ERROR_CHECK(start_haptics());
+    // Reserve the adaptive ROM/cache arena before the display framebuffer,
+    // DMA transfer buffer and background task stacks fragment internal RAM.
     ESP_ERROR_CHECK(start_audio());
     ESP_ERROR_CHECK(start_gameboy());
+    ESP_ERROR_CHECK(start_graphics());
+    ESP_ERROR_CHECK(start_haptics());
     ESP_ERROR_CHECK(start_input());
 
     const esp_err_t sd_err = start_storage();
@@ -297,5 +310,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.4 ready: ROM arena, packed dither, fixed-rate audio");
+    ESP_LOGI(TAG, "STEP9.4 optimized: 14MHz LCD, decoupled APU, arena cache, corrected dither");
 }

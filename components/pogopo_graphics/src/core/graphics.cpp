@@ -22,3 +22,4 @@ void Graphics::end() {
 }
 
 } // namespace pogopo::gfx
+

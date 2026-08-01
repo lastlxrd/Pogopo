@@ -11,3 +11,4 @@ using input::button_name;
 using input::event_type_name;
 using input::mask;
 } // namespace pogopo
+

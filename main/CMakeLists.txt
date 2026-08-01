@@ -26,3 +26,4 @@ idf_component_register(
         spi_flash
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
+

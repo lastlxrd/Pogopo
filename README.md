@@ -1,7 +1,11 @@
-# STEP9.4 — Fixed-rate audio, packed dithering, and internal ROM arena
+# STEP9.4 — Full-speed CPU / 30 FPS LCD test pass
 
-STEP9.4 removes the unsuccessful timing compensation introduced in STEP9.3 and
-moves the 256 KiB Kirby fast path into deterministic internal RAM.
+This archive keeps the STEP9.4 codebase but ports the performance-critical
+choices from the last stable Arduino firmware: 14 MHz Sharp LCD transfers,
+Core-0 decoupled APU generation, an adaptive internal ROM cache, and hot display
+buffers in internal RAM. This test pass additionally targets a full-speed
+59.7 Hz Game Boy CPU with a 29.9 Hz rendered LCD. Git metadata and build output
+are intentionally absent.
 
 ## Why STEP9.3 regressed
 
@@ -14,14 +18,35 @@ moves the 256 KiB Kirby fast path into deterministic internal RAM.
 - An 8 x 16 KiB ROM cache consumed up to 128 KiB of internal RAM without moving
   the complete Kirby cartridge out of PSRAM.
 
-## Fixed-rate Game Boy audio
+## What the Arduino comparison found
+
+- The ESP-IDF Sharp driver was configured for 2 MHz while the stable Arduino
+  firmware used 14 MHz. A full 400 x 240 transfer at 2 MHz takes roughly 49 ms,
+  so smooth Game Boy presentation was impossible even with a fast emulator.
+- STEP9.4 generated one APU packet after each emulated frame. A slow frame
+  therefore starved audio immediately. Arduino generated APU audio in a
+  dedicated high-priority Core-0 task paced by blocking I2S output.
+- The 256 KiB arena helped ROMs that fit, but was left allocated and unused for
+  larger PSRAM ROMs. Those games could then fail to allocate a useful cache.
+- Peanut-GB shade indices are `0=black, 1=dark, 2=light, 3=white`. STEP9.4 fed
+  them to a renderer whose convention is the reverse, so the ordered dither
+  was inverted compared with STEP9/9.1.
+
+## Fixed-rate, frame-independent Game Boy audio
 
 - MiniGB APU and MAX98357A remain locked to `32768 -> 32768 Hz`.
 - Runtime playback-rate compensation and the `speed=...%` diagnostic are gone.
-- The normal path consumes exactly one stereo source frame per I2S frame.
+- MiniGB APU generation now runs in its own priority-7 task on Core 0. The
+  priority-8 I2S writer consumes at the hardware sample clock and paces APU
+  production through a four-packet watermark.
+- The emulator no longer renders 548 stereo frames inside every video frame,
+  freeing Core 1 and preventing slow video frames from directly draining audio.
+- A dedicated APU mutex preserves the same cross-core protection as the stable
+  Arduino implementation.
 - An underrun fades out and then fades back in over 64 samples; it never changes
   playback pitch to conceal slow emulation.
-- The four-packet startup prefill and whole-packet ring writes remain.
+- Ring writes copy at most two contiguous spans instead of doing one modulo
+  operation for every stereo frame.
 
 ## Packed four-shade framebuffer and restored dithering
 
@@ -31,31 +56,58 @@ All four original Game Boy shade indices are stored at 2 bits per pixel:
 - three frame buffers: `69120 -> 17280 bytes`;
 - total saving: `51840 bytes`.
 
-The Sharp renderer unpacks those indices directly into its 1 bpp framebuffer
-and applies the same 2 x 2 Bayer pattern used before STEP9.2. This restores the
-visible grey-texture dithering without returning to byte-per-pixel buffers.
+The Sharp renderer unpacks those indices directly into its 1 bpp framebuffer,
+correctly reverses Peanut's black-to-white index order, and applies the same
+2 x 2 ordered pattern used before STEP9.2. All three packed Game Boy buffers and
+the 12 KiB Sharp framebuffer prefer internal RAM.
 
-## Internal ROM arena
+## 14 MHz Sharp LCD fast path
 
-At Game Boy startup, before input/GUI background tasks fragment the heap, the
-frontend reserves one contiguous 256 KiB internal-RAM arena. ROMs up to that
-size load directly into the reservation and reuse it across game launches.
-Kirby and smaller cartridges should therefore report `ROM=ARENA`.
+- SPI is restored from 2 MHz to the exact 14 MHz value used by the attached
+  Arduino/Adafruit_SharpMem firmware on this board.
+- A worst-case full-screen payload drops from about 49 ms on the wire to about
+  7 ms. Dirty-row transfers remain enabled.
+- Dithering, framebuffer scans, and the DMA staging copy now avoid unnecessary
+  PSRAM traffic.
 
-If the reservation cannot be created, the firmware remains bootable and logs a
-warning before falling back to the regular internal heap and then PSRAM.
+## Adaptive internal ROM arena/cache
+
+The real-device log from the preceding archive reported `arena=0`: requesting
+one impossible 256 KiB contiguous block made the entire early reservation fail.
+This pass starts Game Boy memory setup before graphics and haptics, then reserves
+the largest 16 KiB-aligned block up to 128 KiB while leaving 128 KiB of internal
+headroom for later drivers and task stacks.
+
+ROMs that fit run directly from that arena. Larger ROMs remain in PSRAM and use
+the same arena as 2 to 8 cached 16 KiB pages. The exact page count is now printed
+in every `PERF` line.
 
 ## PSRAM bank-cache fallback
 
-Cartridges larger than the arena still use Octal PSRAM at 80 MHz. Their internal
-cache is capped at 4 x 16 KiB with 3/2/1-page allocation fallback. When at least
-two pages fit, bank 0 remains pinned and the remaining pages use LRU replacement.
-Automatic LCD frame skipping is disabled for every ROM location.
+Cartridges larger than the arena still use Octal PSRAM at 80 MHz, but the same
+arena becomes a guaranteed adaptive internal bank cache.
+If the early arena reservation failed, the cache falls back through smaller
+internal-heap allocations. Bank 0 remains pinned and the other pages use LRU
+replacement.
+
+## Full-speed CPU with half-rate LCD rendering
+
+The previous real-device result was `emu=39 lcd=31 frame=~26000us`. That is not
+an FPS counter mismatch: Kirby's CPU was genuinely advancing at only about 65%
+speed, which also slowed the timing of its music commands. Meanwhile the Sharp
+frontend could consume only about 31 distinct frames per second.
+
+Peanut now skips only its expensive LCD scanline drawing on alternate frames.
+CPU, timers, interrupts, joypad and APU register writes still run for every
+59.7 Hz Game Boy frame. The visible target remains about 30 FPS, so this does
+not lower the real LCD rate seen in the preceding log; it spends the unused
+render work on restoring game speed instead. The generic packed renderer also
+uses a per-frame dither lookup table and a clipping-free on-screen fast path.
 
 ## Scheduling and input safeguards retained from STEP9.3
 
 - BMI270 stays on Core 0, leaving Core 1 to input and Peanut-GB.
-- A continuously late emulator yields one real RTOS tick every 16 late frames.
+- A continuously late emulator yields one real RTOS tick every 64 late frames.
 - TCA9555 reads retain the 10 ms timeout and released-sample fail-safe.
 - Save writes remain disabled during gameplay and flush on exit or power-off.
 
@@ -65,7 +117,7 @@ The once-per-second line is now:
 
 ```text
 PERF emu=... lcd=... frame=...us max=...us ROM=ARENA/INT/PSRAM arena=...
-fb=17280 cache=hits/misses miss_us=... audio=buffer/cap under=... over=...
+fb=17280 cache=pages:hits/misses miss_us=... audio=buffer/cap under=... over=...
 drop=... heap=free/largest i2cerr=...
 ```
 
@@ -73,13 +125,33 @@ drop=... heap=free/largest i2cerr=...
 
 Use `1X FAST` for the first performance pass.
 
-1. Mario and Kirby should report `ROM=ARENA`, `fb=17280`, and no automatic
-   frame skip in the boot log.
+1. Startup should report `Reserved adaptive ROM arena` with at least 2 pages.
+   A larger ROM should report `ROM=PSRAM`; `cache=4:...` means four pages.
+   All games should report `fb=17280` and `LCD render frame skip: ON`.
 2. Audio pitch must stay constant. `under=` may expose a genuinely missed
    deadline, but no adaptive stretching should be audible.
-3. Target Mario values: `emu=59..60`, `lcd=28..30` or better.
-4. Target Kirby values: `emu>=55`, preferably `59..60`; `lcd=28..30` or better.
+3. Target Mario values: `emu=59..61`, `lcd=29..31`.
+4. Target Kirby values: `emu=59..61`, `lcd=29..31`, with normal game/music
+   tempo. A result near `emu=50` still identifies remaining non-LCD CPU cost.
 5. `under=` and `drop=` should stop climbing after startup.
 6. No `task_wdt` / `IDLE1` fault and no stuck direction after an I2C error.
 7. Mid-tone Game Boy graphics must show the restored ordered-dither texture.
 
+Useful startup lines:
+
+```text
+Sharp LS027B7DH01 ready: ... SPI=14000000Hz
+Reserved adaptive ROM arena: 65536 bytes (4 cache pages, ...)
+PSRAM ROM cache: 4 x 16 KiB (reserved arena)   # page count is device-dependent
+LCD render frame skip: ON (manual)
+```
+
+## Build and flash
+
+From an ESP-IDF 6.0.2 terminal:
+
+```powershell
+idf.py set-target esp32s3
+idf.py build
+idf.py -p COM7 flash monitor
+```
