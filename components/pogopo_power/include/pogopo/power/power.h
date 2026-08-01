@@ -14,8 +14,8 @@
 
 namespace pogopo::power {
 
-enum class EventType : uint8_t { UsbBlocked, ShutdownRequested };
-struct Event { EventType type = EventType::UsbBlocked; };
+enum class EventType : uint8_t { ShortPress, UsbBlocked, ShutdownRequested };
+struct Event { EventType type = EventType::ShortPress; };
 
 struct State {
     bool ok = false;
@@ -43,6 +43,7 @@ public:
         int battery_gate_io = 2;
         adc_unit_t adc_unit = ADC_UNIT_1;
         adc_channel_t adc_channel = ADC_CHANNEL_0;
+        uint16_t short_press_min_ms = 60;
         uint16_t shutdown_hold_ms = 2000;
         uint16_t poll_ms = 20;
         uint16_t battery_period_ms = 1500;
@@ -90,4 +91,3 @@ private:
 };
 
 } // namespace pogopo::power
-

@@ -21,6 +21,8 @@ public:
     void prepare(const char* path, const char* display_name, gameboy::ScaleMode scale);
     void onEnter(AppContext& context) override;
     void onExit(AppContext& context) override;
+    void onSuspend(AppContext& context) override;
+    void onResume(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
     void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
@@ -67,4 +69,3 @@ private:
 };
 
 } // namespace pogopo::demo
-

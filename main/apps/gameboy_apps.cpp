@@ -84,6 +84,17 @@ void GameBoyApp::onExit(AppContext&) {
     exit_hold_ms_ = 0;
 }
 
+void GameBoyApp::onSuspend(AppContext&) {
+    emulator_.setButtons({});
+    emulator_.setPaused(true);
+    exit_hold_ms_ = 0;
+}
+
+void GameBoyApp::onResume(AppContext&) {
+    emulator_.setPaused(false);
+    force_draw_ = true;
+}
+
 void GameBoyApp::onEvent(AppContext& context, const input::Event& event) {
     if (load_error_ != ESP_OK && event.type == input::EventType::Pressed &&
         event.button == input::Button::B) {

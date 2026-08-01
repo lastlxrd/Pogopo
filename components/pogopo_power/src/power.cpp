@@ -14,6 +14,10 @@ Power::~Power() { end(); }
 
 esp_err_t Power::begin(const Config& config) {
     if (running_.load() || !config.bus) return ESP_ERR_INVALID_STATE;
+    if (config.poll_ms == 0 || config.short_press_min_ms == 0 ||
+        config.short_press_min_ms >= config.shutdown_hold_ms) {
+        return ESP_ERR_INVALID_ARG;
+    }
     config_ = config;
     state_mutex_ = xSemaphoreCreateMutex();
     i2c_mutex_ = xSemaphoreCreateMutex();
@@ -57,8 +61,9 @@ esp_err_t Power::begin(const Config& config) {
                                 config.task_priority, &task_, config.task_core) != pdPASS) {
         running_.store(false); end(); return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "Power ready: BTN GPIO%d hold=%ums, BQ=0x%02X, BAT ADC GPIO%d gate GPIO%d",
-             config.power_button_io, config.shutdown_hold_ms, config.charger_address,
+    ESP_LOGI(TAG, "Power ready: BTN GPIO%d short>=%ums hold=%ums, BQ=0x%02X, BAT ADC GPIO%d gate GPIO%d",
+             config.power_button_io, config.short_press_min_ms,
+             config.shutdown_hold_ms, config.charger_address,
              config.battery_measure_io, config.battery_gate_io);
     return ESP_OK;
 }
@@ -175,6 +180,11 @@ void Power::taskEntry(void* arg) { static_cast<Power*>(arg)->taskLoop(); }
 void Power::taskLoop() {
     TickType_t wake = xTaskGetTickCount();
     TickType_t pressed_at = 0, last_status = 0, last_battery = 0;
+    // QON can still be held while the console finishes booting. Do not turn
+    // that release into a phantom quick-menu press; arm only after observing
+    // the button released once.
+    bool button_armed = false;
+    bool press_active = false;
     bool event_sent = false;
     uint32_t sequence = 0, errors = 0;
     uint8_t invalid_battery_reads = 0;
@@ -182,8 +192,15 @@ void Power::taskLoop() {
     while (running_.load()) {
         const TickType_t now = xTaskGetTickCount();
         s.power_button_down = buttonDown();
-        if (s.power_button_down) {
-            if (!pressed_at) pressed_at = now;
+        if (!button_armed) {
+            if (!s.power_button_down) button_armed = true;
+            s.hold_percent = 0;
+        } else if (s.power_button_down) {
+            if (!press_active) {
+                pressed_at = now;
+                press_active = true;
+                event_sent = false;
+            }
             const uint32_t held = (now - pressed_at) * portTICK_PERIOD_MS;
             s.hold_percent = static_cast<uint8_t>(std::min<uint32_t>(100, held * 100 / config_.shutdown_hold_ms));
             if (!event_sent && held >= config_.shutdown_hold_ms) {
@@ -192,7 +209,18 @@ void Power::taskLoop() {
                 Event event{ s.usb_present ? EventType::UsbBlocked : EventType::ShutdownRequested };
                 xQueueSend(queue_, &event, 0); event_sent = true;
             }
-        } else { pressed_at = 0; event_sent = false; s.hold_percent = 0; }
+        } else {
+            if (press_active && !event_sent) {
+                const uint32_t held = (now - pressed_at) * portTICK_PERIOD_MS;
+                if (held >= config_.short_press_min_ms) {
+                    Event event{EventType::ShortPress};
+                    xQueueSend(queue_, &event, 0);
+                }
+            }
+            press_active = false;
+            event_sent = false;
+            s.hold_percent = 0;
+        }
 
         if (refresh_requested_.exchange(false) || now - last_status >= pdMS_TO_TICKS(500)) {
             last_status = now;
@@ -230,4 +258,3 @@ esp_err_t Power::enterShipMode() {
 }
 
 } // namespace pogopo::power
-

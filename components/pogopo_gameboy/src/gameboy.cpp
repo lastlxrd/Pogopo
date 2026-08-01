@@ -307,6 +307,7 @@ esp_err_t GameBoy::load(const char* path) {
     impl_->behind_yield_counter = 0;
     frame_sequence_.store(0);
     button_mask_.store(0);
+    paused_.store(false);
     stop_requested_.store(false);
     loaded_.store(true);
     g_active_gameboy = this;
@@ -406,6 +407,7 @@ void GameBoy::unload() {
     g_active_gameboy = nullptr;
     freeRomAndSave();
     stop_requested_.store(false);
+    paused_.store(false);
     button_mask_.store(0);
 }
 
@@ -757,6 +759,41 @@ void GameBoy::reset() {
     impl_->previous_valid = false;
 }
 
+void GameBoy::setPaused(bool paused) {
+    if (!impl_ || !loaded_.load()) {
+        paused_.store(false);
+        return;
+    }
+    if (paused) {
+        if (paused_.exchange(true)) return;
+        button_mask_.store(0, std::memory_order_release);
+        if (audio_) audio_->stopRealtime();
+        return;
+    }
+    if (!paused_.load()) return;
+
+    if (!audio_ || !audio_->enabled()) {
+        paused_.store(false);
+        return;
+    }
+    const esp_err_t audio_error =
+        audio_->startRealtimeStereo(GB_AUDIO_SOURCE_RATE, config_.realtime_volume);
+    if (audio_error != ESP_OK) {
+        ESP_LOGW(TAG, "Could not resume Game Boy audio: %s", esp_err_to_name(audio_error));
+        paused_.store(false);
+        return;
+    }
+
+    // Restart with the same short silent cushion used during initial load so
+    // opening/closing the quick menu cannot produce a sharp underrun click.
+    std::memset(impl_->audio_samples, 0, sizeof(impl_->audio_samples));
+    for (int packet = 0; packet < 4; ++packet) {
+        audio_->pushRealtimeStereo(
+            reinterpret_cast<const int16_t*>(impl_->audio_samples), AUDIO_SAMPLES);
+    }
+    paused_.store(false);
+}
+
 void GameBoy::setButtons(const Buttons& buttons) {
     uint8_t mask = 0;
     if (buttons.up) mask |= 1U << 0U;
@@ -793,6 +830,11 @@ void GameBoy::taskLoop() {
     int64_t next_frame_us = esp_timer_get_time();
 
     while (!stop_requested_.load()) {
+        if (paused_.load()) {
+            next_frame_us = esp_timer_get_time();
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
         next_frame_us += FRAME_PERIOD_US;
         const int64_t frame_start = esp_timer_get_time();
 
@@ -853,7 +895,7 @@ void GameBoy::taskLoop() {
 
 void GameBoy::audioTaskLoop() {
     while (!stop_requested_.load()) {
-        if (!loaded_.load() || !audio_ || !audio_->enabled()) {
+        if (!loaded_.load() || paused_.load() || !audio_ || !audio_->enabled()) {
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }

@@ -96,6 +96,7 @@ public:
     void unload();
     esp_err_t flushSave();
     void reset();
+    void setPaused(bool paused);
 
     void setButtons(const Buttons& buttons);
     bool drawLatest(gfx::Canvas& canvas, ScaleMode mode, bool force_full = false);
@@ -103,6 +104,7 @@ public:
     bool ready() const { return initialized_.load(); }
     bool loaded() const { return loaded_.load(); }
     bool running() const { return task_running_.load(); }
+    bool paused() const { return paused_.load(); }
     uint32_t frameSequence() const { return frame_sequence_.load(); }
     const char* romTitle() const;
     const char* romPath() const;
@@ -141,6 +143,7 @@ private:
     std::atomic<bool> loaded_{false};
     std::atomic<bool> task_running_{false};
     std::atomic<bool> audio_task_running_{false};
+    std::atomic<bool> paused_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<uint8_t> button_mask_{0};
     std::atomic<uint32_t> frame_sequence_{0};

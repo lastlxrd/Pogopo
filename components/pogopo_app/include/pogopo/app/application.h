@@ -52,10 +52,13 @@ public:
 
     virtual void onEnter(Context&) {}
     virtual void onExit(Context&) {}
+    // Called while a system overlay owns input. Games with background tasks
+    // should pause them here and resume them in onResume().
+    virtual void onSuspend(Context&) {}
+    virtual void onResume(Context&) {}
     virtual void onEvent(Context&, const input::Event&) {}
     virtual void update(Context&, uint32_t /*dt_ms*/) {}
     virtual void draw(Context&, const gfx::Rect& dirty_region) = 0;
 };
 
 } // namespace pogopo::app
-

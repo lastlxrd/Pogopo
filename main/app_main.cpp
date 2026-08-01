@@ -155,6 +155,7 @@ esp_err_t start_power() {
     config.charger_int_io = board::CHARGER_INT;
     config.battery_measure_io = board::BAT_MEAS;
     config.battery_gate_io = board::BAT_GATE;
+    config.short_press_min_ms = 60;
     config.shutdown_hold_ms = 2000;
     config.task_core = 0;
     return g_power.begin(config);
@@ -175,6 +176,11 @@ void draw_power_message(const char* title, const char* line1, const char* line2)
 }
 
 void handle_power_event(const pogopo::power::Event& event) {
+    if (event.type == pogopo::power::EventType::ShortPress) {
+        g_app_manager.toggleSystemMenu();
+        return;
+    }
+
     if (event.type == pogopo::power::EventType::UsbBlocked) {
         g_haptics.play(pogopo::HapticEffect::Alert);
         g_audio.play(pogopo::AudioEffect::Error);
@@ -191,11 +197,20 @@ void handle_power_event(const pogopo::power::Event& event) {
     g_power.waitForRelease(8000); // QON must be released or the charger can wake again immediately.
     vTaskDelay(pdMS_TO_TICKS(120));
     g_audio.stopAll();
+
+    // A Memory LCD keeps its pixels without power. Clear both the software
+    // framebuffer and the physical panel before BATFET is disabled so the
+    // previous POWER OFF card cannot reappear during the next boot.
+    g_gfx.display().clear(pogopo::gfx::WHITE);
+    const esp_err_t lcd_clear_error = g_gfx.display().clear_lcd_hw();
+    if (lcd_clear_error != ESP_OK) {
+        ESP_LOGW(TAG, "LCD pre-shutdown clear failed: %s",
+                 esp_err_to_name(lcd_clear_error));
+    }
+
     const esp_err_t err = g_power.enterShipMode();
     if (err != ESP_OK) {
         draw_power_message("POWER ERROR", esp_err_to_name(err), "PRESS RESET OR TRY AGAIN");
-    } else {
-        draw_power_message("SHIP MODE SENT", "BATFET DISABLED", "GOODBYE :) ");
     }
     while (true) vTaskDelay(pdMS_TO_TICKS(1000));
 }
@@ -279,7 +294,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.4 ARDUINO-REFERENCE OPTIMIZED");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.5.1 POWER MENU / UI POLISH");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -310,5 +325,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.4 optimized: 14MHz LCD, decoupled APU, arena cache, corrected dither");
+    ESP_LOGI(TAG, "STEP9.5.1 ready: stable GB, quick menu, clean LCD shutdown");
 }

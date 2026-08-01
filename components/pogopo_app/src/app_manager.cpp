@@ -1,16 +1,17 @@
 #include "pogopo/app/app_manager.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace pogopo::app {
 
 namespace {
-constexpr gui::ListItem kSystemMenuItems[] = {
-    {"Resume", "Return to app", "resume", true},
-    {"Home", "Open launcher", "home", true},
-    {"About", "System information", "about", true},
-};
+constexpr int kSystemMenuItemCount = 4;
+constexpr int kResumeItem = 0;
+constexpr int kVolumeItem = 1;
+constexpr int kSettingsItem = 2;
+constexpr int kHomeItem = 3;
 }
 
 void Context::invalidate() { manager.invalidate(); }
@@ -52,7 +53,9 @@ Application* AppManager::find(const char* id) const {
 
 bool AppManager::switchTo(Application* app) {
     if (!app) return false;
-    closeSystemMenu(false);
+    // Leaving from the overlay should not briefly resume a background game
+    // task only to stop it again in onExit().
+    closeSystemMenu(false, false);
     if (active_ == app) {
         invalidate();
         return true;
@@ -67,6 +70,16 @@ bool AppManager::switchTo(Application* app) {
 bool AppManager::launch(const char* id) { return switchTo(find(id)); }
 bool AppManager::launch(size_t index) { return index < count_ ? switchTo(apps_[index]) : false; }
 bool AppManager::home() { return switchTo(home_); }
+
+void AppManager::toggleSystemMenu() {
+    if (system_menu_open_) {
+        haptics_.play(haptics::Effect::Click);
+        if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Back);
+        closeSystemMenu(true);
+    } else {
+        openSystemMenu();
+    }
+}
 
 void AppManager::processInput() {
     input::Event event;
@@ -126,21 +139,34 @@ esp_err_t AppManager::render() {
 }
 
 gfx::Rect AppManager::systemMenuRect() const {
-    return {84, 43, 232, 154};
+    return {62, 16, 276, 208};
 }
 
 void AppManager::openSystemMenu() {
+    if (system_menu_open_) return;
     system_menu_open_ = true;
     system_menu_selected_ = 0;
+    if (active_) active_->onSuspend(context_);
     haptics_.play(haptics::Effect::DoubleClick);
     if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Click);
     invalidate(systemMenuRect());
 }
 
-void AppManager::closeSystemMenu(bool redraw_underlay) {
+void AppManager::closeSystemMenu(bool redraw_underlay, bool resume_app) {
     if (!system_menu_open_) return;
     system_menu_open_ = false;
+    if (resume_app && active_) active_->onResume(context_);
     if (redraw_underlay) invalidate();
+}
+
+void AppManager::adjustSystemVolume(int delta) {
+    const int volume = std::clamp<int>(
+        static_cast<int>(audio_.masterVolume()) + delta, 0, 100);
+    audio_.setMasterVolume(static_cast<uint8_t>(volume));
+    settings_.setVolume(static_cast<uint8_t>(volume));
+    haptics_.play(haptics::Effect::Tick);
+    if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Tick);
+    invalidate(systemMenuRect());
 }
 
 void AppManager::handleSystemMenu(const input::Event& event) {
@@ -149,45 +175,70 @@ void AppManager::handleSystemMenu(const input::Event& event) {
     if (!navigation) return;
 
     if (event.button == input::Button::Top) {
-        system_menu_selected_ = (system_menu_selected_ + 2) % 3;
+        system_menu_selected_ =
+            (system_menu_selected_ + kSystemMenuItemCount - 1) % kSystemMenuItemCount;
         haptics_.play(haptics::Effect::Tick);
         if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Tick);
         invalidate(systemMenuRect());
     } else if (event.button == input::Button::Down) {
-        system_menu_selected_ = (system_menu_selected_ + 1) % 3;
+        system_menu_selected_ = (system_menu_selected_ + 1) % kSystemMenuItemCount;
         haptics_.play(haptics::Effect::Tick);
         if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Tick);
         invalidate(systemMenuRect());
+    } else if (system_menu_selected_ == kVolumeItem &&
+               event.button == input::Button::Left) {
+        adjustSystemVolume(-5);
+    } else if (system_menu_selected_ == kVolumeItem &&
+               event.button == input::Button::Right) {
+        adjustSystemVolume(5);
     } else if (event.type == input::EventType::Pressed &&
                (event.button == input::Button::B || event.button == input::Button::Menu)) {
         haptics_.play(haptics::Effect::Click);
         if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Back);
         closeSystemMenu(true);
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
+        const int action = system_menu_selected_;
+        if (action == kVolumeItem) {
+            adjustSystemVolume(5);
+            return;
+        }
         haptics_.play(haptics::Effect::Confirm);
         if (settings_.uiSoundsEnabled()) audio_.play(audio::Effect::Confirm);
-        const int action = system_menu_selected_;
-        closeSystemMenu(false);
-        if (action == 0) invalidate();
-        else if (action == 1) home();
-        else if (action == 2) launch("about");
+        if (action == kResumeItem) {
+            closeSystemMenu(true);
+        } else if (action == kSettingsItem) {
+            closeSystemMenu(false, false);
+            launch("settings");
+        } else if (action == kHomeItem) {
+            closeSystemMenu(false, false);
+            home();
+        }
     }
 }
 
 void AppManager::drawSystemMenu() {
+    char volume[32]{};
+    std::snprintf(volume, sizeof(volume), "%u%%  LEFT/RIGHT",
+                  static_cast<unsigned>(audio_.masterVolume()));
+    const gui::ListItem items[kSystemMenuItemCount] = {
+        {"Resume", "Return to game or app", "resume", true},
+        {"Volume", volume, "volume", true},
+        {"Settings", "Open system settings", "settings", true},
+        {"Home", "Leave app and open launcher", "home", true},
+    };
+
     gui::Dialog dialog(systemMenuRect());
-    dialog.setTitle("SYSTEM MENU");
-    dialog.setMessage("Use UP/DOWN and A. B or MENU closes this overlay.");
-    dialog.setFooter("A SELECT   B BACK");
+    dialog.setTitle("QUICK MENU");
+    dialog.setMessage("UP/DOWN SELECT");
+    dialog.setFooter("A SELECT   B BACK   L/R VOLUME");
     dialog.draw(gfx_.canvas(), theme_);
 
-    gui::List list({systemMenuRect().x + 18, systemMenuRect().y + 62,
-                    systemMenuRect().w - 36, 67});
-    list.setItems(kSystemMenuItems, 3);
-    list.setRowHeight(21);
+    gui::List list({systemMenuRect().x + 14, systemMenuRect().y + 54,
+                    systemMenuRect().w - 28, 116});
+    list.setItems(items, kSystemMenuItemCount);
+    list.setRowHeight(28);
     list.setSelected(static_cast<size_t>(system_menu_selected_));
     list.draw(gfx_.canvas(), theme_);
 }
 
 } // namespace pogopo::app
-

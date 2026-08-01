@@ -1044,7 +1044,9 @@ uint16_t Audio::envelopeQ15(const Voice& voice) const {
 
 const Audio::Note* Audio::patternForEffect(Effect effect, size_t& count) const {
     static constexpr Note tick[] = {
-        {1900, 22, 24, Waveform::Square, 1, 5},
+        // Softer cursor feedback: lower pitch, triangle harmonics, less gain,
+        // and a longer release than the old 1.9 kHz square spike.
+        {1150, 22, 14, Waveform::Triangle, 3, 9},
     };
     static constexpr Note click[] = {
         {1250, 34, 58, Waveform::Triangle, 2, 7},

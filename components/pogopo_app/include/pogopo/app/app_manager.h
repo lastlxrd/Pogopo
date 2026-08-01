@@ -10,7 +10,9 @@ namespace pogopo::app {
 
 class AppManager {
 public:
-    static constexpr size_t MAX_APPS = 12;
+    // STEP9.5 already registers 12 built-ins. Keep inexpensive pointer slots
+    // available for user games instead of silently rejecting the 13th app.
+    static constexpr size_t MAX_APPS = 24;
 
     AppManager(gfx::Graphics& graphics, input::Input& input, haptics::Haptics& haptics,
                audio::Audio& audio, storage::Storage& storage, imu::Imu& imu, power::Power& power,
@@ -21,6 +23,7 @@ public:
     bool launch(const char* id);
     bool launch(size_t index);
     bool home();
+    void toggleSystemMenu();
 
     void processInput();
     void update(uint32_t dt_ms);
@@ -44,7 +47,8 @@ private:
     bool switchTo(Application* app);
     void handleSystemMenu(const input::Event& event);
     void openSystemMenu();
-    void closeSystemMenu(bool redraw_underlay = true);
+    void closeSystemMenu(bool redraw_underlay = true, bool resume_app = true);
+    void adjustSystemVolume(int delta);
     void drawSystemMenu();
     gfx::Rect systemMenuRect() const;
     static gfx::Rect unite(const gfx::Rect& a, const gfx::Rect& b);
@@ -73,4 +77,3 @@ private:
 };
 
 } // namespace pogopo::app
-

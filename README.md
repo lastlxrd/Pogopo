@@ -1,11 +1,27 @@
-# STEP9.4 — Full-speed CPU / 30 FPS LCD test pass
+# STEP9.5.1 — Power quick menu and UI polish
 
-This archive keeps the STEP9.4 codebase but ports the performance-critical
-choices from the last stable Arduino firmware: 14 MHz Sharp LCD transfers,
-Core-0 decoupled APU generation, an adaptive internal ROM cache, and hot display
-buffers in internal RAM. This test pass additionally targets a full-speed
-59.7 Hz Game Boy CPU with a 29.9 Hz rendered LCD. Git metadata and build output
-are intentionally absent.
+This micro-fix is based byte-for-byte on the stable STEP9.5 merge and leaves its
+full-speed Game Boy / 30 FPS LCD pipeline unchanged. It adds:
+
+- a short Power-button press that opens the quick menu;
+- Resume, 5% volume adjustment, Settings and Home actions;
+- Game Boy suspend/resume while the overlay owns input;
+- the existing 650 ms `START + B` fast exit remains available;
+- a physical Sharp Memory LCD clear immediately before BQ24295 ship mode;
+- a quieter 1.15 kHz triangle-wave UI tick with a soft attack/release;
+- app capacity raised from 12 to 24 so new built-in games are not silently
+  rejected after the 12 existing OS apps are registered.
+
+The Power task ignores the release used to boot the console, so the quick menu
+cannot open by itself during startup. A two-second hold retains the existing
+shutdown behavior.
+
+## STEP9.5 performance baseline
+
+The stable base ports the performance-critical choices from the last Arduino
+firmware: 14 MHz Sharp LCD transfers, Core-0 decoupled APU generation, an
+adaptive internal ROM cache, hot display buffers in internal RAM, full-speed
+59.7 Hz Game Boy CPU emulation and approximately 29.9 Hz LCD presentation.
 
 ## Why STEP9.3 regressed
 
