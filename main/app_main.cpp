@@ -4,6 +4,7 @@
 #include "board_pins.h"
 #include "system_state.h"
 #include "apps/demo_apps.h"
+#include "apps/gameboy_apps.h"
 
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
@@ -15,6 +16,7 @@
 #include "pogopo_imu.h"
 #include "pogopo_power.h"
 #include "pogopo_settings.h"
+#include "pogopo_gameboy.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -36,6 +38,7 @@ static pogopo::Storage g_storage;
 static pogopo::Imu g_imu;
 static pogopo::Power g_power;
 static pogopo::Settings g_settings;
+static pogopo::GameBoy g_gameboy;
 static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power, g_settings);
 
 static pogopo::demo::LauncherApp g_launcher_app;
@@ -48,6 +51,8 @@ static pogopo::demo::MotionLabApp g_motion_app;
 static pogopo::demo::PowerStatusApp g_power_app;
 static pogopo::demo::SettingsApp g_settings_app;
 static pogopo::demo::AboutApp g_about_app;
+static pogopo::demo::GameBoyApp g_gameboy_app(g_gameboy);
+static pogopo::demo::GameBoyBrowserApp g_gameboy_browser_app(g_gameboy_app);
 
 namespace {
 
@@ -58,7 +63,9 @@ esp_err_t start_graphics() {
     config.cs_io = board::LCD_CS;
     config.disp_io = -1;
     config.extmode_io = -1;
-    config.clock_hz = 2000000;
+    // Same clock that was stable in the Arduino/Adafruit_SharpMem build.
+    // At 2 MHz a full 400x240 transfer alone took about 49 ms.
+    config.clock_hz = 14000000;
     config.enable_vcom_task = true;
     config.vcom_period_ms = 500;
     config.vcom_task_priority = 4;
@@ -85,16 +92,42 @@ esp_err_t start_audio() {
     config.lrck_io = board::AUDIO_LRCK;
     config.sample_rate = 32768;
     config.master_volume = g_settings.volume();
-    config.dma_desc_num = 6;
-    config.dma_frame_num = 256;
-    config.render_frames = 256;
-    config.task_priority = 6;
+    // Match the stable Arduino Game Boy I2S path.
+    config.dma_desc_num = 12;
+    config.dma_frame_num = 512;
+    config.render_frames = 512;
+    config.realtime_buffer_frames = 4096;
+    config.task_priority = 8;
+    config.task_stack = 8192;
     config.task_core = 0;
     const esp_err_t err = g_audio.begin(config);
     if (err == ESP_OK) g_audio.setEnabled(g_settings.audioEnabled());
     return err;
 }
 
+
+esp_err_t start_gameboy() {
+    pogopo::GameBoy::Config config;
+    config.internal_rom_arena_bytes = 128U * 1024U;
+    config.internal_rom_arena_min_bytes = 32U * 1024U;
+    config.internal_rom_headroom_bytes = 128U * 1024U;
+    config.internal_rom_limit = 256U * 1024U;
+    config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
+    config.requested_cache_pages = 8;
+    // The Sharp frontend can present about 30 full scaled frames per second.
+    // Skip only Peanut's expensive LCD drawing on alternate frames while the
+    // CPU/APU still emulate every 59.7 Hz Game Boy frame.
+    config.peanut_frame_skip = true;
+    config.display_divider = 1;
+    config.dither = true;
+    config.task_priority = 6;
+    config.task_core = 1;
+    config.task_stack = 8192;
+    config.audio_task_priority = 7;
+    config.audio_task_core = 0;
+    config.audio_task_stack = 4096;
+    return g_gameboy.begin(g_audio, config);
+}
 
 esp_err_t start_storage() {
     pogopo::Storage::Config config;
@@ -109,7 +142,9 @@ esp_err_t start_imu() {
     pogopo::Imu::Config config;
     config.bus = i2c_bus_handle(); config.address = 0x68;
     config.interrupt_io = board::IMU_INT; config.sample_period_ms = 20;
-    config.task_core = 1;
+    // Keep Core 1 for input + emulator. BMI270 comfortably fits on Core 0
+    // underneath the blocking priority-8 I2S writer.
+    config.task_core = 0;
     return g_imu.begin(config);
 }
 
@@ -121,7 +156,7 @@ esp_err_t start_power() {
     config.battery_measure_io = board::BAT_MEAS;
     config.battery_gate_io = board::BAT_GATE;
     config.shutdown_hold_ms = 2000;
-    config.task_core = 1;
+    config.task_core = 0;
     return g_power.begin(config);
 }
 
@@ -150,6 +185,7 @@ void handle_power_event(const pogopo::power::Event& event) {
     }
 
     g_haptics.play(pogopo::HapticEffect::Heavy);
+    g_gameboy.flushSave();
     g_audio.play(pogopo::AudioEffect::Confirm);
     draw_power_message("POWER OFF", "RELEASE POWER BUTTON", "ENTERING BQ SHIP MODE...");
     g_power.waitForRelease(8000); // QON must be released or the charger can wake again immediately.
@@ -175,8 +211,8 @@ esp_err_t start_input() {
     config.repeat_delay_ms = 450;
     config.repeat_period_ms = 100;
     config.long_press_ms = 700;
-    config.task_priority = 5;
-    config.task_core = 0;
+    config.task_priority = 7;
+    config.task_core = 1;
     return g_input.begin(config);
 }
 
@@ -186,6 +222,8 @@ void os_task(void*) {
     uint32_t settings_dirty_ms = 0;
 
     g_app_manager.registerApp(g_launcher_app, true);
+    g_app_manager.registerApp(g_gameboy_browser_app);
+    g_app_manager.registerApp(g_gameboy_app);
     g_app_manager.registerApp(g_graphics_app);
     g_app_manager.registerApp(g_input_app);
     g_app_manager.registerApp(g_haptics_app);
@@ -241,7 +279,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STREAMING + SETTINGS STEP8");
+    ESP_LOGI(TAG, "pogopoOS2.0 GAME BOY STEP9.4 ARDUINO-REFERENCE OPTIMIZED");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -251,9 +289,12 @@ extern "C" void app_main(void) {
     i2c_scan();
     run_peripheral_tests();
 
+    // Reserve the adaptive ROM/cache arena before the display framebuffer,
+    // DMA transfer buffer and background task stacks fragment internal RAM.
+    ESP_ERROR_CHECK(start_audio());
+    ESP_ERROR_CHECK(start_gameboy());
     ESP_ERROR_CHECK(start_graphics());
     ESP_ERROR_CHECK(start_haptics());
-    ESP_ERROR_CHECK(start_audio());
     ESP_ERROR_CHECK(start_input());
 
     const esp_err_t sd_err = start_storage();
@@ -262,10 +303,12 @@ extern "C" void app_main(void) {
     if (imu_err != ESP_OK) ESP_LOGW(TAG, "BMI270 unavailable: %s", esp_err_to_name(imu_err));
     ESP_ERROR_CHECK(start_power());
 
-    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 3, nullptr, 1) != pdPASS) {
+    // Stable pogopoOS1.0 split: Core 1 runs high-priority input + emulator;
+    // Core 0 runs high-priority I2S and low-priority GUI/Sharp presentation.
+    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP8 ready: streaming WAV + NVS settings + tuned haptics");
+    ESP_LOGI(TAG, "STEP9.4 optimized: 14MHz LCD, decoupled APU, arena cache, corrected dither");
 }

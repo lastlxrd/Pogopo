@@ -27,7 +27,7 @@ struct WavData {
 
 class Storage {
 public:
-    static constexpr size_t MAX_FILES = 12;
+    static constexpr size_t MAX_FILES = 32;
 
     struct Config {
         int clk_io = 6;
@@ -52,6 +52,8 @@ public:
     const char* mountPoint() const { return config_.mount_point; }
     uint64_t capacityBytes() const;
 
+    size_t listFiles(const char* relative_dir, const char* extension,
+                     FileEntry* out, size_t capacity) const;
     size_t listWav(const char* relative_dir, FileEntry* out, size_t capacity) const;
     esp_err_t loadWav(const char* path, WavData& out) const;
     static void freeWav(WavData& wav);
@@ -63,3 +65,4 @@ private:
 };
 
 } // namespace pogopo::storage
+

@@ -3,7 +3,17 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MEMTEST=y
+
+# STEP9 Game Boy emulator clock
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# STEP9.1 emulator performance: compile application with -O2 instead of -Og.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# STEP9.2: the N16R8 Octal PSRAM path is used for large ROMs.
+# 80 MHz is the normal non-experimental performance setting for ESP32-S3 MSPI RAM.
+

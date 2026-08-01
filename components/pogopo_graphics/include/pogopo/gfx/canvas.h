@@ -35,6 +35,27 @@ public:
                      bool transparent_background = true,
                      Color background = WHITE);
     void draw_sprite(const Sprite& sprite);
+    // Draw a 2-bit indexed image (0=white, 3=black) using nearest-neighbour
+    // scaling and an optional 2x2 ordered dither for the two middle shades.
+    // When previous_pixels is supplied, unchanged source pixels are skipped.
+    void draw_indexed2_scaled(int x, int y, int source_width, int source_height,
+                              const uint8_t* pixels, int destination_width,
+                              int destination_height,
+                              const uint8_t* previous_pixels = nullptr,
+                              bool dither = true, bool invert = false);
+    // Fast row-packed path for full-frame indexed images such as Game Boy.
+    // It builds each destination row directly in the Sharp 1-bpp framebuffer,
+    // compares whole rows, and marks only changed rows dirty.
+    void draw_indexed2_fast(int x, int y, int source_width, int source_height,
+                            const uint8_t* pixels, int destination_width,
+                            int destination_height, bool dither = true,
+                            bool invert = false);
+    // Same renderer for four 2-bit indices packed into each source byte.
+    // Pixel 0 occupies bits 1:0, pixel 1 bits 3:2, and so on.
+    void draw_indexed2_packed_fast(int x, int y, int source_width, int source_height,
+                                   const uint8_t* pixels, int destination_width,
+                                   int destination_height, bool dither = true,
+                                   bool invert = false);
     void draw_char(int x, int y, char character,
                    const Font& font = font5x7(), Color color = BLACK,
                    int scale = 1, bool transparent_background = true,

@@ -8,3 +8,4 @@ using Application = app::Application;
 using AppContext = app::Context;
 using AppManager = app::AppManager;
 } // namespace pogopo
+

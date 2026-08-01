@@ -20,3 +20,4 @@ private:
 };
 
 } // namespace pogopo::gui
+

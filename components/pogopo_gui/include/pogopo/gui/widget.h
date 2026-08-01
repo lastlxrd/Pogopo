@@ -28,3 +28,4 @@ protected:
 };
 
 } // namespace pogopo::gui
+

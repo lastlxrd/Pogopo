@@ -4,3 +4,4 @@ idf_component_register(
     REQUIRES esp_driver_i2c esp_driver_gpio esp_adc
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
+

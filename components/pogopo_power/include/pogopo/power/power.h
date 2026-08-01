@@ -90,3 +90,4 @@ private:
 };
 
 } // namespace pogopo::power
+

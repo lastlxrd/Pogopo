@@ -1,111 +1,157 @@
-# pogopoOS2.0 STEP8 — Streaming Audio + Persistent Settings
+# STEP9.4 — Full-speed CPU / 30 FPS LCD test pass
 
-This project is based on the fully tested STEP7.1 build.
+This archive keeps the STEP9.4 codebase but ports the performance-critical
+choices from the last stable Arduino firmware: 14 MHz Sharp LCD transfers,
+Core-0 decoupled APU generation, an adaptive internal ROM cache, and hot display
+buffers in internal RAM. This test pass additionally targets a full-speed
+59.7 Hz Game Boy CPU with a 29.9 Hz rendered LCD. Git metadata and build output
+are intentionally absent.
 
-## 1. Streaming WAV engine
+## Why STEP9.3 regressed
 
-The old WAV test loaded the whole file into PSRAM and intentionally rejected files above 4 MiB. STEP8 replaces the WAV Player path with a streaming engine inside `pogopo_audio`.
+- Adaptive audio changed the PCM consumption rate. It could hide a draining
+  ring buffer, but changing playback speed also changed pitch.
+- Automatic Peanut-GB frame skip made PSRAM games present only every second
+  emulated frame, so a 20 FPS game could become a 10 FPS picture.
+- The local `-O3` override increased the interpreter's code footprint and could
+  put more pressure on the ESP32-S3 instruction cache than `-O2`.
+- An 8 x 16 KiB ROM cache consumed up to 128 KiB of internal RAM without moving
+  the complete Kirby cartridge out of PSRAM.
 
-Architecture:
+## What the Arduino comparison found
+
+- The ESP-IDF Sharp driver was configured for 2 MHz while the stable Arduino
+  firmware used 14 MHz. A full 400 x 240 transfer at 2 MHz takes roughly 49 ms,
+  so smooth Game Boy presentation was impossible even with a fast emulator.
+- STEP9.4 generated one APU packet after each emulated frame. A slow frame
+  therefore starved audio immediately. Arduino generated APU audio in a
+  dedicated high-priority Core-0 task paced by blocking I2S output.
+- The 256 KiB arena helped ROMs that fit, but was left allocated and unused for
+  larger PSRAM ROMs. Those games could then fail to allocate a useful cache.
+- Peanut-GB shade indices are `0=black, 1=dark, 2=light, 3=white`. STEP9.4 fed
+  them to a renderer whose convention is the reverse, so the ordered dither
+  was inverted compared with STEP9/9.1.
+
+## Fixed-rate, frame-independent Game Boy audio
+
+- MiniGB APU and MAX98357A remain locked to `32768 -> 32768 Hz`.
+- Runtime playback-rate compensation and the `speed=...%` diagnostic are gone.
+- MiniGB APU generation now runs in its own priority-7 task on Core 0. The
+  priority-8 I2S writer consumes at the hardware sample clock and paces APU
+  production through a four-packet watermark.
+- The emulator no longer renders 548 stereo frames inside every video frame,
+  freeing Core 1 and preventing slow video frames from directly draining audio.
+- A dedicated APU mutex preserves the same cross-core protection as the stable
+  Arduino implementation.
+- An underrun fades out and then fades back in over 64 samples; it never changes
+  playback pitch to conceal slow emulation.
+- Ring writes copy at most two contiguous spans instead of doing one modulo
+  operation for every stereo frame.
+
+## Packed four-shade framebuffer and restored dithering
+
+All four original Game Boy shade indices are stored at 2 bits per pixel:
+
+- one 160 x 144 frame: `23040 -> 5760 bytes`;
+- three frame buffers: `69120 -> 17280 bytes`;
+- total saving: `51840 bytes`.
+
+The Sharp renderer unpacks those indices directly into its 1 bpp framebuffer,
+correctly reverses Peanut's black-to-white index order, and applies the same
+2 x 2 ordered pattern used before STEP9.2. All three packed Game Boy buffers and
+the 12 KiB Sharp framebuffer prefer internal RAM.
+
+## 14 MHz Sharp LCD fast path
+
+- SPI is restored from 2 MHz to the exact 14 MHz value used by the attached
+  Arduino/Adafruit_SharpMem firmware on this board.
+- A worst-case full-screen payload drops from about 49 ms on the wire to about
+  7 ms. Dirty-row transfers remain enabled.
+- Dithering, framebuffer scans, and the DMA staging copy now avoid unnecessary
+  PSRAM traffic.
+
+## Adaptive internal ROM arena/cache
+
+The real-device log from the preceding archive reported `arena=0`: requesting
+one impossible 256 KiB contiguous block made the entire early reservation fail.
+This pass starts Game Boy memory setup before graphics and haptics, then reserves
+the largest 16 KiB-aligned block up to 128 KiB while leaving 128 KiB of internal
+headroom for later drivers and task stacks.
+
+ROMs that fit run directly from that arena. Larger ROMs remain in PSRAM and use
+the same arena as 2 to 8 cached 16 KiB pages. The exact page count is now printed
+in every `PERF` line.
+
+## PSRAM bank-cache fallback
+
+Cartridges larger than the arena still use Octal PSRAM at 80 MHz, but the same
+arena becomes a guaranteed adaptive internal bank cache.
+If the early arena reservation failed, the cache falls back through smaller
+internal-heap allocations. Bank 0 remains pinned and the other pages use LRU
+replacement.
+
+## Full-speed CPU with half-rate LCD rendering
+
+The previous real-device result was `emu=39 lcd=31 frame=~26000us`. That is not
+an FPS counter mismatch: Kirby's CPU was genuinely advancing at only about 65%
+speed, which also slowed the timing of its music commands. Meanwhile the Sharp
+frontend could consume only about 31 distinct frames per second.
+
+Peanut now skips only its expensive LCD scanline drawing on alternate frames.
+CPU, timers, interrupts, joypad and APU register writes still run for every
+59.7 Hz Game Boy frame. The visible target remains about 30 FPS, so this does
+not lower the real LCD rate seen in the preceding log; it spends the unused
+render work on restoring game speed instead. The generic packed renderer also
+uses a per-frame dither lookup table and a clipping-free on-screen fast path.
+
+## Scheduling and input safeguards retained from STEP9.3
+
+- BMI270 stays on Core 0, leaving Core 1 to input and Peanut-GB.
+- A continuously late emulator yields one real RTOS tick every 64 late frames.
+- TCA9555 reads retain the 10 ms timeout and released-sample fail-safe.
+- Save writes remain disabled during gameplay and flush on exit or power-off.
+
+## Serial diagnostics
+
+The once-per-second line is now:
 
 ```text
-SD card / FILE reader task (Core 1)
-        ↓
-32768-frame mono ring buffer in PSRAM
-        ↓
-linear sample-rate conversion
-        ↓
-I2S mixer task (Core 0)
-        ↓
-MAX98357A at 32768 Hz
+PERF emu=... lcd=... frame=...us max=...us ROM=ARENA/INT/PSRAM arena=...
+fb=17280 cache=pages:hits/misses miss_us=... audio=buffer/cap under=... over=...
+drop=... heap=free/largest i2cerr=...
 ```
 
-The generated system voices remain active while music is playing, so menu clicks and alerts are mixed over the track.
+## Acceptance test
 
-Supported stream format:
+Use `1X FAST` for the first performance pass.
 
-- RIFF/WAVE PCM, format code 1
-- 8-bit or 16-bit
-- mono or stereo (stereo is downmixed to mono)
-- 8–96 kHz
-- large files are supported; the file is not copied into RAM
+1. Startup should report `Reserved adaptive ROM arena` with at least 2 pages.
+   A larger ROM should report `ROM=PSRAM`; `cache=4:...` means four pages.
+   All games should report `fb=17280` and `LCD render frame skip: ON`.
+2. Audio pitch must stay constant. `under=` may expose a genuinely missed
+   deadline, but no adaptive stretching should be audible.
+3. Target Mario values: `emu=59..61`, `lcd=29..31`.
+4. Target Kirby values: `emu=59..61`, `lcd=29..31`, with normal game/music
+   tempo. A result near `emu=50` still identifies remaining non-LCD CPU cost.
+5. `under=` and `drop=` should stop climbing after startup.
+6. No `task_wdt` / `IDLE1` fault and no stuck direction after an I2C error.
+7. Mid-tone Game Boy graphics must show the restored ordered-dither texture.
 
-Compressed WAV, MP3, AAC and FLAC are not supported in this step.
-
-## 2. WAV Player controls
+Useful startup lines:
 
 ```text
-TOP / DOWN   select a WAV file
-A            start or restart selected file
-START        pause / resume
-LEFT         seek back 5 seconds
-RIGHT        seek forward 5 seconds
-B            return home; music keeps playing
-MENU         open the system overlay
+Sharp LS027B7DH01 ready: ... SPI=14000000Hz
+Reserved adaptive ROM arena: 65536 bytes (4 cache pages, ...)
+PSRAM ROM cache: 4 x 16 KiB (reserved arena)   # page count is device-dependent
+LCD render frame skip: ON (manual)
 ```
 
-The screen shows:
+## Build and flash
 
-- playback state
-- position and duration
-- buffered milliseconds
-- source sample rate / channels / bit depth
-- underrun and SD read-error counters
+From an ESP-IDF 6.0.2 terminal:
 
-Copy `COPY_TO_SD/pogopo` to the root of the SD card. A generated `stream_long_70s.wav` file is included; it is larger than the old 4 MiB loader limit and is the main streaming test.
-
-## 3. Persistent `pogopo_settings`
-
-A new NVS-backed component stores:
-
-```text
-master volume
-Audio output ON/OFF
-UI sounds ON/OFF
-Haptics ON/OFF
-Motion sensitivity LOW/NORMAL/HIGH
+```powershell
+idf.py set-target esp32s3
+idf.py build
+idf.py -p COM7 flash monitor
 ```
-
-Open **Settings** in the Launcher. Changes are applied immediately and committed to NVS after a short delay. Pressing B also saves before leaving. START restores defaults.
-
-The volume changed in Audio Lab is also written to the same persistent setting.
-
-## 4. Haptic tuning
-
-Requested tuning is included:
-
-```text
-Tick   45 ms   (same feel as the previous Click)
-Click  55 ms   (slightly more pronounced)
-```
-
-All other haptic patterns remain unchanged. Disabling Haptics in Settings suppresses all patterns at the component level.
-
-## 5. Motion setting
-
-Motion Lab keeps the smooth STEP7.1 visual filter. The saved motion-sensitivity setting changes only the visual response:
-
-```text
-LOW      ×0.65
-NORMAL   ×1.00
-HIGH     ×1.45
-```
-
-The numeric BMI270 values remain immediate and unfiltered.
-
-## Recommended test order
-
-1. Copy the included `pogopo` folder to the SD-card root.
-2. Boot and open **Settings**. Change volume and motion sensitivity, reboot, and verify that the values remain saved.
-3. Open **WAV Player** and play `stream_long_70s.wav`.
-4. While it plays, seek with LEFT/RIGHT and pause/resume with START.
-5. Press B and navigate the Launcher while the music continues underneath the UI sounds.
-6. Open Motion Lab during playback and verify that graphics, BMI270 sampling, audio and input remain responsive.
-7. Open Haptics Lab and compare the new Tick and Click.
-
-## Notes
-
-- Do not physically remove the SD card while a stream is playing. Stop/reboot first.
-- An unsupported or damaged WAV enters the visible ERROR state and plays the system error feedback when UI sounds are enabled.
-- SD and BMI270 initialization remain non-fatal. Power/BQ24295 initialization remains required.
-- The old small-file `Storage::loadWav()` API is still present for future short assets, but the WAV Player uses the new streaming path.

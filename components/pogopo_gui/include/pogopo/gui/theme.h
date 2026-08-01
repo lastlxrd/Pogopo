@@ -17,3 +17,4 @@ struct Theme {
 inline constexpr Theme kDefaultTheme{};
 
 } // namespace pogopo::gui
+

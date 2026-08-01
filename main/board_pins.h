@@ -23,3 +23,4 @@ constexpr int CHARGER_INT = 41;
 constexpr int BAT_MEAS = 1;
 constexpr int BAT_GATE = 2;
 }
+

@@ -51,6 +51,16 @@ struct Stats {
     uint8_t active_voices = 0;
 };
 
+struct RealtimeInfo {
+    bool active = false;
+    uint32_t buffered_frames = 0;
+    uint32_t capacity_frames = 0;
+    uint32_t source_rate = 0;
+    uint32_t underruns = 0;
+    uint32_t overruns = 0;
+    uint8_t volume = 0;
+};
+
 struct StreamInfo {
     StreamState state = StreamState::Stopped;
     uint32_t position_ms = 0;
@@ -74,12 +84,14 @@ public:
         uint32_t sample_rate = 32768;
         uint8_t master_volume = 68;
         uint8_t queue_depth = 16;
-        uint8_t dma_desc_num = 6;
-        uint16_t dma_frame_num = 256;
-        uint16_t render_frames = 256;
-        uint32_t task_stack = 6144;
-        UBaseType_t task_priority = 6;
+        uint8_t dma_desc_num = 8;
+        uint16_t dma_frame_num = 512;
+        uint16_t render_frames = 512;
+        uint32_t task_stack = 8192;
+        UBaseType_t task_priority = 8;
         BaseType_t task_core = 0;
+
+        uint32_t realtime_buffer_frames = 4096;
 
         uint32_t stream_buffer_frames = 32768;
         uint16_t stream_prefill_ms = 120;
@@ -105,6 +117,14 @@ public:
     bool playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume = 80);
     void stopAll();
 
+    // Low-latency stereo PCM ring used by emulators. The producer may run on
+    // another core. When active it gets an exclusive fast path in the I2S task;
+    // at 32768 Hz no interpolation or UI/WAV mixing runs in the hot loop.
+    esp_err_t startRealtimeStereo(uint32_t sample_rate = 32768, uint8_t volume = 72);
+    void stopRealtime();
+    size_t pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames);
+    RealtimeInfo realtimeInfo() const;
+
     bool playStream(const char* path, uint8_t volume = 82);
     bool pauseStream();
     bool resumeStream();
@@ -123,7 +143,8 @@ public:
 
     bool ok() const { return ok_.load(); }
     bool active() const {
-        return active_voices_.load() != 0 || pcm_active_.load() || streamActive();
+        return active_voices_.load() != 0 || pcm_active_.load() ||
+               realtime_active_.load() || streamActive();
     }
     uint8_t activeVoices() const { return active_voices_.load(); }
     uint32_t sampleRate() const { return config_.sample_rate; }
@@ -228,6 +249,7 @@ private:
     void startPcm(Command& command);
     int32_t renderPcm();
     int32_t renderStream();
+    void renderRealtime(int32_t& left, int32_t& right);
     void clearPcm();
     Voice& chooseVoice(bool custom, Effect effect);
     void loadCurrentNote(Voice& voice);
@@ -265,6 +287,16 @@ private:
     uint32_t noise_state_ = 0xA5C31E27u;
     PcmVoice pcm_{};
 
+    int16_t* realtime_buffer_ = nullptr;
+    uint32_t realtime_capacity_frames_ = 0;
+    uint32_t realtime_fraction_q16_ = 0;
+    uint32_t realtime_step_q16_ = 1U << 16U;
+    int32_t realtime_last_left_ = 0;
+    int32_t realtime_last_right_ = 0;
+    uint16_t realtime_fade_samples_ = 0;
+    uint16_t realtime_fade_in_samples_ = 0;
+    bool realtime_underrun_latched_ = false;
+
     int16_t* stream_buffer_ = nullptr;
     FILE* stream_file_ = nullptr;
     WavHeader stream_header_{};
@@ -285,6 +317,14 @@ private:
     std::atomic<uint32_t> dropped_commands_{0};
     std::atomic<uint32_t> last_write_us_{0};
     std::atomic<uint32_t> max_write_us_{0};
+
+    std::atomic<bool> realtime_active_{false};
+    std::atomic<uint8_t> realtime_volume_{72};
+    std::atomic<uint32_t> realtime_source_rate_{32768};
+    std::atomic<uint32_t> realtime_write_total_{0};
+    std::atomic<uint32_t> realtime_read_total_{0};
+    std::atomic<uint32_t> realtime_underruns_{0};
+    std::atomic<uint32_t> realtime_overruns_{0};
 
     std::atomic<bool> stream_exit_{false};
     std::atomic<bool> stream_resetting_{false};

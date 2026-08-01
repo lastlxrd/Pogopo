@@ -8,3 +8,4 @@ idf_component_register(
         freertos
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
+

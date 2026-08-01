@@ -257,3 +257,4 @@ void draw_wrapped_text(gfx::Canvas& canvas, const gfx::Rect& bounds,
 }
 
 } // namespace pogopo::gui
+

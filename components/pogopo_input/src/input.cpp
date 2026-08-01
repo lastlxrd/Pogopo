@@ -151,7 +151,7 @@ esp_err_t Input::configure_expander() {
 
 esp_err_t Input::read_port(uint8_t& port) {
     const uint8_t reg = REG_INPUT_PORT1;
-    return i2c_master_transmit_receive(device_, &reg, 1, &port, 1, 100);
+    return i2c_master_transmit_receive(device_, &reg, 1, &port, 1, 10);
 }
 
 void Input::task_entry(void* argument) {
@@ -181,6 +181,10 @@ void Input::task_loop() {
         if (err != ESP_OK) {
             read_errors_.fetch_add(1);
             ok_.store(false);
+            // Never preserve a stale held direction forever. Feeding a released
+            // sample through the normal debounce path clears a stuck key after
+            // three failed reads, while one transient I2C error changes nothing.
+            process_sample(0xFF, now_ms());
             continue;
         }
 
@@ -317,3 +321,4 @@ const char* event_type_name(EventType type) {
 }
 
 } // namespace pogopo::input
+

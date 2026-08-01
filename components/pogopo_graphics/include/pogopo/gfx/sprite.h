@@ -17,3 +17,4 @@ struct Sprite {
 };
 
 } // namespace pogopo::gfx
+

@@ -230,3 +230,4 @@ esp_err_t Power::enterShipMode() {
 }
 
 } // namespace pogopo::power
+

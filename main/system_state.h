@@ -11,3 +11,4 @@ struct SystemState {
     std::atomic_uint8_t charger_fault{0};
 };
 extern SystemState g_system_state;
+

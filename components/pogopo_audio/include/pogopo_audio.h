@@ -12,3 +12,4 @@ using audio::effect_name;
 using audio::waveform_name;
 using audio::stream_state_name;
 } // namespace pogopo
+

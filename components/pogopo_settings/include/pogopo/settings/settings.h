@@ -64,3 +64,4 @@ private:
 const char* motion_sensitivity_name(uint8_t value);
 
 } // namespace pogopo::settings
+

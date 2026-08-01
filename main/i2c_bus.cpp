@@ -73,3 +73,4 @@ esp_err_t i2c_write_reg(uint8_t address, uint8_t reg, const uint8_t* data, size_
     const esp_err_t rm = i2c_master_bus_rm_device(dev);
     return err != ESP_OK ? err : rm;
 }
+

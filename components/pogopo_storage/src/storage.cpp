@@ -23,12 +23,20 @@ uint32_t le32(const uint8_t* p) {
            (static_cast<uint32_t>(p[2]) << 16) |
            (static_cast<uint32_t>(p[3]) << 24);
 }
-bool ends_wav(const char* name) {
-    const size_t n = name ? std::strlen(name) : 0;
-    if (n < 4) return false;
-    const char* e = name + n - 4;
-    return e[0] == '.' && (e[1] == 'w' || e[1] == 'W') &&
-           (e[2] == 'a' || e[2] == 'A') && (e[3] == 'v' || e[3] == 'V');
+char lower_ascii(char value) {
+    return (value >= 'A' && value <= 'Z') ? static_cast<char>(value + ('a' - 'A')) : value;
+}
+
+bool ends_extension(const char* name, const char* extension) {
+    if (!name || !extension || !*extension) return true;
+    const size_t name_length = std::strlen(name);
+    const size_t extension_length = std::strlen(extension);
+    if (name_length < extension_length) return false;
+    const char* suffix = name + name_length - extension_length;
+    for (size_t i = 0; i < extension_length; ++i) {
+        if (lower_ascii(suffix[i]) != lower_ascii(extension[i])) return false;
+    }
+    return true;
 }
 }
 
@@ -83,7 +91,8 @@ uint64_t Storage::capacityBytes() const {
     return static_cast<uint64_t>(card_->csd.capacity) * card_->csd.sector_size;
 }
 
-size_t Storage::listWav(const char* relative_dir, FileEntry* out, size_t capacity) const {
+size_t Storage::listFiles(const char* relative_dir, const char* extension,
+                          FileEntry* out, size_t capacity) const {
     if (!mounted_ || !out || capacity == 0) return 0;
 
     char dir_path[192]{};
@@ -108,12 +117,12 @@ size_t Storage::listWav(const char* relative_dir, FileEntry* out, size_t capacit
     while (count < capacity) {
         dirent* ent = readdir(dir);
         if (!ent) break;
-        if (!ends_wav(ent->d_name)) continue;
+        if (!ends_extension(ent->d_name, extension)) continue;
 
         const size_t name_len = std::strlen(ent->d_name);
         const size_t path_len = dir_len + 1U + name_len;
         if (name_len >= sizeof(FileEntry::name) || path_len >= sizeof(FileEntry::path)) {
-            ESP_LOGW(TAG, "Skipping WAV with path that is too long: %s", ent->d_name);
+            ESP_LOGW(TAG, "Skipping file with path that is too long: %s", ent->d_name);
             continue;
         }
 
@@ -134,6 +143,10 @@ size_t Storage::listWav(const char* relative_dir, FileEntry* out, size_t capacit
         return std::strcmp(a.name, b.name) < 0;
     });
     return count;
+}
+
+size_t Storage::listWav(const char* relative_dir, FileEntry* out, size_t capacity) const {
+    return listFiles(relative_dir, ".wav", out, capacity);
 }
 
 esp_err_t Storage::loadWav(const char* path, WavData& out) const {
@@ -220,3 +233,4 @@ void Storage::freeWav(WavData& wav) {
 }
 
 } // namespace pogopo::storage
+
