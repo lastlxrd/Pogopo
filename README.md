@@ -1,4 +1,15 @@
-# STEP9.5.1 — Power quick menu and UI polish
+# STEP9.5.2 — Complete ASCII font coverage
+
+This micro-fix builds directly on STEP9.5.1 and leaves the stable Game Boy,
+audio, power-menu and 30 FPS LCD paths unchanged. The 5 x 7 system font now
+covers every printable ASCII character from `0x20` through `0x7E`.
+
+Game Boy filenames such as `Kirby's Dream Land`, `Tetris (World)` and ROM-set
+names containing commas, brackets, ampersands or other ordinary punctuation no
+longer render those characters as unknown-symbol boxes. The same coverage is
+available to every OS screen and future built-in game that uses `font5x7()`.
+
+## STEP9.5.1 — Power quick menu and UI polish
 
 This micro-fix is based byte-for-byte on the stable STEP9.5 merge and leaves its
 full-speed Game Boy / 30 FPS LCD pipeline unchanged. It adds:
