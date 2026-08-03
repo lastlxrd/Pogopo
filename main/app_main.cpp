@@ -5,6 +5,7 @@
 #include "system_state.h"
 #include "apps/demo_apps.h"
 #include "apps/gameboy_apps.h"
+#include "apps/gameboy_advance_apps.h"
 
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
@@ -17,6 +18,7 @@
 #include "pogopo_power.h"
 #include "pogopo_settings.h"
 #include "pogopo_gameboy.h"
+#include "pogopo_gameboy_advance.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -39,6 +41,7 @@ static pogopo::Imu g_imu;
 static pogopo::Power g_power;
 static pogopo::Settings g_settings;
 static pogopo::GameBoy g_gameboy;
+static pogopo::GameBoyAdvance g_gameboy_advance;
 static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power, g_settings);
 
 static pogopo::demo::LauncherApp g_launcher_app;
@@ -53,6 +56,9 @@ static pogopo::demo::SettingsApp g_settings_app;
 static pogopo::demo::AboutApp g_about_app;
 static pogopo::demo::GameBoyApp g_gameboy_app(g_gameboy);
 static pogopo::demo::GameBoyBrowserApp g_gameboy_browser_app(g_gameboy_app);
+static pogopo::demo::GameBoyAdvanceApp g_gameboy_advance_app(g_gameboy_advance);
+static pogopo::demo::GameBoyAdvanceBrowserApp g_gameboy_advance_browser_app(
+    g_gameboy_advance_app);
 
 namespace {
 
@@ -129,6 +135,21 @@ esp_err_t start_gameboy() {
     return g_gameboy.begin(g_audio, config);
 }
 
+esp_err_t start_gameboy_advance() {
+    pogopo::GameBoyAdvance::Config config;
+    // Six 1 MiB blocks leave enough PSRAM for GBA work RAM, sprite ordering,
+    // three RGB565 frame buffers, audio, and the rest of pogopoOS. ROMs larger
+    // than the cache are transparently paged from SD in 32 KiB units.
+    config.rom_buffer_megabytes = 6;
+    config.realtime_volume = 72;
+    config.render_every_other_frame = true;
+    config.dither = true;
+    config.task_priority = 6;
+    config.task_core = 1;
+    config.task_stack = 16384;
+    return g_gameboy_advance.begin(g_audio, config);
+}
+
 esp_err_t start_storage() {
     pogopo::Storage::Config config;
     config.clk_io = board::SD_CLK; config.cmd_io = board::SD_CMD;
@@ -192,6 +213,7 @@ void handle_power_event(const pogopo::power::Event& event) {
 
     g_haptics.play(pogopo::HapticEffect::Heavy);
     g_gameboy.flushSave();
+    g_gameboy_advance.flushSave();
     g_audio.play(pogopo::AudioEffect::Confirm);
     draw_power_message("POWER OFF", "RELEASE POWER BUTTON", "ENTERING BQ SHIP MODE...");
     g_power.waitForRelease(8000); // QON must be released or the charger can wake again immediately.
@@ -239,6 +261,8 @@ void os_task(void*) {
     g_app_manager.registerApp(g_launcher_app, true);
     g_app_manager.registerApp(g_gameboy_browser_app);
     g_app_manager.registerApp(g_gameboy_app);
+    g_app_manager.registerApp(g_gameboy_advance_browser_app);
+    g_app_manager.registerApp(g_gameboy_advance_app);
     g_app_manager.registerApp(g_graphics_app);
     g_app_manager.registerApp(g_input_app);
     g_app_manager.registerApp(g_haptics_app);
@@ -294,7 +318,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.5.1 POWER MENU / UI POLISH");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP10.0 EXPERIMENTAL GBA FEASIBILITY PASS");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -308,6 +332,7 @@ extern "C" void app_main(void) {
     // DMA transfer buffer and background task stacks fragment internal RAM.
     ESP_ERROR_CHECK(start_audio());
     ESP_ERROR_CHECK(start_gameboy());
+    ESP_ERROR_CHECK(start_gameboy_advance());
     ESP_ERROR_CHECK(start_graphics());
     ESP_ERROR_CHECK(start_haptics());
     ESP_ERROR_CHECK(start_input());
@@ -325,5 +350,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.5.1 ready: stable GB, quick menu, clean LCD shutdown");
+    ESP_LOGI(TAG, "STEP10.0 ready: stable GB + isolated experimental gpSP GBA");
 }

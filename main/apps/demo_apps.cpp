@@ -10,6 +10,7 @@ namespace pogopo::demo {
 namespace {
 constexpr gui::ListItem kLauncherItems[] = {
     {"Game Boy", "Peanut-GB emulator + SD ROMs", "gb_browser", true},
+    {"Game Boy Advance", "Experimental gpSP feasibility test", "gba_browser", true},
     {"Graphics demo", "Sprites + partial redraw", "graphics", true},
     {"Input monitor", "Buttons and event state", "input", true},
     {"Audio lab", "I2S mixer + generated sounds", "audio", true},
@@ -103,7 +104,7 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
     canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP9");
+    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP10 GBA");
     list_.draw(canvas, context.theme);
     gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
 }
@@ -851,4 +852,3 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
 }
 
 } // namespace pogopo::demo
-

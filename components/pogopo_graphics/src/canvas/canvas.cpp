@@ -404,6 +404,100 @@ void Canvas::draw_indexed2_packed_fast(int x, int y, int source_width, int sourc
     display_.unlock();
 }
 
+void Canvas::draw_rgb565_fast(int x, int y, int source_width, int source_height,
+                              const uint16_t* pixels, int destination_width,
+                              int destination_height, bool dither) {
+    if (!pixels || source_width <= 0 || source_height <= 0 ||
+        destination_width <= 0 || destination_height <= 0) {
+        return;
+    }
+
+    static constexpr uint8_t bayer4x4[16] = {
+         0,  8,  2, 10,
+        12,  4, 14,  6,
+         3, 11,  1,  9,
+        15,  7, 13,  5,
+    };
+    // Maximum of 7*R5 + 12*G6 + 2*B5 is 1035. Thresholds sit in the
+    // centre of each Bayer bucket so pure black/white stay solid.
+    uint16_t thresholds[16]{};
+    for (uint8_t i = 0; i < 16; ++i) {
+        thresholds[i] = static_cast<uint16_t>(
+            ((static_cast<uint32_t>(bayer4x4[i]) * 2U + 1U) * 1035U) / 32U);
+    }
+
+    uint16_t source_x[SharpDisplay::WIDTH]{};
+    const int clipped_width = std::min(destination_width, SharpDisplay::WIDTH);
+    int mapped_x = 0;
+    int x_error = 0;
+    for (int dx = 0; dx < clipped_width; ++dx) {
+        source_x[dx] = static_cast<uint16_t>(std::min(mapped_x, source_width - 1));
+        x_error += source_width;
+        while (x_error >= destination_width) {
+            x_error -= destination_width;
+            ++mapped_x;
+        }
+    }
+
+    const bool fully_visible = x >= clip_.x && y >= clip_.y &&
+        x + destination_width <= clip_.right() &&
+        y + destination_height <= clip_.bottom() && x >= 0 && y >= 0 &&
+        x + destination_width <= SharpDisplay::WIDTH &&
+        y + destination_height <= SharpDisplay::HEIGHT &&
+        destination_width <= SharpDisplay::WIDTH;
+
+    display_.lock();
+    int mapped_y = 0;
+    int y_error = 0;
+    for (int dy = 0; dy < destination_height; ++dy) {
+        const int py = y + dy;
+        if (!fully_visible && (py < clip_.y || py >= clip_.bottom() ||
+            py < 0 || py >= SharpDisplay::HEIGHT)) {
+            continue;
+        }
+        const int sy = fully_visible ? mapped_y : static_cast<int>(
+            (static_cast<int64_t>(dy) * source_height) / destination_height);
+        const uint16_t* source_row = pixels + static_cast<size_t>(sy) * source_width;
+        uint8_t* framebuffer_row = display_.fb_ +
+            static_cast<size_t>(py) * SharpDisplay::BYTES_PER_ROW;
+        uint8_t packed[SharpDisplay::BYTES_PER_ROW];
+        std::memcpy(packed, framebuffer_row, sizeof(packed));
+
+        for (int dx = 0; dx < clipped_width; ++dx) {
+            const int px = x + dx;
+            if (!fully_visible && (px < clip_.x || px >= clip_.right() ||
+                px < 0 || px >= SharpDisplay::WIDTH)) {
+                continue;
+            }
+            const uint16_t color = source_row[source_x[dx]];
+            const uint16_t r = static_cast<uint16_t>((color >> 11U) & 0x1FU);
+            const uint16_t g = static_cast<uint16_t>((color >> 5U) & 0x3FU);
+            const uint16_t b = static_cast<uint16_t>(color & 0x1FU);
+            const uint16_t luminance = static_cast<uint16_t>(r * 7U + g * 12U + b * 2U);
+            const uint8_t parity = static_cast<uint8_t>(((py & 3) << 2) | (px & 3));
+            const bool white = dither ? luminance > thresholds[parity] : luminance >= 518U;
+            const uint8_t mask = static_cast<uint8_t>(1U << (px & 7));
+            if (white) packed[px >> 3] |= mask;
+            else packed[px >> 3] &= static_cast<uint8_t>(~mask);
+        }
+
+        if (std::memcmp(framebuffer_row, packed, sizeof(packed)) != 0) {
+            std::memcpy(framebuffer_row, packed, sizeof(packed));
+            display_.mark_dirty_row_unlocked(py);
+        }
+
+        if (fully_visible) {
+            y_error += source_height;
+            while (y_error >= destination_height) {
+                y_error -= destination_height;
+                ++mapped_y;
+            }
+            mapped_y = std::min(mapped_y, source_height - 1);
+        }
+    }
+    display_.unlock();
+}
+
 void Canvas::draw_char_unlocked(int x, int y, char character, const Font& font,
                                 Color color, int scale,
                                 bool transparent_background, Color background) {

@@ -56,6 +56,12 @@ public:
                                    const uint8_t* pixels, int destination_width,
                                    int destination_height, bool dither = true,
                                    bool invert = false);
+    // Convert an RGB565 frame directly into the Sharp 1-bpp framebuffer.
+    // A 4x4 ordered dither preserves sixteen luminance steps and is intended
+    // for colour-console frontends such as the experimental GBA port.
+    void draw_rgb565_fast(int x, int y, int source_width, int source_height,
+                          const uint16_t* pixels, int destination_width,
+                          int destination_height, bool dither = true);
     void draw_char(int x, int y, char character,
                    const Font& font = font5x7(), Color color = BLACK,
                    int scale = 1, bool transparent_background = true,
