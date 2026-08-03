@@ -2,7 +2,7 @@
 
 *Both Pogopo and PogopoOS are still in the early stages of development.*
 
-[@lastlxrd](https://github.com/lastlxrd) · 2026
+[@lastlxrd](https://github.com/lastlxrd) 2026
 
 <p align="center">
   <img src="docs/images/pogopo-main.jpg" alt="Pogopo handheld console" width="900">
