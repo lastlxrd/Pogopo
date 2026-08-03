@@ -1,8 +1,8 @@
-# PogopoOS
+# Pogopo
 
-<p align="center">
-  <strong>Pogopo is a custom ESP32-S3 handheld console powered by PogopoOS.</strong>
-</p>
+*Both Pogopo and PogopoOS are still in the early stages of development.*
+
+[@lastlxrd](https://github.com/lastlxrd) · 2026
 
 <p align="center">
   <img src="docs/images/pogopo-main.jpg" alt="Pogopo handheld console" width="900">
@@ -18,24 +18,16 @@
 
 ## Getting Started
 
-PogopoOS is still under active development, so the public documentation is not
-ready yet. A short FAQ, setup guide, and tutorials will be added as the project
-matures.
+Pogopo is still under active development. More complete documentation will be added as the hardware and software mature.
 
 **FAQ:** coming soon  
 **Tutorials:** coming soon
 
 ## Project Summary
 
-PogopoOS is a custom firmware and application platform for a Pogopo - hand-built
-ESP32-S3 handheld console. The project combines a low-power monochrome display,
-physical controls, audio, motion sensing, removable storage, haptic feedback,
-and custom power management in one compact prototype.
+Pogopo is a custom hand-built handheld console based on the ESP32-S3. It combines a low-power monochrome display, physical controls, audio, motion sensing, removable storage, haptic feedback, and custom power management in one compact device.
 
-The goal is to build a small standalone device that can run native applications,
-utilities, and games through a simple custom interface. Both the hardware and
-software are still evolving, and the current console is a working development
-prototype rather than a finished product.
+The goal is to create a standalone handheld capable of running native applications, utilities, emulators, and custom games through a simple graphical interface. The current device is a working development prototype, with both its hardware and software continuing to evolve.
 
 ## Hardware
 
@@ -51,7 +43,9 @@ prototype rather than a finished product.
 - Onboard charging and power management
 - Custom PCB and 3D-printed enclosure
 
-## Software
+## PogopoOS
+
+PogopoOS is the custom operating system and application platform developed specifically for the Pogopo console.
 
 - ESP-IDF-based firmware
 - Graphical launcher and application framework
@@ -74,6 +68,4 @@ Game ROMs and third-party game files are not included in this repository.
 
 ## Development
 
-The project is developed through small tested milestones. Commit messages
-contain short change summaries, while longer technical notes are kept in
-`docs/history/`.
+Pogopo and PogopoOS are developed through small tested milestones. Commit messages contain short summaries of individual changes, while longer technical notes are stored in [`docs/history/`](docs/history/).
