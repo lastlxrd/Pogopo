@@ -38,6 +38,9 @@ struct Stats {
     uint32_t audio_frames_dropped = 0;
     uint32_t page_loads = 0;
     uint32_t page_load_us = 0;
+    uint32_t code_cache_hits = 0;
+    uint32_t code_cache_misses = 0;
+    uint32_t code_cache_fill_us = 0;
     uint32_t save_writes = 0;
     uint32_t last_frame_us = 0;
     uint32_t max_frame_us = 0;
@@ -45,6 +48,9 @@ struct Stats {
     uint32_t rom_buffer_bytes = 0;
     uint32_t frame_buffer_bytes = 0;
     uint32_t save_bytes = 0;
+    uint32_t fast_memory_bytes = 0;
+    uint8_t code_cache_pages = 0;
+    bool iwram_internal = false;
 };
 
 class GameBoyAdvance {
@@ -57,6 +63,10 @@ public:
     struct Config {
         uint8_t realtime_volume = 72;
         uint8_t rom_buffer_megabytes = 6;
+        // Optional storage borrowed from the idle stable-GB ROM arena. It is
+        // used only between GBA load/unload and remains owned by GameBoy.
+        uint8_t* fast_memory = nullptr;
+        uint32_t fast_memory_bytes = 0;
         bool render_every_other_frame = true;
         bool dither = true;
         UBaseType_t task_priority = 6;
@@ -103,6 +113,7 @@ private:
     void freeCoreMemory();
     esp_err_t loadSave();
     esp_err_t startAudio();
+    void pushAudioForWallTime(uint32_t source_frames, int64_t now_us);
     void stopTask();
     uint32_t activeSaveSize() const;
 

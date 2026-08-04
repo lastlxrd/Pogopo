@@ -142,6 +142,8 @@ esp_err_t start_gameboy_advance() {
     // than the cache are transparently paged from SD in 32 KiB units.
     config.rom_buffer_megabytes = 6;
     config.realtime_volume = 72;
+    config.fast_memory = g_gameboy.idleInternalArena();
+    config.fast_memory_bytes = g_gameboy.idleInternalArenaSize();
     config.render_every_other_frame = true;
     config.dither = true;
     config.task_priority = 6;
@@ -318,7 +320,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP10.0 EXPERIMENTAL GBA FEASIBILITY PASS");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP10.0.1 GBA CACHE + CLEAN AUDIO TEST");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -350,5 +352,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP10.0 ready: stable GB + isolated experimental gpSP GBA");
+    ESP_LOGI(TAG, "STEP10.0.1 ready: stable GB + cached experimental gpSP GBA");
 }

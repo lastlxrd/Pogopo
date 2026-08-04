@@ -111,6 +111,14 @@ public:
     esp_err_t lastError() const { return last_error_.load(); }
     Stats stats() const;
 
+    // The arena is reserved at boot for the stable Game Boy ROM cache. The
+    // app manager never runs GB and GBA games concurrently, so the isolated
+    // GBA frontend may use this otherwise-idle storage while no GB ROM is
+    // loaded. The Game Boy remains the owner and the pointer must not be
+    // freed or retained after a GBA game exits.
+    uint8_t* idleInternalArena() const;
+    uint32_t idleInternalArenaSize() const;
+
     // Used by Peanut-GB's global sound callbacks in the implementation TU.
     uint8_t apuRead(uint16_t address);
     void apuWrite(uint16_t address, uint8_t value);

@@ -1001,6 +1001,16 @@ const char* GameBoy::romPath() const {
     return impl_ ? impl_->rom_path : "";
 }
 
+uint8_t* GameBoy::idleInternalArena() const {
+    if (!impl_ || loaded_.load()) return nullptr;
+    return impl_->rom_arena;
+}
+
+uint32_t GameBoy::idleInternalArenaSize() const {
+    if (!impl_ || loaded_.load()) return 0;
+    return impl_->rom_arena_size;
+}
+
 Stats GameBoy::stats() const {
     Stats result;
     if (!impl_) return result;

@@ -345,11 +345,11 @@ unsigned memory_write_savestate(u8 *dst);
 // of any code treating them as fixed arrays. This results in very minimal code changes to the rest of gbSP.
 typedef struct
 {
-  // TODO: Evaluate what is best left in internal memory for performance reasons (for the few that could fit)
+  // Large, comparatively cold arrays remain in PSRAM. The 32 KiB IWRAM is a
+  // separate pointer so the pogopo frontend can place it in the idle stable-GB
+  // internal arena while a GBA game is active.
   u8 vram[1024 * 96];
   u8 ewram[(1024 * 256) << SMC_DETECTION];
-  u8 iwram[(1024 * 32) << SMC_DETECTION];
-  // u8 *memory_map_read[8 * 1024];
   u8 gamepak_backup[1024 * 128];
   u8 *memory_map_read[8 * 1024];
   // Sprite ordering state is large and does not need scarce internal SRAM.
@@ -359,9 +359,10 @@ typedef struct
 } gbsp_memory_t;
 
 extern gbsp_memory_t *gbsp_memory;
+extern u8 *gbsp_iwram;
 #define vram gbsp_memory->vram
 #define ewram gbsp_memory->ewram
-#define iwram gbsp_memory->iwram
+#define iwram gbsp_iwram
 // #define memory_map_read gbsp_memory->memory_map_read
 #define gamepak_backup gbsp_memory->gamepak_backup
 #endif
@@ -373,5 +374,16 @@ extern u32 gamepak_file_size;
 extern u32 gamepak_page_loads;
 extern u32 gamepak_page_load_us;
 extern FILE *gamepak_file_large;
+
+// Optional internal-RAM instruction-page cache. Normal ROM data accesses keep
+// using the canonical memory map; only interpreter opcode fetches are copied
+// here, so battery/RTC mappings and DMA behavior remain unchanged.
+extern u8 *gamepak_code_cache;
+extern u32 gamepak_code_cache_pages;
+extern u32 gamepak_code_cache_hits;
+extern u32 gamepak_code_cache_misses;
+extern u32 gamepak_code_cache_fill_us;
+void configure_gamepak_code_cache(u8 *storage, u32 pages);
+u8 *get_gamepak_code_page(u32 map_index);
 
 #endif

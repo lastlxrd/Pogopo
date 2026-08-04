@@ -31,7 +31,11 @@ constexpr uint32_t MAX_SAVE_BYTES = 128U * 1024U;
 constexpr uint32_t AUDIO_SOURCE_RATE = 32768;
 constexpr uint32_t AUDIO_PACKET_FRAMES = 512;
 constexpr uint32_t AUDIO_TEMP_FRAMES = 640;
-constexpr uint32_t AUDIO_TARGET_FRAMES = AUDIO_PACKET_FRAMES * 4U;
+constexpr uint32_t AUDIO_RESAMPLE_PACKET_FRAMES = 128;
+constexpr uint32_t AUDIO_PREFILL_PACKETS = 6;
+constexpr uint32_t GBA_IWRAM_BYTES = 32U * 1024U;
+constexpr uint32_t CODE_CACHE_PAGE_BYTES = 32U * 1024U;
+constexpr uint32_t MAX_CODE_CACHE_PAGES = 3;
 
 constexpr uint16_t BTN_UP = 1U << 0U;
 constexpr uint16_t BTN_DOWN = 1U << 1U;
@@ -77,6 +81,7 @@ void copy_path(char* destination, size_t capacity, const char* source) {
 extern "C" {
 
 gbsp_memory_t* gbsp_memory = nullptr;
+u8* gbsp_iwram = nullptr;
 u32 idle_loop_target_pc = 0xFFFFFFFFU;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES]{};
 u32 translation_gate_targets = 0;
@@ -101,6 +106,7 @@ struct GameBoyAdvance::Impl {
     SemaphoreHandle_t core_mutex = nullptr;
 
     int16_t audio_samples[AUDIO_TEMP_FRAMES * 2U]{};
+    int16_t audio_resample_packet[AUDIO_RESAMPLE_PACKET_FRAMES * 2U]{};
     char rom_path[192]{};
     char save_path[192]{};
     char rom_title[32]{};
@@ -111,6 +117,12 @@ struct GameBoyAdvance::Impl {
     ScaleMode previous_scale = ScaleMode::OneX;
     uint32_t last_draw_sequence = UINT32_MAX;
     uint32_t behind_yield_counter = 0;
+    uint64_t audio_wall_accumulator = 0;
+    int64_t audio_wall_last_us = 0;
+    uint32_t fast_memory_used = 0;
+    uint8_t code_cache_pages = 0;
+    bool iwram_internal = false;
+    bool iwram_owned = false;
 
     std::atomic<uint32_t> emulated_frames{0};
     std::atomic<uint32_t> rendered_frames{0};
@@ -119,6 +131,9 @@ struct GameBoyAdvance::Impl {
     std::atomic<uint32_t> audio_frames_dropped{0};
     std::atomic<uint32_t> page_loads{0};
     std::atomic<uint32_t> page_load_us{0};
+    std::atomic<uint32_t> code_cache_hits{0};
+    std::atomic<uint32_t> code_cache_misses{0};
+    std::atomic<uint32_t> code_cache_fill_us{0};
     std::atomic<uint32_t> save_writes{0};
     std::atomic<uint32_t> last_frame_us{0};
     std::atomic<uint32_t> max_frame_us{0};
@@ -176,6 +191,38 @@ esp_err_t GameBoyAdvance::allocateCoreMemory() {
     gbsp_memory = static_cast<gbsp_memory_t*>(heap_caps_calloc(
         1, sizeof(gbsp_memory_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!gbsp_memory) return ESP_ERR_NO_MEM;
+
+    uint8_t* fast_cursor = config_.fast_memory;
+    uint32_t fast_remaining = config_.fast_memory_bytes;
+    if (!fast_cursor) fast_remaining = 0;
+    fast_remaining -= fast_remaining % CODE_CACHE_PAGE_BYTES;
+
+    // A 64+ KiB borrowed arena gets the GBA's genuinely hot 32 KiB IWRAM
+    // first. Smaller arenas are more useful as an opcode page cache while
+    // IWRAM falls back to PSRAM.
+    if (fast_cursor && fast_remaining >= GBA_IWRAM_BYTES + CODE_CACHE_PAGE_BYTES) {
+        gbsp_iwram = fast_cursor;
+        fast_cursor += GBA_IWRAM_BYTES;
+        fast_remaining -= GBA_IWRAM_BYTES;
+        impl_->fast_memory_used += GBA_IWRAM_BYTES;
+        impl_->iwram_internal = true;
+    } else {
+        gbsp_iwram = static_cast<u8*>(heap_caps_malloc(
+            GBA_IWRAM_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        impl_->iwram_owned = gbsp_iwram != nullptr;
+    }
+    if (!gbsp_iwram) {
+        freeCoreMemory();
+        return ESP_ERR_NO_MEM;
+    }
+
+    impl_->code_cache_pages = static_cast<uint8_t>(std::min<uint32_t>(
+        MAX_CODE_CACHE_PAGES, fast_remaining / CODE_CACHE_PAGE_BYTES));
+    configure_gamepak_code_cache(
+        impl_->code_cache_pages ? fast_cursor : nullptr, impl_->code_cache_pages);
+    impl_->fast_memory_used +=
+        static_cast<uint32_t>(impl_->code_cache_pages) * CODE_CACHE_PAGE_BYTES;
+
     impl_->internal_memory_map = static_cast<uint8_t**>(heap_caps_calloc(
         8U * 1024U, sizeof(uint8_t*), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     memory_map_read = impl_->internal_memory_map
@@ -203,16 +250,23 @@ void GameBoyAdvance::freeCoreMemory() {
     if (!impl_) return;
     if (gamepak_buffer_count > 0 || gamepak_file_large) memory_term();
     gamepak_buffer_count = 0;
+    configure_gamepak_code_cache(nullptr, 0);
     gba_screen_pixels = nullptr;
     memory_map_read = nullptr;
     if (impl_->frame_front) heap_caps_free(impl_->frame_front);
     if (impl_->frame_back) heap_caps_free(impl_->frame_back);
     if (impl_->frame_render) heap_caps_free(impl_->frame_render);
     if (impl_->internal_memory_map) heap_caps_free(impl_->internal_memory_map);
+    if (impl_->iwram_owned && gbsp_iwram) heap_caps_free(gbsp_iwram);
     impl_->frame_front = nullptr;
     impl_->frame_back = nullptr;
     impl_->frame_render = nullptr;
     impl_->internal_memory_map = nullptr;
+    gbsp_iwram = nullptr;
+    impl_->iwram_owned = false;
+    impl_->iwram_internal = false;
+    impl_->fast_memory_used = 0;
+    impl_->code_cache_pages = 0;
     if (gbsp_memory) heap_caps_free(gbsp_memory);
     gbsp_memory = nullptr;
     impl_->core_memory_ready = false;
@@ -304,6 +358,9 @@ esp_err_t GameBoyAdvance::load(const char* path) {
     impl_->audio_frames_dropped.store(0);
     impl_->page_loads.store(0);
     impl_->page_load_us.store(0);
+    impl_->code_cache_hits.store(0);
+    impl_->code_cache_misses.store(0);
+    impl_->code_cache_fill_us.store(0);
     impl_->save_writes.store(0);
     impl_->last_frame_us.store(0);
     impl_->max_frame_us.store(0);
@@ -338,11 +395,14 @@ esp_err_t GameBoyAdvance::load(const char* path) {
     }
 
     ESP_LOGI(TAG,
-             "Loaded %s (%lu bytes, cache=%lu MiB, swap=%s, map=%s, state=%u bytes, frames=%u bytes)",
+             "Loaded %s (%lu bytes, cache=%lu MiB, swap=%s, map=%s, IWRAM=%s, code=%u pages, fast=%lu, state=%u bytes, frames=%u bytes)",
              impl_->rom_title, static_cast<unsigned long>(impl_->rom_size),
              static_cast<unsigned long>(gamepak_buffer_count),
              gamepak_must_swap() ? "SD" : "FULL",
              impl_->internal_memory_map ? "INT" : "PSRAM",
+             impl_->iwram_internal ? "INT" : "PSRAM",
+             static_cast<unsigned>(impl_->code_cache_pages),
+             static_cast<unsigned long>(impl_->fast_memory_used),
              static_cast<unsigned>(sizeof(gbsp_memory_t)),
              static_cast<unsigned>(FRAME_BYTES * 3U));
     last_error_.store(ESP_OK);
@@ -434,10 +494,76 @@ esp_err_t GameBoyAdvance::startAudio() {
                                                         config_.realtime_volume);
     if (error != ESP_OK) return error;
     std::memset(impl_->audio_samples, 0, sizeof(impl_->audio_samples));
-    for (int packet = 0; packet < 3; ++packet) {
+    std::memset(impl_->audio_resample_packet, 0,
+                sizeof(impl_->audio_resample_packet));
+    for (uint32_t packet = 0; packet < AUDIO_PREFILL_PACKETS; ++packet) {
         audio_->pushRealtimeStereo(impl_->audio_samples, AUDIO_PACKET_FRAMES);
     }
+    impl_->audio_wall_accumulator = 0;
+    impl_->audio_wall_last_us = esp_timer_get_time();
     return ESP_OK;
+}
+
+void GameBoyAdvance::pushAudioForWallTime(uint32_t source_frames, int64_t now_us) {
+    if (!impl_ || !audio_ || !audio_->enabled()) return;
+    int64_t elapsed_us = now_us - impl_->audio_wall_last_us;
+    impl_->audio_wall_last_us = now_us;
+    if (elapsed_us <= 0) return;
+    // A debugger pause or pathological I/O stall should not make several
+    // seconds of one audio frame play after execution resumes.
+    elapsed_us = std::min<int64_t>(elapsed_us, 250000);
+    impl_->audio_wall_accumulator +=
+        static_cast<uint64_t>(elapsed_us) * AUDIO_SOURCE_RATE;
+    const uint32_t output_frames = static_cast<uint32_t>(
+        impl_->audio_wall_accumulator / 1000000U);
+    impl_->audio_wall_accumulator %= 1000000U;
+    if (output_frames == 0) return;
+
+    uint32_t pushed_total = 0;
+    uint32_t dropped_total = 0;
+    const uint64_t phase_step = source_frames > 1 && output_frames > 1
+        ? (static_cast<uint64_t>(source_frames - 1U) << 16U) /
+              (output_frames - 1U)
+        : 0;
+
+    for (uint32_t output_offset = 0; output_offset < output_frames;) {
+        const uint32_t packet_frames = std::min<uint32_t>(
+            AUDIO_RESAMPLE_PACKET_FRAMES, output_frames - output_offset);
+        for (uint32_t i = 0; i < packet_frames; ++i) {
+            int16_t left = 0;
+            int16_t right = 0;
+            if (source_frames > 0) {
+                const uint64_t phase =
+                    static_cast<uint64_t>(output_offset + i) * phase_step;
+                const uint32_t source_index = static_cast<uint32_t>(
+                    std::min<uint64_t>(phase >> 16U, source_frames - 1U));
+                const uint32_t next_index = std::min<uint32_t>(
+                    source_index + 1U, source_frames - 1U);
+                const uint32_t fraction = static_cast<uint32_t>(phase & 0xFFFFU);
+                const int32_t left_a = impl_->audio_samples[source_index * 2U];
+                const int32_t left_b = impl_->audio_samples[next_index * 2U];
+                const int32_t right_a = impl_->audio_samples[source_index * 2U + 1U];
+                const int32_t right_b = impl_->audio_samples[next_index * 2U + 1U];
+                left = static_cast<int16_t>(left_a +
+                    ((static_cast<int64_t>(left_b - left_a) * fraction) >> 16U));
+                right = static_cast<int16_t>(right_a +
+                    ((static_cast<int64_t>(right_b - right_a) * fraction) >> 16U));
+            }
+            impl_->audio_resample_packet[i * 2U] = left;
+            impl_->audio_resample_packet[i * 2U + 1U] = right;
+        }
+
+        const size_t pushed = audio_->pushRealtimeStereo(
+            impl_->audio_resample_packet, packet_frames);
+        pushed_total += static_cast<uint32_t>(pushed);
+        if (pushed < packet_frames) {
+            dropped_total += output_frames - output_offset;
+            break;
+        }
+        output_offset += packet_frames;
+    }
+    impl_->audio_frames_pushed.fetch_add(pushed_total);
+    impl_->audio_frames_dropped.fetch_add(dropped_total);
 }
 
 void GameBoyAdvance::reset() {
@@ -528,13 +654,17 @@ void GameBoyAdvance::taskLoop() {
         impl_->emulated_frames.fetch_add(1);
         impl_->page_loads.store(gamepak_page_loads, std::memory_order_relaxed);
         impl_->page_load_us.store(gamepak_page_load_us, std::memory_order_relaxed);
+        impl_->code_cache_hits.store(gamepak_code_cache_hits,
+                                     std::memory_order_relaxed);
+        impl_->code_cache_misses.store(gamepak_code_cache_misses,
+                                       std::memory_order_relaxed);
+        impl_->code_cache_fill_us.store(gamepak_code_cache_fill_us,
+                                        std::memory_order_relaxed);
 
         if (audio_ && audio_->enabled()) {
             const uint32_t frames = sound_read_samples(impl_->audio_samples,
                                                        AUDIO_TEMP_FRAMES);
-            const size_t pushed = audio_->pushRealtimeStereo(impl_->audio_samples, frames);
-            impl_->audio_frames_pushed.fetch_add(static_cast<uint32_t>(pushed));
-            if (pushed < frames) impl_->audio_frames_dropped.fetch_add(frames - pushed);
+            pushAudioForWallTime(frames, esp_timer_get_time());
         }
 
         ++local_frame;
@@ -552,10 +682,6 @@ void GameBoyAdvance::taskLoop() {
             next_frame_us = esp_timer_get_time();
         }
 
-        if (audio_ && audio_->enabled()) {
-            const audio::RealtimeInfo info = audio_->realtimeInfo();
-            if (info.buffered_frames > AUDIO_TARGET_FRAMES) vTaskDelay(1);
-        }
     }
 
     task_running_.store(false);
@@ -614,6 +740,9 @@ Stats GameBoyAdvance::stats() const {
     result.audio_frames_dropped = impl_->audio_frames_dropped.load();
     result.page_loads = impl_->page_loads.load();
     result.page_load_us = impl_->page_load_us.load();
+    result.code_cache_hits = impl_->code_cache_hits.load();
+    result.code_cache_misses = impl_->code_cache_misses.load();
+    result.code_cache_fill_us = impl_->code_cache_fill_us.load();
     result.save_writes = impl_->save_writes.load();
     result.last_frame_us = impl_->last_frame_us.load();
     result.max_frame_us = impl_->max_frame_us.load();
@@ -621,6 +750,9 @@ Stats GameBoyAdvance::stats() const {
     result.rom_buffer_bytes = gamepak_buffer_count * 1024U * 1024U;
     result.frame_buffer_bytes = FRAME_BYTES * 3U;
     result.save_bytes = activeSaveSize();
+    result.fast_memory_bytes = impl_->fast_memory_used;
+    result.code_cache_pages = impl_->code_cache_pages;
+    result.iwram_internal = impl_->iwram_internal;
     return result;
 }
 
