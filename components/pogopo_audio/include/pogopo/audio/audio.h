@@ -121,6 +121,10 @@ public:
     // another core. When active it gets an exclusive fast path in the I2S task;
     // at 32768 Hz no interpolation or UI/WAV mixing runs in the hot loop.
     esp_err_t startRealtimeStereo(uint32_t sample_rate = 32768, uint8_t volume = 72);
+    // Adjust the rate at which source frames are consumed without clearing the
+    // ring. Slow emulators can follow wall time without manufacturing large
+    // resampled bursts in their producer task.
+    bool setRealtimeSourceRate(uint32_t sample_rate);
     void stopRealtime();
     size_t pushRealtimeStereo(const int16_t* interleaved_stereo, size_t frames);
     RealtimeInfo realtimeInfo() const;
@@ -290,7 +294,7 @@ private:
     int16_t* realtime_buffer_ = nullptr;
     uint32_t realtime_capacity_frames_ = 0;
     uint32_t realtime_fraction_q16_ = 0;
-    uint32_t realtime_step_q16_ = 1U << 16U;
+    std::atomic<uint32_t> realtime_step_q16_{1U << 16U};
     int32_t realtime_last_left_ = 0;
     int32_t realtime_last_right_ = 0;
     uint16_t realtime_fade_samples_ = 0;

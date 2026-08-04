@@ -563,7 +563,11 @@ const u8 bit_count[256] =
   if(new_pc_region != pc_region)                                              \
   {                                                                           \
     pc_region = new_pc_region;                                                \
-    pc_address_block = get_gamepak_code_page(new_pc_region);                  \
+    pc_address_block = memory_map_read[new_pc_region];                        \
+    touch_gamepak_page(pc_region);                                            \
+                                                                              \
+    if(!pc_address_block)                                                     \
+      pc_address_block = load_gamepak_page(pc_region & 0x3FF);                \
   }                                                                           \
 
 
@@ -1464,11 +1468,15 @@ IRAM_ATTR void execute_arm(u32 cycles)
   u32 condition;
   u32 n_flag, z_flag, c_flag, v_flag;
   u32 pc_region = (reg[REG_PC] >> 15);
-  u8 *pc_address_block = get_gamepak_code_page(pc_region);
+  u8 *pc_address_block = memory_map_read[pc_region];
   u32 new_pc_region;
   s32 cycles_remaining;
   u32 update_ret;
   cpu_alert_type cpu_alert;
+
+  if(!pc_address_block)
+    pc_address_block = load_gamepak_page(pc_region & 0x3FF);
+  touch_gamepak_page(pc_region);
 
   cycles_remaining = cycles;
   while(1)

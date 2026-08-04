@@ -156,19 +156,13 @@ void GameBoyAdvanceApp::update(AppContext& context, uint32_t dt_ms) {
         const uint32_t lcd = now.displayed_frames - perf_previous_.displayed_frames;
         const uint32_t loads = now.page_loads - perf_previous_.page_loads;
         const uint32_t load_us = now.page_load_us - perf_previous_.page_load_us;
-        const uint32_t code_hits = now.code_cache_hits -
-                                   perf_previous_.code_cache_hits;
-        const uint32_t code_misses = now.code_cache_misses -
-                                     perf_previous_.code_cache_misses;
-        const uint32_t code_fill_us = now.code_cache_fill_us -
-                                      perf_previous_.code_cache_fill_us;
         const uint32_t drop = now.audio_frames_dropped -
                               perf_previous_.audio_frames_dropped;
         const audio::RealtimeInfo realtime = context.audio.realtimeInfo();
         ESP_LOGI(TAG,
                  "PERF GBA emu=%lu render=%lu lcd=%lu core=%luus max=%luus "
                  "ROM=%luKiB cache=%luKiB swap=%s page=%lu/%luus "
-                 "code=%u:%lu/%lu/%luus IWRAM=%s audio=%lu/%lu under=%lu "
+                 "code=OFF IWRAM=%s rate=%luHz audio=%lu/%lu under=%lu "
                  "over=%lu drop=%lu RAM=%lu/%lu PSRAM=%lu i2cerr=%lu",
                  static_cast<unsigned long>(emu),
                  static_cast<unsigned long>(render),
@@ -180,11 +174,8 @@ void GameBoyAdvanceApp::update(AppContext& context, uint32_t dt_ms) {
                  now.rom_bytes > now.rom_buffer_bytes ? "SD" : "FULL",
                  static_cast<unsigned long>(loads),
                  static_cast<unsigned long>(load_us),
-                 static_cast<unsigned>(now.code_cache_pages),
-                 static_cast<unsigned long>(code_hits),
-                 static_cast<unsigned long>(code_misses),
-                 static_cast<unsigned long>(code_fill_us),
                  now.iwram_internal ? "INT" : "PSRAM",
+                 static_cast<unsigned long>(now.audio_source_rate),
                  static_cast<unsigned long>(realtime.buffered_frames),
                  static_cast<unsigned long>(realtime.capacity_frames),
                  static_cast<unsigned long>(realtime.underruns),

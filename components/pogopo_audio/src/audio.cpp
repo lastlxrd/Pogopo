@@ -309,8 +309,9 @@ esp_err_t Audio::startRealtimeStereo(uint32_t sample_rate, uint8_t volume) {
     realtime_volume_.store(std::min<uint8_t>(volume, 100));
     realtime_source_rate_.store(sample_rate);
     realtime_fraction_q16_ = 0;
-    realtime_step_q16_ = static_cast<uint32_t>(std::max<uint64_t>(
-        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate));
+    realtime_step_q16_.store(static_cast<uint32_t>(std::max<uint64_t>(
+        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate)),
+        std::memory_order_release);
     realtime_last_left_ = 0;
     realtime_last_right_ = 0;
     realtime_fade_samples_ = 0;
@@ -322,12 +323,27 @@ esp_err_t Audio::startRealtimeStereo(uint32_t sample_rate, uint8_t volume) {
     return ESP_OK;
 }
 
+bool Audio::setRealtimeSourceRate(uint32_t sample_rate) {
+    // The regular start API keeps its normal 8 kHz lower bound. This dynamic
+    // path is intentionally wider for an emulator that may temporarily run at
+    // a small fraction of real time.
+    if (!realtime_active_.load() || config_.sample_rate == 0 ||
+        sample_rate < 4096U || sample_rate > 96000U) {
+        return false;
+    }
+    realtime_source_rate_.store(sample_rate, std::memory_order_relaxed);
+    realtime_step_q16_.store(static_cast<uint32_t>(std::max<uint64_t>(
+        1U, (static_cast<uint64_t>(sample_rate) << 16U) / config_.sample_rate)),
+        std::memory_order_release);
+    return true;
+}
+
 void Audio::stopRealtime() {
     realtime_active_.store(false);
     realtime_write_total_.store(0);
     realtime_read_total_.store(0);
     realtime_fraction_q16_ = 0;
-    realtime_step_q16_ = 1U << 16U;
+    realtime_step_q16_.store(1U << 16U, std::memory_order_release);
     realtime_last_left_ = 0;
     realtime_last_right_ = 0;
     realtime_fade_samples_ = 0;
@@ -871,7 +887,8 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
     const int32_t scale = static_cast<int32_t>(realtime_volume_.load()) *
                           static_cast<int32_t>(master_volume_.load());
 
-    const uint32_t playback_step_q16 = realtime_step_q16_;
+    const uint32_t playback_step_q16 =
+        realtime_step_q16_.load(std::memory_order_acquire);
     const auto apply_recovery_fade = [this](int32_t& sample_left, int32_t& sample_right) {
         if (realtime_fade_in_samples_ == 0) return;
         const uint16_t gain = static_cast<uint16_t>(64U - realtime_fade_in_samples_);

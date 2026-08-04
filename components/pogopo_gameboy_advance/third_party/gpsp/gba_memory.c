@@ -362,14 +362,6 @@ u32 gamepak_size;           /* Size of the ROM in bytes */
 u32 gamepak_file_size;      /* Exact, unrounded file size */
 u32 gamepak_page_loads;
 u32 gamepak_page_load_us;
-u8 *gamepak_code_cache;
-u32 gamepak_code_cache_pages;
-u32 gamepak_code_cache_hits;
-u32 gamepak_code_cache_misses;
-u32 gamepak_code_cache_fill_us;
-static s32 gamepak_code_cache_tag[4] = { -1, -1, -1, -1 };
-static u32 gamepak_code_cache_age[4];
-static u32 gamepak_code_cache_tick;
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
@@ -2238,81 +2230,6 @@ u8 *load_gamepak_page(u32 physical_index)
     update_gpio_romregs();
 
   return swap_location;
-}
-
-void configure_gamepak_code_cache(u8 *storage, u32 pages)
-{
-  gamepak_code_cache = storage;
-  gamepak_code_cache_pages = MIN(pages, 4);
-  gamepak_code_cache_hits = 0;
-  gamepak_code_cache_misses = 0;
-  gamepak_code_cache_fill_us = 0;
-  gamepak_code_cache_tick = 0;
-  for(u32 i = 0; i < 4; i++)
-  {
-    gamepak_code_cache_tag[i] = -1;
-    gamepak_code_cache_age[i] = 0;
-  }
-}
-
-u8 *get_gamepak_code_page(u32 map_index)
-{
-  // GBA ROM is mirrored through 0x08000000..0x0CFFFFFF. All aliases use the
-  // same physical 32 KiB page number in the low ten map-index bits.
-  const u32 rom_map_begin = 0x08000000U >> 15;
-  const u32 rom_map_end = 0x0D000000U >> 15;
-  if(map_index < rom_map_begin || map_index >= rom_map_end)
-  {
-    u8 *mapped = memory_map_read[map_index];
-    return mapped ? mapped : load_gamepak_page(map_index & 0x3FF);
-  }
-
-  const u32 physical_index = map_index & 0x3FF;
-  touch_gamepak_page(physical_index);
-
-  if(gamepak_code_cache && gamepak_code_cache_pages)
-  {
-    for(u32 i = 0; i < gamepak_code_cache_pages; i++)
-    {
-      if(gamepak_code_cache_tag[i] == (s32)physical_index)
-      {
-        gamepak_code_cache_hits++;
-        gamepak_code_cache_age[i] = ++gamepak_code_cache_tick;
-        return gamepak_code_cache + i * (32 * 1024);
-      }
-    }
-  }
-
-  u8 *source = memory_map_read[map_index];
-  if(!source)
-    source = load_gamepak_page(physical_index);
-  if(!gamepak_code_cache || !gamepak_code_cache_pages)
-    return source;
-
-  u32 victim = 0;
-  for(u32 i = 0; i < gamepak_code_cache_pages; i++)
-  {
-    if(gamepak_code_cache_tag[i] < 0)
-    {
-      victim = i;
-      break;
-    }
-    if(gamepak_code_cache_age[i] < gamepak_code_cache_age[victim])
-      victim = i;
-  }
-
-  u8 *destination = gamepak_code_cache + victim * (32 * 1024);
-#ifdef POGOPO_GBA
-  const int64_t fill_start = esp_timer_get_time();
-#endif
-  memcpy(destination, source, 32 * 1024);
-#ifdef POGOPO_GBA
-  gamepak_code_cache_fill_us += (u32)(esp_timer_get_time() - fill_start);
-#endif
-  gamepak_code_cache_tag[victim] = (s32)physical_index;
-  gamepak_code_cache_age[victim] = ++gamepak_code_cache_tick;
-  gamepak_code_cache_misses++;
-  return destination;
 }
 
 void init_gamepak_buffer(void)

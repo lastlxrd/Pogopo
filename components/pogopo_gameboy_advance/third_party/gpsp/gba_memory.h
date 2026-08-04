@@ -375,15 +375,4 @@ extern u32 gamepak_page_loads;
 extern u32 gamepak_page_load_us;
 extern FILE *gamepak_file_large;
 
-// Optional internal-RAM instruction-page cache. Normal ROM data accesses keep
-// using the canonical memory map; only interpreter opcode fetches are copied
-// here, so battery/RTC mappings and DMA behavior remain unchanged.
-extern u8 *gamepak_code_cache;
-extern u32 gamepak_code_cache_pages;
-extern u32 gamepak_code_cache_hits;
-extern u32 gamepak_code_cache_misses;
-extern u32 gamepak_code_cache_fill_us;
-void configure_gamepak_code_cache(u8 *storage, u32 pages);
-u8 *get_gamepak_code_page(u32 map_index);
-
 #endif

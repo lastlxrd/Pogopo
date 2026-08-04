@@ -38,9 +38,7 @@ struct Stats {
     uint32_t audio_frames_dropped = 0;
     uint32_t page_loads = 0;
     uint32_t page_load_us = 0;
-    uint32_t code_cache_hits = 0;
-    uint32_t code_cache_misses = 0;
-    uint32_t code_cache_fill_us = 0;
+    uint32_t audio_source_rate = 32768;
     uint32_t save_writes = 0;
     uint32_t last_frame_us = 0;
     uint32_t max_frame_us = 0;
@@ -49,7 +47,6 @@ struct Stats {
     uint32_t frame_buffer_bytes = 0;
     uint32_t save_bytes = 0;
     uint32_t fast_memory_bytes = 0;
-    uint8_t code_cache_pages = 0;
     bool iwram_internal = false;
 };
 
@@ -113,7 +110,7 @@ private:
     void freeCoreMemory();
     esp_err_t loadSave();
     esp_err_t startAudio();
-    void pushAudioForWallTime(uint32_t source_frames, int64_t now_us);
+    void updateAudioRate(uint32_t source_frames, int64_t now_us);
     void stopTask();
     uint32_t activeSaveSize() const;
 
