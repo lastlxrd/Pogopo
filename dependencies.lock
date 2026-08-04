@@ -55,12 +55,23 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.1.5
+  georgik/lua:
+    component_hash: 1ab17ca24960f462aa403fc8d338c37c0cee4dbc308c7393c270746c6d979f97
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 5.4.7
   idf:
     source:
       type: idf
     version: 6.0.2
 direct_dependencies:
 - espressif/bmi270
-manifest_hash: 1c139ad23b7bb42af3b3728ad633a247eface016e484b8d9640c83417d920eb4
-target: esp32s3
+- georgik/lua
+manifest_hash: f526d5915c4c3685cccbba0ef4d0e73c0b38ecb719dfcfad296c95694dcdc04f
+target: esp32
 version: 3.0.0

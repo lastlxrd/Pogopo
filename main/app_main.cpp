@@ -5,6 +5,7 @@
 #include "system_state.h"
 #include "apps/demo_apps.h"
 #include "apps/gameboy_apps.h"
+#include "apps/playdate_apps.h"
 
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
@@ -17,6 +18,7 @@
 #include "pogopo_power.h"
 #include "pogopo_settings.h"
 #include "pogopo_gameboy.h"
+#include "pogopo_playdate.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -53,6 +55,7 @@ static pogopo::demo::SettingsApp g_settings_app;
 static pogopo::demo::AboutApp g_about_app;
 static pogopo::demo::GameBoyApp g_gameboy_app(g_gameboy);
 static pogopo::demo::GameBoyBrowserApp g_gameboy_browser_app(g_gameboy_app);
+static pogopo::demo::PogoDateApp g_pogodate_app;
 
 namespace {
 
@@ -239,6 +242,7 @@ void os_task(void*) {
     g_app_manager.registerApp(g_launcher_app, true);
     g_app_manager.registerApp(g_gameboy_browser_app);
     g_app_manager.registerApp(g_gameboy_app);
+    g_app_manager.registerApp(g_pogodate_app);
     g_app_manager.registerApp(g_graphics_app);
     g_app_manager.registerApp(g_input_app);
     g_app_manager.registerApp(g_haptics_app);
@@ -294,7 +298,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.5.1 POWER MENU / UI POLISH");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.0 POGODATE LITE / PDSNAKE");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -325,5 +329,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.5.1 ready: stable GB, quick menu, clean LCD shutdown");
+    ESP_LOGI(TAG, "STEP11.0 ready: stable GB + PogoDate Lua experiment");
 }

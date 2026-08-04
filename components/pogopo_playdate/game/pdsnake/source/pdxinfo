@@ -1,0 +1,8 @@
+name=PDSnake
+author=Brett Chalupa
+description=Eat apples. Grow long. Avoid yourself.
+bundleID=com.brettmakesgames.pdsnake
+version=1.2
+buildNumber=7
+imagePath=meta/
+

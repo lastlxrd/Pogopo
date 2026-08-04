@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.cpp"
         "apps/demo_apps.cpp"
         "apps/gameboy_apps.cpp"
+        "apps/playdate_apps.cpp"
         "i2c_bus.cpp"
         "peripheral_tests.cpp"
         "tasks.cpp"
@@ -19,6 +20,7 @@ idf_component_register(
         pogopo_power
         pogopo_settings
         pogopo_gameboy
+        pogopo_playdate
         pogopo_gui
         pogopo_app
         esp_timer
@@ -26,4 +28,3 @@ idf_component_register(
         spi_flash
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-
