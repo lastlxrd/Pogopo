@@ -246,6 +246,7 @@ esp_err_t start_input() {
 
 void os_task(void*) {
     int64_t last_us = esp_timer_get_time();
+    uint32_t dt_remainder_us = 0;
     TickType_t wake = xTaskGetTickCount();
     uint32_t settings_dirty_ms = 0;
 
@@ -271,8 +272,12 @@ void os_task(void*) {
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
-        const uint32_t dt_ms = static_cast<uint32_t>(std::clamp<int64_t>((now_us - last_us) / 1000, 0, 100));
+        const uint32_t elapsed_us = static_cast<uint32_t>(
+            std::clamp<int64_t>(now_us - last_us, 0, 100000));
         last_us = now_us;
+        const uint32_t elapsed_with_remainder = elapsed_us + dt_remainder_us;
+        const uint32_t dt_ms = elapsed_with_remainder / 1000U;
+        dt_remainder_us = elapsed_with_remainder % 1000U;
 
         pogopo::power::Event power_event;
         if (g_power.nextEvent(power_event, 0)) handle_power_event(power_event);
@@ -311,7 +316,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.3 POGODATE 50 FPS + FILE API");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.4 POGODATE PDX COMPAT + SMOOTH PACING");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -342,5 +347,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.3 ready: stable GB + 50 FPS Celeste + Playdate file API");
+    ESP_LOGI(TAG, "STEP11.4 ready: stable GB + broader PDX API + paced Playdate logic");
 }

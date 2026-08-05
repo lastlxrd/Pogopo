@@ -44,6 +44,7 @@ enum Pixel : uint8_t {
     Clear = 0,
     White = 1,
     Black = 2,
+    Pattern = 3,
 };
 
 enum DrawMode : int {
@@ -92,7 +93,15 @@ struct Sound {
     bool music = false;
     bool loop = false;
     float volume = 1.0f;
+    int16_t cache_index = -1;
     char path[160]{};
+};
+
+struct CachedSound {
+    int16_t* samples = nullptr;
+    uint32_t frames = 0;
+    uint32_t sample_rate = 0;
+    char path[384]{};
 };
 
 struct PdFile {
@@ -179,6 +188,10 @@ struct Runtime::Impl {
     bool is_running = false;
     bool inverted_display = false;
     uint8_t draw_color = Black;
+    std::array<uint8_t, 8> draw_pattern{{0xff, 0xff, 0xff, 0xff,
+                                         0xff, 0xff, 0xff, 0xff}};
+    int pattern_offset_x = 0;
+    int pattern_offset_y = 0;
     uint8_t background_color = White;
     int draw_mode = Copy;
     int line_width = 1;
@@ -187,13 +200,18 @@ struct Runtime::Impl {
     int display_offset_x = 0;
     int display_offset_y = 0;
     uint32_t refresh_rate = 50;
-    uint32_t frame_accumulator_ms = 0;
+    uint32_t frame_accumulator_units = 0;
     uint32_t frame_dt_ms = 20;
     uint32_t now_ms = 0;
     uint8_t held_buttons = 0;
     uint8_t pressed_buttons = 0;
     uint8_t previous_held_buttons = 0;
     uint32_t next_timer_id = 1;
+
+    static constexpr size_t kMaximumCachedSounds = 32;
+    static constexpr size_t kMaximumSoundCacheBytes = 2U * 1024U * 1024U;
+    std::array<CachedSound, kMaximumCachedSounds> sound_cache{};
+    size_t sound_cache_bytes = 0;
 
     Image screen{};
     Image* target = nullptr;
@@ -503,6 +521,14 @@ struct Runtime::Impl {
 
     uint8_t mappedColor(uint8_t source, int destination_x, int destination_y) const {
         if (source == Clear) return Clear;
+        if (source == Pattern) {
+            const unsigned row = static_cast<unsigned>(
+                destination_y - pattern_offset_y) & 7U;
+            const unsigned column = static_cast<unsigned>(
+                destination_x - pattern_offset_x) & 7U;
+            source = (draw_pattern[row] & (0x80U >> column)) != 0U
+                ? Black : White;
+        }
         if (draw_mode == FillWhite) return White;
         if (draw_mode == FillBlack) return Black;
         if (draw_mode == Inverted) return source == Black ? White : Black;
@@ -844,7 +870,7 @@ struct Runtime::Impl {
                               size_t& unpacked_size, uint32_t& width,
                               uint32_t& height, uint32_t& count) {
         unpacked = nullptr; unpacked_size = 0; width = height = count = 0;
-        char path[256]{};
+        char path[384]{};
         if (!resourcePath(path, sizeof(path), requested, extension)) return false;
         FILE* file = std::fopen(path, "rb");
         if (!file) return false;
@@ -1039,6 +1065,21 @@ struct Runtime::Impl {
         const int y = static_cast<int>(luaL_checknumber(state, 3));
         const int flip = static_cast<int>(luaL_optinteger(state, 4, Unflipped));
         if (image) runtime->drawImage(*image, x, y, flip);
+        return 0;
+    }
+
+    static int cImageDrawCentered(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        const int center_x = static_cast<int>(luaL_checknumber(state, 2));
+        const int center_y = static_cast<int>(luaL_checknumber(state, 3));
+        const int flip = static_cast<int>(
+            luaL_optinteger(state, 4, Unflipped));
+        if (image) {
+            runtime->drawImage(*image, center_x - image->width / 2,
+                               center_y - image->height / 2, flip);
+        }
         return 0;
     }
 
@@ -1257,6 +1298,29 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cSetPattern(lua_State* state) {
+        Impl* runtime = self(state);
+        luaL_checktype(state, 1, LUA_TTABLE);
+        for (lua_Integer row = 1; row <= 8; ++row) {
+            lua_rawgeti(state, 1, row);
+            const lua_Integer value = luaL_checkinteger(state, -1);
+            lua_pop(state, 1);
+            if (value < 0 || value > 255) {
+                return luaL_error(state,
+                    "pattern row %d must be between 0 and 255",
+                    static_cast<int>(row));
+            }
+            runtime->draw_pattern[static_cast<size_t>(row - 1)] =
+                static_cast<uint8_t>(value);
+        }
+        runtime->pattern_offset_x = static_cast<int>(
+            luaL_optinteger(state, 2, 0));
+        runtime->pattern_offset_y = static_cast<int>(
+            luaL_optinteger(state, 3, 0));
+        runtime->draw_color = Pattern;
+        return 0;
+    }
+
     static int cSetDrawMode(lua_State* state) {
         self(state)->draw_mode = static_cast<int>(luaL_checkinteger(state, 1));
         return 0;
@@ -1290,7 +1354,7 @@ struct Runtime::Impl {
         // spans instead of calling the generic compositor for every pixel
         // (the old 400x240 background call performed 96,000 function calls
         // even though the fullscreen logical target is only 200x120).
-        if (!stencil && draw_mode != Nxor) {
+        if (!stencil && draw_mode != Nxor && color != Pattern) {
             uint8_t value = mappedColor(color, left, top);
             if (value == Clear && target == &screen) return;
             if (target == &screen && inverted_display && value != Clear) {
@@ -1561,6 +1625,7 @@ struct Runtime::Impl {
             static_cast<int>(luaL_checkinteger(state, 1)), 1,
             static_cast<int>(kMaximumFps)));
         runtime->runtime_stats.requested_fps = runtime->refresh_rate;
+        runtime->frame_accumulator_units = 0;
         lua_pushinteger(state, static_cast<lua_Integer>(runtime->refresh_rate));
         return 1;
     }
@@ -1707,23 +1772,43 @@ struct Runtime::Impl {
     static int cDrawFps(lua_State*) { return 0; }
     static int cSetMenuImage(lua_State*) { return 0; }
 
+    static bool pathHasSuffix(const char* path, const char* suffix) {
+        if (!path || !suffix) return false;
+        const size_t path_length = std::strlen(path);
+        const size_t suffix_length = std::strlen(suffix);
+        if (path_length < suffix_length) return false;
+        const char* value = path + path_length - suffix_length;
+        for (size_t index = 0; index < suffix_length; ++index) {
+            char left = value[index];
+            char right = suffix[index];
+            if (left >= 'A' && left <= 'Z') {
+                left = static_cast<char>(left + ('a' - 'A'));
+            }
+            if (right >= 'A' && right <= 'Z') {
+                right = static_cast<char>(right + ('a' - 'A'));
+            }
+            if (left != right) return false;
+        }
+        return true;
+    }
+
     bool pdaPath(char* output, size_t capacity, const char* requested) const {
         if (!package_mode || !requested || !requested[0] ||
             std::strstr(requested, "..") || requested[0] == '/') return false;
         char relative[176]{};
         std::snprintf(relative, sizeof(relative), "%s", requested);
+        if (pathHasSuffix(relative, ".pda")) {
+            return pdxJoinPath(output, capacity, package_info.path, relative);
+        }
         const size_t length = std::strlen(relative);
         const char* extensions[] = {".wav", ".aiff", ".aif"};
-        bool replaced = false;
         for (const char* extension : extensions) {
             const size_t suffix = std::strlen(extension);
-            if (length >= suffix && !std::strcmp(relative + length - suffix, extension)) {
+            if (pathHasSuffix(relative, extension)) {
                 relative[length - suffix] = '\0';
-                replaced = true;
                 break;
             }
         }
-        (void)replaced;
         return pdxJoinPath(output, capacity, package_info.path, relative, ".pda");
     }
 
@@ -1841,7 +1926,139 @@ struct Runtime::Impl {
         return true;
     }
 
+    void clearSoundCache() {
+        for (CachedSound& cached : sound_cache) {
+            if (cached.samples) heap_caps_free(cached.samples);
+            cached = {};
+        }
+        sound_cache_bytes = 0;
+    }
+
+    int cacheSound(const char* requested) {
+        if (!requested || !requested[0]) return -1;
+        char resolved_path[384]{};
+        if (!pdaPath(resolved_path, sizeof(resolved_path), requested)) return -1;
+        for (size_t index = 0; index < sound_cache.size(); ++index) {
+            if (sound_cache[index].samples &&
+                !std::strcmp(sound_cache[index].path, resolved_path)) {
+                return static_cast<int>(index);
+            }
+        }
+
+        size_t free_index = sound_cache.size();
+        for (size_t index = 0; index < sound_cache.size(); ++index) {
+            if (!sound_cache[index].samples) {
+                free_index = index;
+                break;
+            }
+        }
+        if (free_index == sound_cache.size()) return -1;
+
+        int16_t* samples = nullptr;
+        uint32_t frames = 0;
+        uint32_t sample_rate = 0;
+        if (!loadPda(requested, samples, frames, sample_rate)) return -1;
+        const size_t bytes = static_cast<size_t>(frames) * sizeof(int16_t);
+        if (bytes > kMaximumSoundCacheBytes - sound_cache_bytes) {
+            heap_caps_free(samples);
+            return -1;
+        }
+
+        CachedSound& cached = sound_cache[free_index];
+        cached.samples = samples;
+        cached.frames = frames;
+        cached.sample_rate = sample_rate;
+        std::snprintf(cached.path, sizeof(cached.path), "%s", resolved_path);
+        sound_cache_bytes += bytes;
+        return static_cast<int>(free_index);
+    }
+
+    static bool musicPath(const char* path) {
+        if (!path) return false;
+        char window[6]{};
+        size_t length = 0;
+        for (const char* cursor = path; *cursor; ++cursor) {
+            char value = *cursor;
+            if (value >= 'A' && value <= 'Z') {
+                value = static_cast<char>(value + ('a' - 'A'));
+            }
+            if (length < 5U) {
+                window[length++] = value;
+            } else {
+                std::memmove(window, window + 1, 4U);
+                window[4] = value;
+            }
+            if (length == 5U && !std::memcmp(window, "music", 5U)) return true;
+        }
+        return false;
+    }
+
+    void preloadShortSounds(const char* relative = "", int depth = 0) {
+        // Keep recursive directory state comfortably below the 8 KiB UI-task stack.
+        if (!package_mode || depth >= 4 ||
+            sound_cache_bytes >= kMaximumSoundCacheBytes) return;
+        char directory_path[384]{};
+        if (!pdxJoinPath(directory_path, sizeof(directory_path),
+                         package_info.path, relative)) return;
+        DIR* directory = opendir(directory_path);
+        if (!directory) return;
+        while (dirent* entry = readdir(directory)) {
+            if (!std::strcmp(entry->d_name, ".") ||
+                !std::strcmp(entry->d_name, "..")) continue;
+            char child_relative[256]{};
+            const int relative_length = relative && relative[0]
+                ? std::snprintf(child_relative, sizeof(child_relative), "%s/%s",
+                                relative, entry->d_name)
+                : std::snprintf(child_relative, sizeof(child_relative), "%s",
+                                entry->d_name);
+            if (relative_length <= 0 ||
+                static_cast<size_t>(relative_length) >= sizeof(child_relative)) {
+                continue;
+            }
+            char child_path[384]{};
+            if (!pdxJoinPath(child_path, sizeof(child_path), package_info.path,
+                             child_relative)) continue;
+            struct stat value{};
+            if (stat(child_path, &value) != 0) continue;
+            if (S_ISDIR(value.st_mode)) {
+                if (!musicPath(child_relative)) {
+                    preloadShortSounds(child_relative, depth + 1);
+                }
+                continue;
+            }
+            if (!S_ISREG(value.st_mode) || musicPath(child_relative)) continue;
+            if (!pathHasSuffix(child_relative, ".pda")) continue;
+            (void)cacheSound(child_relative);
+        }
+        closedir(directory);
+    }
+
+    bool cloneCachedSound(int index, int16_t*& samples, uint32_t& frames,
+                          uint32_t& sample_rate) const {
+        samples = nullptr;
+        frames = 0;
+        sample_rate = 0;
+        if (index < 0 || static_cast<size_t>(index) >= sound_cache.size()) {
+            return false;
+        }
+        const CachedSound& cached = sound_cache[static_cast<size_t>(index)];
+        if (!cached.samples || cached.frames == 0) return false;
+        const size_t bytes = static_cast<size_t>(cached.frames) * sizeof(int16_t);
+        samples = static_cast<int16_t*>(heap_caps_malloc(
+            bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!samples) {
+            samples = static_cast<int16_t*>(heap_caps_malloc(
+                bytes, MALLOC_CAP_8BIT));
+        }
+        if (!samples) return false;
+        std::memcpy(samples, cached.samples, bytes);
+        frames = cached.frames;
+        sample_rate = cached.sample_rate;
+        return true;
+    }
+
     static int cSoundNew(lua_State* state) {
+        Impl* runtime = self(state);
         const char* path = lua_type(state, 1) == LUA_TSTRING ? lua_tostring(state, 1) : "";
         auto* original = static_cast<Sound*>(luaL_testudata(state, 1, kSoundMetatable));
         auto* sound = static_cast<Sound*>(lua_newuserdatauv(state, sizeof(Sound), 0));
@@ -1849,8 +2066,9 @@ struct Runtime::Impl {
         if (original) *sound = *original;
         else {
             sound->effect = effectForPath(path);
-            sound->music = path && std::strstr(path, "Sounds/music");
+            sound->music = musicPath(path);
             std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
+            if (!sound->music) sound->cache_index = runtime->cacheSound(path);
         }
         luaL_getmetatable(state, kSoundMetatable);
         lua_setmetatable(state, -2);
@@ -1865,7 +2083,9 @@ struct Runtime::Impl {
             int16_t* samples = nullptr;
             uint32_t frames = 0, sample_rate = 0;
             const bool loaded = runtime->audio && sound->path[0] &&
-                runtime->loadPda(sound->path, samples, frames, sample_rate);
+                (runtime->cloneCachedSound(sound->cache_index, samples, frames,
+                                           sample_rate) ||
+                 runtime->loadPda(sound->path, samples, frames, sample_rate));
             if (loaded) {
                 const uint8_t volume = static_cast<uint8_t>(std::clamp<int>(
                     static_cast<int>(std::lround(sound->volume * 100.0f)), 0, 100));
@@ -1921,12 +2141,14 @@ struct Runtime::Impl {
     }
 
     static int cSoundLoad(lua_State* state) {
+        Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         const char* path = luaL_checkstring(state, 2);
         if (sound) {
             sound->effect = effectForPath(path);
-            sound->music = std::strstr(path, "Sounds/music") != nullptr;
+            sound->music = musicPath(path);
             std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
+            sound->cache_index = sound->music ? -1 : runtime->cacheSound(path);
         }
         lua_pushboolean(state, sound != nullptr);
         return 1;
@@ -2640,7 +2862,8 @@ struct Runtime::Impl {
         if(luaL_newmetatable(lua,kImageMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             lua_pushcfunction(lua,cImageGc);lua_setfield(lua,-2,"__gc");
-            setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawScaled",cImageDrawScaled);
+            setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawCentered",cImageDrawCentered);
+            setFunction(-1,"drawScaled",cImageDrawScaled);
             setFunction(-1,"drawRotated",cImageDrawRotated);
             setFunction(-1,"drawFaded",cImageDrawFaded);setFunction(-1,"getSize",cImageGetSize);
             setFunction(-1,"clear",cImageClear);setFunction(-1,"copy",cImageCopy);
@@ -2733,6 +2956,7 @@ struct Runtime::Impl {
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"clear",cGraphicsClear);setFunction(graphics,"setColor",cSetColor);
+        setFunction(graphics,"setPattern",cSetPattern);
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
         setFunction(graphics,"setStrokeLocation",cSetStrokeLocation);setFunction(graphics,"fillRect",cFillRect);
         setFunction(graphics,"drawRect",cDrawRect);setFunction(graphics,"drawLine",cDrawLine);
@@ -2822,29 +3046,36 @@ struct Runtime::Impl {
             if (!std::strcmp(package_info.bundle_id, "com.hteumeuleu.celeste") ||
                 std::strstr(package_info.name, "Celeste")) game = Game::Celeste;
             else game = Game::External;
+            preloadShortSounds();
         }
-        // Playdate's documented default is 30 FPS.  Celeste is the explicit
-        // PogoDate 50 FPS performance test; every other package starts at the
-        // compatible default and can request up to 50 with setRefreshRate().
-        refresh_rate=game==Game::Celeste?50:30;runtime_stats.requested_fps=refresh_rate;
-        frame_accumulator_ms=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
+        // Keep each game's original simulation speed.  The panel can still
+        // present up to 50 Hz, but forcing a frame-based 30 FPS game to run
+        // 50 update callbacks per second makes physics and animation 1.67x
+        // faster.  Packages can request another rate with setRefreshRate().
+        refresh_rate=30;runtime_stats.requested_fps=refresh_rate;
+        frame_accumulator_units=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
         inverted_display=false;background_color=White;current_font=nullptr;
-        if(!resizeScreen(1)){setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
+        if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
-        lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
+        lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
-            lua_close(lua);lua=nullptr;releaseImage(screen);return ESP_FAIL;
+            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
-        lua_gc(lua, LUA_GCGEN, 20, 100);
+        // Incremental collection trades rare long stop-the-world nursery/major
+        // sweeps for small, regular slices.  A low pause keeps the Lua heap
+        // close to its live size while the small step size avoids animation
+        // spikes on PSRAM-backed allocations.
+        lua_gc(lua, LUA_GCINC, 110, 200, 8);
         is_running=true;
-        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50",
+        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50, audio cache=%lu",
                  package_mode ? package_info.name :
                     (game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2"),
                  package_mode ? "SD main.pdz" : "source",
-                 static_cast<unsigned long>(refresh_rate));
+                 static_cast<unsigned long>(refresh_rate),
+                 static_cast<unsigned long>(sound_cache_bytes));
         return ESP_OK;
     }
 
@@ -2852,6 +3083,7 @@ struct Runtime::Impl {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
         if(audio)audio->stopMusicPcm();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
+        clearSoundCache();
         pdz.close();package_mode=false;package_info={};
         releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;canvas=nullptr;audio=nullptr;storage=nullptr;
@@ -2859,17 +3091,27 @@ struct Runtime::Impl {
 
     uint32_t update(uint32_t dt_ms) {
         if(!lua||!is_running)return 0;
-        frame_accumulator_ms=std::min<uint32_t>(frame_accumulator_ms+dt_ms,250U);now_ms+=dt_ms;
-        const uint32_t interval=std::max<uint32_t>(1U,1000U/std::max<uint32_t>(1U,refresh_rate));
+        now_ms+=dt_ms;
+        uint64_t accumulated = static_cast<uint64_t>(frame_accumulator_units) +
+            static_cast<uint64_t>(dt_ms) * std::max<uint32_t>(1U, refresh_rate);
+        // Preserve the sub-frame remainder but discard complete missed frames.
+        // A 100 ms audio/GC stall must not turn into several rapid catch-up
+        // updates that visibly speed up physics after the hitch.
+        if (accumulated >= 2000U) accumulated = 1000U + accumulated % 1000U;
+        frame_accumulator_units = static_cast<uint32_t>(accumulated);
         uint32_t produced=0;
         // Never run multiple slow Lua frames before returning to AppManager.
         // The old three-frame catch-up loop made a 5 FPS VM reach the LCD only
         // once per three updates, which is why the visible rate was ~1-2 FPS.
-        while(frame_accumulator_ms>=interval&&produced<1U){
-            frame_accumulator_ms-=interval;frame_dt_ms=interval;
+        if(frame_accumulator_units>=1000U){
+            frame_accumulator_units-=1000U;
+            frame_dt_ms=(1000U+refresh_rate/2U)/std::max<uint32_t>(1U,refresh_rate);
             const uint8_t released=static_cast<uint8_t>(previous_held_buttons&~held_buttons);
             const int64_t started=esp_timer_get_time();
-            if(!dispatchInput(pressed_buttons,released)||!callGlobal("playdate","update")){is_running=false;break;}
+            if(!dispatchInput(pressed_buttons,released)||!callGlobal("playdate","update")){
+                is_running=false;
+                return 0;
+            }
             const int64_t logic_finished=esp_timer_get_time();
             flushScreen();previous_held_buttons=held_buttons;
             const int64_t finished=esp_timer_get_time();
