@@ -19,6 +19,8 @@ struct Stats {
     uint32_t lua_frames = 0;
     uint32_t last_update_us = 0;
     uint32_t max_update_us = 0;
+    uint32_t last_logic_us = 0;
+    uint32_t last_blit_us = 0;
     uint32_t errors = 0;
     uint32_t requested_fps = 50;
     size_t lua_bytes = 0;

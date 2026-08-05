@@ -38,9 +38,13 @@ end
 
 local gfx = playdate.graphics
 local sprites = {}
+local collision_sprites = {}
 local wall_cells = {}
 local background_callback = nil
 local sprite_sequence = 0
+local sprites_dirty = false
+local collision_sprites_dirty = false
+local query_sequence = 0
 
 local Sprite = {}
 Sprite.__index = Sprite
@@ -73,12 +77,18 @@ end
 function Sprite.new(image) return Sprite(image) end
 
 function Sprite:setImage(image, flip)
-	self.image = image
+	if self.image ~= image then
+		self.image = image
+		if image then
+			local width, height = image:getSize()
+			if self.width == 0 then self.width = width end
+			if self.height == 0 then self.height = height end
+		end
+	end
 	self.flip = flip or gfx.kImageUnflipped
-	if image then
+	if image and self.width == 0 then
 		local width, height = image:getSize()
-		if self.width == 0 then self.width = width end
-		if self.height == 0 then self.height = height end
+		self.width, self.height = width, height
 	end
 end
 function Sprite:getImage() return self.image end
@@ -86,7 +96,12 @@ function Sprite:setSize(width, height) self.width, self.height = width, height e
 function Sprite:setCenter(x, y) self.centerX, self.centerY = x, y end
 function Sprite:moveTo(x, y) self.x, self.y = x, y end
 function Sprite:moveBy(x, y) self.x, self.y = self.x + x, self.y + y end
-function Sprite:setZIndex(value) self.zIndex = value end
+function Sprite:setZIndex(value)
+	if self.zIndex ~= value then
+		self.zIndex = value
+		sprites_dirty = true
+	end
+end
 function Sprite:setVisible(value) self.visible = value == true end
 function Sprite:isVisible() return self.visible end
 function Sprite:setUpdatesEnabled(value) self.updatesEnabled = value == true end
@@ -102,20 +117,39 @@ function Sprite:setCollideRect(x, y, width, height)
 	else
 		self.collideRect = {x=x or 0, y=y or 0, width=width or 0, height=height or 0}
 	end
+	if not self._wall and not self._collision_listed then
+		self._collision_listed = true
+		table.insert(collision_sprites, self)
+	end
 end
-function Sprite:clearCollideRect() self.collideRect = nil end
+function Sprite:clearCollideRect()
+	self.collideRect = nil
+	collision_sprites_dirty = true
+end
 
 function Sprite:add()
 	if self.added then return self end
 	self.added = true
-	sprite_sequence = sprite_sequence + 1
-	self._sequence = sprite_sequence
-	table.insert(sprites, self)
+	if not self._listed then
+		sprite_sequence = sprite_sequence + 1
+		self._sequence = sprite_sequence
+		self._listed = true
+		table.insert(sprites, self)
+	end
+	if self.collideRect and not self._wall and not self._collision_listed then
+		self._collision_listed = true
+		table.insert(collision_sprites, self)
+	end
+	sprites_dirty = true
 	return self
 end
 
 function Sprite:remove()
-	self.added = false
+	if self.added then
+		self.added = false
+		sprites_dirty = true
+		if self._collision_listed then collision_sprites_dirty = true end
+	end
 	return self
 end
 
@@ -125,10 +159,23 @@ function Sprite:update()
 	if self ~= nil then return end
 	gfx._beginFrame()
 	if background_callback then background_callback(0, 0, 400, 240) end
-	table.sort(sprites, function(a, b)
-		if a.zIndex == b.zIndex then return a._sequence < b._sequence end
-		return a.zIndex < b.zIndex
-	end)
+	if sprites_dirty then
+		local compacted = {}
+		for i=1,#sprites do
+			local item = sprites[i]
+			if item.added then
+				compacted[#compacted + 1] = item
+			else
+				item._listed = false
+			end
+		end
+		sprites = compacted
+		table.sort(sprites, function(a, b)
+			if a.zIndex == b.zIndex then return a._sequence < b._sequence end
+			return a.zIndex < b.zIndex
+		end)
+		sprites_dirty = false
+	end
 	for i=1,#sprites do
 		local item = sprites[i]
 		if item.added and item.updatesEnabled then
@@ -154,9 +201,18 @@ function Sprite.performOnAllSprites(callback)
 end
 
 function Sprite.removeAll()
-	for i=1,#sprites do sprites[i].added = false end
+	for i=1,#sprites do
+		sprites[i].added = false
+		sprites[i]._listed = false
+	end
 	sprites = {}
+	for i=1,#collision_sprites do
+		collision_sprites[i]._collision_listed = false
+	end
+	collision_sprites = {}
 	wall_cells = {}
+	sprites_dirty = false
+	collision_sprites_dirty = false
 end
 
 function Sprite.setBackgroundDrawingCallback(callback) background_callback = callback end
@@ -211,21 +267,38 @@ function Sprite.querySpritesInRect(x, y, width, height)
 		x, y = rect.x, rect.y
 		width, height = rect.width or rect.w, rect.height or rect.h
 	end
-	local result, seen = {}, {}
+	local result = {}
+	if collision_sprites_dirty then
+		local compacted = {}
+		for i=1,#collision_sprites do
+			local item = collision_sprites[i]
+			if item.added and item.collideRect then
+				compacted[#compacted + 1] = item
+			else
+				item._collision_listed = false
+			end
+		end
+		collision_sprites = compacted
+		collision_sprites_dirty = false
+	end
+	query_sequence = query_sequence + 1
+	local stamp = query_sequence
 	local minx = math.floor((x or 0) / 8)
 	local maxx = math.floor(((x or 0) + math.max(0, (width or 0) - 1)) / 8)
 	local miny = math.floor((y or 0) / 8)
 	local maxy = math.floor(((y or 0) + math.max(0, (height or 0) - 1)) / 8)
 	for cy=miny,maxy do
+		local grid_row = wall_cells[cy]
 		for cx=minx,maxx do
-			local cell = wall_cells[cx .. ":" .. cy]
+			local cell = grid_row and grid_row[cx]
 			if cell then
 				for i=1,#cell do
 					local item = cell[i]
-					if item.added and item.collisionsEnabled and not seen[item] then
+					if item.added and item.collisionsEnabled and
+						item._query_stamp ~= stamp then
 						local sx, sy, sw, sh = spriteBounds(item)
 						if overlaps(x,y,width,height,sx,sy,sw,sh) then
-							seen[item] = true
+							item._query_stamp = stamp
 							table.insert(result, item)
 						end
 					end
@@ -233,12 +306,12 @@ function Sprite.querySpritesInRect(x, y, width, height)
 			end
 		end
 	end
-	for i=1,#sprites do
-		local item = sprites[i]
-		if not item._wall and item.added and item.collisionsEnabled and not seen[item] then
+	for i=1,#collision_sprites do
+		local item = collision_sprites[i]
+		if item.added and item.collisionsEnabled and item._query_stamp ~= stamp then
 			local sx, sy, sw, sh = spriteBounds(item)
 			if overlaps(x,y,width,height,sx,sy,sw,sh) then
-				seen[item] = true
+				item._query_stamp = stamp
 				table.insert(result, item)
 			end
 		end
@@ -259,14 +332,18 @@ function Sprite.addWallSprites(tilemap, emptyIDs, offsetX, offsetY)
 			local row = math.floor((index - 1) / width)
 			local item = Sprite()
 			item._wall = true
+			-- Collision walls live only in the spatial grid. They have no image,
+			-- so adding hundreds of them to the render list just makes every
+			-- frame sort and scan invisible objects.
+			item.added = true
 			item:setSize(8, 8)
 			item:setCollideRect(0, 0, 8, 8)
 			item:moveTo(offsetX + column * 8 + 4, offsetY + row * 8 + 4)
-			item:add()
-			local key = math.floor((offsetX + column * 8) / 8) .. ":" ..
-				math.floor((offsetY + row * 8) / 8)
-			wall_cells[key] = wall_cells[key] or {}
-			table.insert(wall_cells[key], item)
+			local cell_x = math.floor((offsetX + column * 8) / 8)
+			local cell_y = math.floor((offsetY + row * 8) / 8)
+			wall_cells[cell_y] = wall_cells[cell_y] or {}
+			wall_cells[cell_y][cell_x] = wall_cells[cell_y][cell_x] or {}
+			table.insert(wall_cells[cell_y][cell_x], item)
 			table.insert(result, item)
 		end
 	end

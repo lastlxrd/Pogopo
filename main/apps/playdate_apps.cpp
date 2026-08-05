@@ -5,6 +5,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 namespace pogopo::demo {
 namespace {
@@ -40,7 +41,7 @@ void PogoDateApp::drawLoading(AppContext& context) {
 void PogoDateApp::onEnter(AppContext& context) {
     queued_pressed_ = 0;
     lcd_accumulator_ms_ = 0;
-    perf_accumulator_ms_ = 0;
+    last_perf_us_ = 0;
     previous_lua_frames_ = 0;
     lcd_frames_ = 0;
     previous_lcd_frames_ = 0;
@@ -52,6 +53,7 @@ void PogoDateApp::onEnter(AppContext& context) {
     start_error_ = runtime_.start(context.gfx.canvas(), context.audio,
                                   context.storage, game_);
     if (start_error_ == ESP_OK) {
+        last_perf_us_ = esp_timer_get_time();
         context.haptics.play(haptics::Effect::Confirm);
         ESP_LOGI(TAG, "%s started from original Playdate Lua sources",
                  game_title_);
@@ -78,6 +80,10 @@ void PogoDateApp::onSuspend(AppContext&) {
 void PogoDateApp::onResume(AppContext& context) {
     lcd_accumulator_ms_ = LCD_FRAME_MS;
     frame_pending_ = true;
+    last_perf_us_ = esp_timer_get_time();
+    const playdate::Stats stats = runtime_.stats();
+    previous_lua_frames_ = stats.lua_frames;
+    previous_lcd_frames_ = lcd_frames_;
     context.invalidate();
 }
 
@@ -115,23 +121,34 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         context.invalidate();
     }
 
-    perf_accumulator_ms_ += dt_ms;
-    if (perf_accumulator_ms_ >= 1000U) {
+    const int64_t perf_now_us = esp_timer_get_time();
+    const uint32_t perf_elapsed_us = static_cast<uint32_t>(
+        std::max<int64_t>(1, perf_now_us - last_perf_us_));
+    if (perf_elapsed_us >= 1000000U) {
         const playdate::Stats stats = runtime_.stats();
         const uint32_t lua_delta =
             stats.lua_frames - previous_lua_frames_;
         const uint32_t lcd_delta =
             lcd_frames_ - previous_lcd_frames_;
+        const uint32_t lua_fps = static_cast<uint32_t>(
+            (static_cast<uint64_t>(lua_delta) * 1000000ULL +
+             perf_elapsed_us / 2U) / perf_elapsed_us);
+        const uint32_t lcd_fps = static_cast<uint32_t>(
+            (static_cast<uint64_t>(lcd_delta) * 1000000ULL +
+             perf_elapsed_us / 2U) / perf_elapsed_us);
         ESP_LOGI(
             TAG,
             "PERF PD %s lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
+            "logic=%luus blit=%luus "
             "luaheap=%lu peak=%lu gc=%lu err=%lu RAM=%lu/%lu PSRAM=%lu "
             "i2cerr=%lu",
-            game_title_, static_cast<unsigned long>(lua_delta),
-            static_cast<unsigned long>(lcd_delta),
+            game_title_, static_cast<unsigned long>(lua_fps),
+            static_cast<unsigned long>(lcd_fps),
             static_cast<unsigned long>(stats.requested_fps),
             static_cast<unsigned long>(stats.last_update_us),
             static_cast<unsigned long>(stats.max_update_us),
+            static_cast<unsigned long>(stats.last_logic_us),
+            static_cast<unsigned long>(stats.last_blit_us),
             static_cast<unsigned long>(stats.lua_bytes),
             static_cast<unsigned long>(stats.lua_peak_bytes),
             static_cast<unsigned long>(stats.lua_gc_bytes),
@@ -145,7 +162,7 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
             static_cast<unsigned long>(context.input.readErrors()));
         previous_lua_frames_ = stats.lua_frames;
         previous_lcd_frames_ = lcd_frames_;
-        perf_accumulator_ms_ = 0;
+        last_perf_us_ = perf_now_us;
     }
 }
 

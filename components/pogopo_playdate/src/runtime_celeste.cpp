@@ -187,7 +187,6 @@ struct Runtime::Impl {
     };
     std::array<Context, 8> context_stack{};
     size_t context_depth = 0;
-    uint8_t* packed_frame = nullptr;
 
     size_t allocated_bytes = 0;
     size_t peak_allocated_bytes = 0;
@@ -308,13 +307,19 @@ struct Runtime::Impl {
         return 0;
     }
 
-    bool allocateImage(Image& image, int width, int height, uint8_t color) {
+    bool allocateImage(Image& image, int width, int height, uint8_t color,
+                       bool prefer_internal = false) {
         if (width <= 0 || height <= 0 || width > 512 || height > 512) return false;
         const size_t bytes = static_cast<size_t>(width) * height;
-        uint8_t* pixels = static_cast<uint8_t*>(heap_caps_realloc(
-            nullptr, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        uint8_t* pixels = nullptr;
+        if (prefer_internal) {
+            pixels = static_cast<uint8_t*>(heap_caps_realloc(
+                nullptr, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        }
         if (!pixels) pixels = static_cast<uint8_t*>(heap_caps_realloc(
-            nullptr, bytes, MALLOC_CAP_8BIT));
+            nullptr, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!pixels && !prefer_internal) pixels = static_cast<uint8_t*>(
+            heap_caps_realloc(nullptr, bytes, MALLOC_CAP_8BIT));
         if (!pixels) return false;
         std::memset(pixels, color, bytes);
         image.width = width;
@@ -324,6 +329,22 @@ struct Runtime::Impl {
         image.owns_pixels = true;
         image.asset = nullptr;
         image.frame = 0;
+        return true;
+    }
+
+    bool resizeScreen(int scale) {
+        const int width = 400 / std::max(1, scale);
+        const int height = 240 / std::max(1, scale);
+        if (screen.pixels && screen.width == width && screen.height == height) {
+            return true;
+        }
+        Image replacement{};
+        if (!allocateImage(replacement, width, height, background_color,
+                           scale == 2)) {
+            return false;
+        }
+        releaseImage(screen);
+        screen = replacement;
         return true;
     }
 
@@ -341,12 +362,22 @@ struct Runtime::Impl {
     }
 
     Image* pushDynamicImage(int width, int height, uint8_t color) {
-        Image* image = pushImage();
-        if (!allocateImage(*image, width, height, color)) {
-            lua_pop(lua, 1);
+        if (width <= 0 || height <= 0 || width > 512 || height > 512) {
             lua_pushnil(lua);
             return nullptr;
         }
+        const size_t bytes = static_cast<size_t>(width) * height;
+        auto* image = static_cast<Image*>(lua_newuserdatauv(
+            lua, sizeof(Image) + bytes, 0));
+        new (image) Image{};
+        image->width = width;
+        image->height = height;
+        image->stride = width;
+        image->pixels = reinterpret_cast<uint8_t*>(image + 1);
+        image->owns_pixels = false;
+        std::memset(image->pixels, color, bytes);
+        luaL_getmetatable(lua, kImageMetatable);
+        lua_setmetatable(lua, -2);
         return image;
     }
 
@@ -407,22 +438,13 @@ struct Runtime::Impl {
     void putLogicalPixel(int x, int y, uint8_t source) {
         if (!target || !clip.contains(x, y)) return;
         if (target == &screen) {
-            const int base_x = x * display_scale + display_offset_x;
-            const int base_y = y * display_scale + display_offset_y;
-            for (int sy = 0; sy < display_scale; ++sy) {
-                for (int sx = 0; sx < display_scale; ++sx) {
-                    const int px = base_x + sx;
-                    const int py = base_y + sy;
-                    if (px < 0 || py < 0 || px >= screen.width || py >= screen.height) continue;
-                    if (stencil && imagePixel(*stencil, x, y) == Black) continue;
-                    const uint8_t value = mappedColor(source, px, py);
-                    if (value != Clear) {
-                        const uint8_t output = inverted_display
-                            ? static_cast<uint8_t>(value == Black ? White : Black)
-                            : value;
-                        setTargetPixelRaw(px, py, output);
-                    }
-                }
+            if (stencil && imagePixel(*stencil, x, y) == Black) return;
+            const uint8_t value = mappedColor(source, x, y);
+            if (value != Clear) {
+                const uint8_t output = inverted_display
+                    ? static_cast<uint8_t>(value == Black ? White : Black)
+                    : value;
+                setTargetPixelRaw(x, y, output);
             }
             return;
         }
@@ -434,6 +456,40 @@ struct Runtime::Impl {
     void drawImage(const Image& image, int x, int y, int flip,
                    int scale = 1, float fade = 1.0f) {
         scale = std::max(1, scale);
+        // Celeste composites several persistent 128x128 layer images every
+        // frame. Copy their byte pixels row-wise into the logical framebuffer
+        // instead of routing every pixel through the generic scaled path.
+        if (scale == 1 && fade >= 0.999f && image.pixels && !image.inverted &&
+            !stencil && draw_mode != Nxor && target && target->pixels) {
+            const int start_x = std::max(0, std::max(clip.x - x, -x));
+            const int start_y = std::max(0, std::max(clip.y - y, -y));
+            const int end_x = std::min(image.width,
+                std::min(clip.x + clip.w - x, target->width - x));
+            const int end_y = std::min(image.height,
+                std::min(clip.y + clip.h - y, target->height - y));
+            for (int dy = start_y; dy < end_y; ++dy) {
+                const int source_y = (flip & FlippedY)
+                    ? image.height - 1 - dy : dy;
+                const uint8_t* source_row = image.pixels +
+                    static_cast<size_t>(source_y) * image.stride;
+                uint8_t* destination_row = target->pixels +
+                    static_cast<size_t>(y + dy) * target->stride;
+                for (int dx = start_x; dx < end_x; ++dx) {
+                    const int source_x = (flip & FlippedX)
+                        ? image.width - 1 - dx : dx;
+                    uint8_t value = source_row[source_x];
+                    if (value == Clear) continue;
+                    if (draw_mode == FillWhite) value = White;
+                    else if (draw_mode == FillBlack) value = Black;
+                    else if (draw_mode == Inverted)
+                        value = value == Black ? White : Black;
+                    if (target == &screen && inverted_display)
+                        value = value == Black ? White : Black;
+                    destination_row[x + dx] = value;
+                }
+            }
+            return;
+        }
         static constexpr uint8_t bayer[16] = {
             0, 8, 2, 10, 12, 4, 14, 6,
             3, 11, 1, 9, 15, 7, 13, 5,
@@ -470,7 +526,7 @@ struct Runtime::Impl {
 
     void resetTargetToScreen() {
         target = &screen;
-        clip = {0, 0, 400 / display_scale, 240 / display_scale};
+        clip = {0, 0, screen.width, screen.height};
         stencil = nullptr;
         context_depth = 0;
     }
@@ -483,20 +539,15 @@ struct Runtime::Impl {
     }
 
     void flushScreen() {
-        if (!canvas || !packed_frame || !screen.pixels) return;
-        constexpr int stride = 400 / 8;
-        std::memset(packed_frame, 0, stride * 240);
-        for (int y = 0; y < 240; ++y) {
-            const uint8_t* row = screen.pixels + static_cast<size_t>(y) * 400;
-            uint8_t* packed = packed_frame + static_cast<size_t>(y) * stride;
-            for (int x = 0; x < 400; ++x) {
-                if (row[x] == Black) packed[x >> 3] |=
-                    static_cast<uint8_t>(0x80U >> (x & 7));
-            }
+        if (!canvas || !screen.pixels) return;
+        if (display_offset_x != 0 || display_offset_y != 0) {
+            canvas->clear(background_color == Black ? gfx::BLACK : gfx::WHITE);
         }
-        const gfx::Bitmap bitmap = gfx::make_bitmap_1bpp(400, 240, packed_frame);
         canvas->reset_clip();
-        canvas->draw_bitmap(0, 0, bitmap, gfx::BLACK, false, gfx::WHITE);
+        canvas->draw_indexed2_fast(
+            display_offset_x, display_offset_y, screen.width, screen.height,
+            screen.pixels, screen.width * display_scale,
+            screen.height * display_scale, false, false);
     }
 
     static int cImageNew(lua_State* state) {
@@ -654,10 +705,13 @@ struct Runtime::Impl {
             lua_pushnil(state);
             return 1;
         }
-        auto* table = static_cast<ImageTable*>(lua_newuserdatauv(state, sizeof(ImageTable), 0));
+        auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
+            state, sizeof(ImageTable), 1));
         new (table) ImageTable{asset};
         luaL_getmetatable(state, kImageTableMetatable);
         lua_setmetatable(state, -2);
+        lua_newtable(state);
+        lua_setiuservalue(state, -2, 1);
         return 1;
     }
 
@@ -669,11 +723,21 @@ struct Runtime::Impl {
             lua_pushnil(state);
             return 1;
         }
+        lua_getiuservalue(state, 1, 1);
+        lua_rawgeti(state, -1, index);
+        if (luaL_testudata(state, -1, kImageMetatable)) {
+            lua_remove(state, -2);
+            return 1;
+        }
+        lua_pop(state, 1);
         Image* image = runtime->pushImage();
         image->width = table->asset->frame_width;
         image->height = table->asset->frame_height;
         image->asset = table->asset;
         image->frame = index - 1;
+        lua_pushvalue(state, -1);
+        lua_rawseti(state, -3, index);
+        lua_remove(state, -2);
         return 1;
     }
 
@@ -958,8 +1022,7 @@ struct Runtime::Impl {
 
     static int cClearClipRect(lua_State* state) {
         Impl* runtime = self(state);
-        runtime->clip = {0, 0, runtime->target == &runtime->screen ? 400/runtime->display_scale : runtime->target->width,
-                         runtime->target == &runtime->screen ? 240/runtime->display_scale : runtime->target->height};
+        runtime->clip = {0, 0, runtime->target->width, runtime->target->height};
         return 0;
     }
 
@@ -999,7 +1062,12 @@ struct Runtime::Impl {
 
     static int cSetScale(lua_State* state) {
         Impl* runtime = self(state);
-        runtime->display_scale = std::clamp(static_cast<int>(luaL_checkinteger(state, 1)), 1, 2);
+        const int scale = std::clamp(
+            static_cast<int>(luaL_checkinteger(state, 1)), 1, 2);
+        if (!runtime->resizeScreen(scale)) {
+            return luaL_error(state, "screen resize failed for scale %d", scale);
+        }
+        runtime->display_scale = scale;
         runtime->resetTargetToScreen();
         return 0;
     }
@@ -1443,22 +1511,20 @@ struct Runtime::Impl {
                     storage::Storage& target_storage,Game selected_game) {
         canvas=&target_canvas;audio=&target_audio;storage=&target_storage;game=selected_game;
         last_error[0]='\0';loaded_modules.fill(false);runtime_stats={};
+        allocated_bytes=0;peak_allocated_bytes=0;
         refresh_rate=game==Game::Celeste?30:50;runtime_stats.requested_fps=refresh_rate;
         frame_accumulator_ms=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
         inverted_display=false;background_color=White;current_font=nullptr;
-        if(!allocateImage(screen,400,240,White)){setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
-        packed_frame=static_cast<uint8_t*>(heap_caps_realloc(nullptr,400*240/8,
-            MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
-        if(!packed_frame)packed_frame=static_cast<uint8_t*>(heap_caps_realloc(nullptr,400*240/8,MALLOC_CAP_8BIT));
-        if(!packed_frame){releaseImage(screen);setError("startup","packed frame allocation failed");return ESP_ERR_NO_MEM;}
+        if(!resizeScreen(1)){setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
-        lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);heap_caps_free(packed_frame);packed_frame=nullptr;setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
+        lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
-            lua_close(lua);lua=nullptr;releaseImage(screen);heap_caps_free(packed_frame);packed_frame=nullptr;return ESP_FAIL;
+            lua_close(lua);lua=nullptr;releaseImage(screen);return ESP_FAIL;
         }
+        lua_gc(lua, LUA_GCGEN, 20, 100);
         is_running=true;
         ESP_LOGI(TAG,"PogoDate Lite ready: %s source Lua 5.4, 400x240, logic=%lu FPS LCD cap=30",
                  game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2",
@@ -1469,7 +1535,7 @@ struct Runtime::Impl {
     void stop() {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
-        releaseImage(screen);if(packed_frame){heap_caps_free(packed_frame);packed_frame=nullptr;}
+        releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;canvas=nullptr;audio=nullptr;storage=nullptr;
     }
 
@@ -1478,13 +1544,20 @@ struct Runtime::Impl {
         frame_accumulator_ms=std::min<uint32_t>(frame_accumulator_ms+dt_ms,250U);now_ms+=dt_ms;
         const uint32_t interval=std::max<uint32_t>(1U,1000U/std::max<uint32_t>(1U,refresh_rate));
         uint32_t produced=0;
-        while(frame_accumulator_ms>=interval&&produced<3U){
+        // Never run multiple slow Lua frames before returning to AppManager.
+        // The old three-frame catch-up loop made a 5 FPS VM reach the LCD only
+        // once per three updates, which is why the visible rate was ~1-2 FPS.
+        while(frame_accumulator_ms>=interval&&produced<1U){
             frame_accumulator_ms-=interval;frame_dt_ms=interval;
             const uint8_t released=static_cast<uint8_t>(previous_held_buttons&~held_buttons);
             const int64_t started=esp_timer_get_time();
             if(!dispatchInput(pressed_buttons,released)||!callGlobal("playdate","update")){is_running=false;break;}
+            const int64_t logic_finished=esp_timer_get_time();
             flushScreen();previous_held_buttons=held_buttons;
-            const uint32_t elapsed=static_cast<uint32_t>(std::max<int64_t>(0,esp_timer_get_time()-started));
+            const int64_t finished=esp_timer_get_time();
+            const uint32_t elapsed=static_cast<uint32_t>(std::max<int64_t>(0,finished-started));
+            runtime_stats.last_logic_us=static_cast<uint32_t>(std::max<int64_t>(0,logic_finished-started));
+            runtime_stats.last_blit_us=static_cast<uint32_t>(std::max<int64_t>(0,finished-logic_finished));
             runtime_stats.last_update_us=elapsed;runtime_stats.max_update_us=std::max(runtime_stats.max_update_us,elapsed);
             ++runtime_stats.lua_frames;++produced;pressed_buttons=0;
         }

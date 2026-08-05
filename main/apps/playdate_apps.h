@@ -34,7 +34,7 @@ private:
     esp_err_t start_error_ = ESP_ERR_INVALID_STATE;
     input::ButtonMask queued_pressed_ = 0;
     uint32_t lcd_accumulator_ms_ = 0;
-    uint32_t perf_accumulator_ms_ = 0;
+    int64_t last_perf_us_ = 0;
     uint32_t previous_lua_frames_ = 0;
     uint32_t lcd_frames_ = 0;
     uint32_t previous_lcd_frames_ = 0;
