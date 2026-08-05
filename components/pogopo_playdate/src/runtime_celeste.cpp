@@ -625,6 +625,158 @@ struct Runtime::Impl {
         }
     }
 
+    void drawImageRotated(const Image& image, float center_x, float center_y,
+                          float angle_degrees, float scale_x, float scale_y) {
+        if (!target || !target->pixels || image.width <= 0 || image.height <= 0 ||
+            !std::isfinite(center_x) || !std::isfinite(center_y) ||
+            !std::isfinite(angle_degrees) || !std::isfinite(scale_x) ||
+            !std::isfinite(scale_y) || std::fabs(scale_x) < 0.0001f ||
+            std::fabs(scale_y) < 0.0001f) {
+            return;
+        }
+
+        // Playdate rotates clockwise around the image centre.  Coordinates on
+        // the LCD have a downward-pointing Y axis, so the ordinary 2D rotation
+        // matrix already has the required clockwise visual direction.
+        float normalized = std::fmod(angle_degrees, 360.0f);
+        if (normalized < 0.0f) normalized += 360.0f;
+        const float quadrant = std::round(normalized / 90.0f);
+        float cosine = 0.0f;
+        float sine = 0.0f;
+        const bool exact_quadrant =
+            std::fabs(normalized - quadrant * 90.0f) < 0.0001f ||
+            std::fabs(normalized - 360.0f) < 0.0001f;
+        if (exact_quadrant) {
+            switch (static_cast<int>(quadrant) & 3) {
+                case 0: cosine = 1.0f; sine = 0.0f; break;
+                case 1: cosine = 0.0f; sine = 1.0f; break;
+                case 2: cosine = -1.0f; sine = 0.0f; break;
+                default: cosine = 0.0f; sine = -1.0f; break;
+            }
+        } else {
+            constexpr float radians_per_degree =
+                3.14159265358979323846f / 180.0f;
+            const float radians = normalized * radians_per_degree;
+            cosine = std::cos(radians);
+            sine = std::sin(radians);
+        }
+
+        // At 1x, quarter turns map every source pixel to exactly one output
+        // pixel.  Forward-map that special case so even-sized images keep all
+        // their edge pixels instead of landing on an inverse-sampling tie.
+        if (exact_quadrant && std::fabs(std::fabs(scale_x) - 1.0f) < 0.0001f &&
+            std::fabs(std::fabs(scale_y) - 1.0f) < 0.0001f) {
+            const float half_width = static_cast<float>(image.width) * 0.5f;
+            const float half_height = static_cast<float>(image.height) * 0.5f;
+            for (int source_y = 0; source_y < image.height; ++source_y) {
+                const float local_y =
+                    (source_y + 0.5f - half_height) * scale_y;
+                for (int source_x = 0; source_x < image.width; ++source_x) {
+                    const uint8_t value = imagePixel(image, source_x, source_y);
+                    if (value == Clear) continue;
+                    const float local_x =
+                        (source_x + 0.5f - half_width) * scale_x;
+                    const int destination_x = static_cast<int>(std::floor(
+                        center_x + cosine * local_x - sine * local_y));
+                    const int destination_y = static_cast<int>(std::floor(
+                        center_y + sine * local_x + cosine * local_y));
+                    putLogicalPixel(destination_x, destination_y, value);
+                }
+            }
+            return;
+        }
+
+        // Transform the four source cell-edge corners to obtain the exact
+        // destination AABB, then clip before rasterization.  Clipping here is
+        // important when a game rotates a large image mostly off-screen.
+        const float half_width = static_cast<float>(image.width) * 0.5f;
+        const float half_height = static_cast<float>(image.height) * 0.5f;
+        float minimum_x = center_x;
+        float maximum_x = center_x;
+        float minimum_y = center_y;
+        float maximum_y = center_y;
+        bool first_corner = true;
+        for (int y_sign : {-1, 1}) {
+            for (int x_sign : {-1, 1}) {
+                const float source_x = x_sign * half_width * scale_x;
+                const float source_y = y_sign * half_height * scale_y;
+                const float destination_x = center_x +
+                    cosine * source_x - sine * source_y;
+                const float destination_y = center_y +
+                    sine * source_x + cosine * source_y;
+                if (first_corner) {
+                    minimum_x = maximum_x = destination_x;
+                    minimum_y = maximum_y = destination_y;
+                    first_corner = false;
+                } else {
+                    minimum_x = std::min(minimum_x, destination_x);
+                    maximum_x = std::max(maximum_x, destination_x);
+                    minimum_y = std::min(minimum_y, destination_y);
+                    maximum_y = std::max(maximum_y, destination_y);
+                }
+            }
+        }
+
+        const int clip_left = std::clamp(clip.x, 0, target->width);
+        const int clip_top = std::clamp(clip.y, 0, target->height);
+        const int64_t raw_clip_right =
+            static_cast<int64_t>(clip.x) + static_cast<int64_t>(clip.w);
+        const int64_t raw_clip_bottom =
+            static_cast<int64_t>(clip.y) + static_cast<int64_t>(clip.h);
+        const int clip_right = static_cast<int>(std::clamp<int64_t>(
+            raw_clip_right, 0, target->width));
+        const int clip_bottom = static_cast<int>(std::clamp<int64_t>(
+            raw_clip_bottom, 0, target->height));
+        if (clip_left >= clip_right || clip_top >= clip_bottom) return;
+
+        minimum_x = std::max(minimum_x, static_cast<float>(clip_left));
+        minimum_y = std::max(minimum_y, static_cast<float>(clip_top));
+        maximum_x = std::min(maximum_x, static_cast<float>(clip_right));
+        maximum_y = std::min(maximum_y, static_cast<float>(clip_bottom));
+        if (minimum_x >= maximum_x || minimum_y >= maximum_y) return;
+        constexpr float edge_epsilon = 0.0001f;
+        const int start_x = static_cast<int>(std::ceil(minimum_x - edge_epsilon));
+        const int start_y = static_cast<int>(std::ceil(minimum_y - edge_epsilon));
+        const int end_x = static_cast<int>(std::ceil(maximum_x - edge_epsilon));
+        const int end_y = static_cast<int>(std::ceil(maximum_y - edge_epsilon));
+        if (start_x >= end_x || start_y >= end_y) return;
+
+        // Inverse-map each destination pixel.  Nearest-neighbour sampling is
+        // the correct choice for Playdate's 1-bit pixel art and avoids holes
+        // that forward-mapping would leave at off-axis angles.
+        const float x_step_source_x = cosine / scale_x;
+        const float x_step_source_y = -sine / scale_y;
+        const float y_step_source_x = sine / scale_x;
+        const float y_step_source_y = cosine / scale_y;
+        float row_source_x =
+            (cosine * (start_x - center_x) +
+             sine * (start_y - center_y)) / scale_x + half_width;
+        float row_source_y =
+            (-sine * (start_x - center_x) +
+             cosine * (start_y - center_y)) / scale_y + half_height;
+
+        for (int destination_y = start_y; destination_y < end_y; ++destination_y) {
+            float source_x = row_source_x;
+            float source_y = row_source_y;
+            for (int destination_x = start_x; destination_x < end_x;
+                 ++destination_x) {
+                if (source_x >= 0.0f && source_y >= 0.0f &&
+                    source_x < image.width && source_y < image.height) {
+                    const int sample_x = static_cast<int>(std::floor(source_x));
+                    const int sample_y = static_cast<int>(std::floor(source_y));
+                    const uint8_t value = imagePixel(image, sample_x, sample_y);
+                    if (value != Clear) {
+                        putLogicalPixel(destination_x, destination_y, value);
+                    }
+                }
+                source_x += x_step_source_x;
+                source_y += x_step_source_y;
+            }
+            row_source_x += y_step_source_x;
+            row_source_y += y_step_source_y;
+        }
+    }
+
     void fillTarget(uint8_t color) {
         if (!target || !target->pixels) return;
         if (target == &screen) {
@@ -897,6 +1049,22 @@ struct Runtime::Impl {
         const int y = static_cast<int>(luaL_checknumber(state, 3));
         const int scale = std::max(1, static_cast<int>(std::lround(luaL_checknumber(state, 4))));
         if (image) runtime->drawImage(*image, x, y, Unflipped, scale);
+        return 0;
+    }
+
+    static int cImageDrawRotated(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        const float x = static_cast<float>(luaL_checknumber(state, 2));
+        const float y = static_cast<float>(luaL_checknumber(state, 3));
+        const float angle = static_cast<float>(luaL_checknumber(state, 4));
+        const float scale_x = static_cast<float>(luaL_optnumber(state, 5, 1.0));
+        const float scale_y = static_cast<float>(luaL_optnumber(
+            state, 6, scale_x));
+        if (image) {
+            runtime->drawImageRotated(*image, x, y, angle, scale_x, scale_y);
+        }
         return 0;
     }
 
@@ -2411,6 +2579,7 @@ struct Runtime::Impl {
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             lua_pushcfunction(lua,cImageGc);lua_setfield(lua,-2,"__gc");
             setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawScaled",cImageDrawScaled);
+            setFunction(-1,"drawRotated",cImageDrawRotated);
             setFunction(-1,"drawFaded",cImageDrawFaded);setFunction(-1,"getSize",cImageGetSize);
             setFunction(-1,"clear",cImageClear);setFunction(-1,"copy",cImageCopy);
             setFunction(-1,"setInverted",cImageSetInverted);
