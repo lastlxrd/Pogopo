@@ -47,6 +47,8 @@ public:
     Storage& operator=(const Storage&) = delete;
 
     esp_err_t begin(const Config& config);
+    // Retry the last configuration after a card is inserted post-boot.
+    esp_err_t remount();
     void end();
     bool mounted() const { return mounted_; }
     const char* mountPoint() const { return config_.mount_point; }
@@ -65,4 +67,3 @@ private:
 };
 
 } // namespace pogopo::storage
-

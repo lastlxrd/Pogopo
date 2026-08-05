@@ -35,7 +35,10 @@ struct PackageInfo {
 };
 
 // Reads pdxinfo and validates main.pdz/pdex.bin without executing the package.
-esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info);
+// Asset counting recursively walks the whole PDX and is intentionally opt-in;
+// the launcher only needs a quick validation pass.
+esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info,
+                         bool count_assets = false);
 const char* packageKindName(PackageKind kind);
 
 struct Stats {

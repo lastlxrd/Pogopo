@@ -79,6 +79,13 @@ esp_err_t Storage::begin(const Config& config) {
     return ESP_OK;
 }
 
+esp_err_t Storage::remount() {
+    if (mounted_) return ESP_OK;
+    const Config retry = config_;
+    ESP_LOGI(TAG, "Retrying SD mount at %s", retry.mount_point);
+    return begin(retry);
+}
+
 void Storage::end() {
     if (!mounted_) return;
     esp_vfs_fat_sdcard_unmount(config_.mount_point, card_);
@@ -233,4 +240,3 @@ void Storage::freeWav(WavData& wav) {
 }
 
 } // namespace pogopo::storage
-

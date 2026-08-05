@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <new>
 #include <sys/stat.h>
 
 #include "esp_heap_caps.h"
@@ -30,6 +31,21 @@ void setError(char* out, size_t capacity, const char* text) {
 void copyText(char* out, size_t capacity, const char* value) {
     if (!out || capacity == 0) return;
     std::snprintf(out, capacity, "%s", value ? value : "");
+}
+
+PdzArchive* allocateArchive() {
+    void* memory = heap_caps_malloc(
+        sizeof(PdzArchive), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!memory) {
+        memory = heap_caps_malloc(sizeof(PdzArchive), MALLOC_CAP_8BIT);
+    }
+    return memory ? new (memory) PdzArchive() : nullptr;
+}
+
+void releaseArchive(PdzArchive* archive) {
+    if (!archive) return;
+    archive->~PdzArchive();
+    heap_caps_free(archive);
 }
 
 bool regularFile(const char* path) {
@@ -300,7 +316,8 @@ size_t PdzArchive::luaCount() const {
     return result;
 }
 
-esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info) {
+esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info,
+                         bool count_assets) {
     info = {};
     if (!pdx_path || !pdx_path[0] || std::strlen(pdx_path) >= sizeof(info.path)) {
         return ESP_ERR_INVALID_ARG;
@@ -311,7 +328,9 @@ esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info) {
     const char* basename = std::strrchr(pdx_path, '/');
     copyText(info.name, sizeof(info.name), basename ? basename + 1 : pdx_path);
     readPdxInfo(pdx_path, info);
-    countAssets(pdx_path, info.image_files, info.audio_files);
+    if (count_assets) {
+        countAssets(pdx_path, info.image_files, info.audio_files);
+    }
 
     char path[224]{};
     if (pdxJoinPath(path, sizeof(path), pdx_path, "pdex.bin") && regularFile(path)) {
@@ -321,12 +340,22 @@ esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info) {
     if (!pdxJoinPath(path, sizeof(path), pdx_path, "main.pdz") || !regularFile(path)) {
         return ESP_ERR_NOT_FOUND;
     }
-    PdzArchive archive;
+    // PdzArchive is roughly 14 KiB because it stores 96 record descriptors.
+    // The pogopo_os UI task has an 8 KiB stack, so a local archive here
+    // corrupted that stack as soon as the launcher found a real .pdx folder.
+    // Keep the index in PSRAM/heap just like Runtime::Impl does.
+    PdzArchive* archive = allocateArchive();
+    if (!archive) return ESP_ERR_NO_MEM;
     char error[96]{};
-    const esp_err_t result = archive.open(path, error, sizeof(error));
-    if (result != ESP_OK) return result;
+    const esp_err_t result = archive->open(path, error, sizeof(error));
+    if (result != ESP_OK) {
+        releaseArchive(archive);
+        return result;
+    }
     info.kind = PackageKind::LuaPdz;
-    info.lua_modules = static_cast<uint16_t>(std::min<size_t>(UINT16_MAX, archive.luaCount()));
+    info.lua_modules = static_cast<uint16_t>(
+        std::min<size_t>(UINT16_MAX, archive->luaCount()));
+    releaseArchive(archive);
     return ESP_OK;
 }
 

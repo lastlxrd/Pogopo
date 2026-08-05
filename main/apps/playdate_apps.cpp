@@ -234,6 +234,19 @@ void PogoDateBrowserApp::rescan(AppContext& context) {
     for (auto& subtitle : subtitles_) subtitle.fill('\0');
 
     if (!context.storage.mounted()) {
+        ESP_LOGI(TAG, "Playdate browser requested SD remount");
+        const esp_err_t mount_error = context.storage.remount();
+        if (mount_error != ESP_OK) {
+            items_[0] = {"SD CARD NOT READY", "Insert card, then START", nullptr, false};
+            list_.setItems(items_.data(), 1);
+            std::snprintf(status_, sizeof(status_), "MOUNT FAILED: %s",
+                          esp_err_to_name(mount_error));
+            ESP_LOGW(TAG, "Playdate SD remount failed: %s",
+                     esp_err_to_name(mount_error));
+            return;
+        }
+    }
+    if (!context.storage.mounted()) {
         items_[0] = {"SD CARD NOT READY", "Mount failed", nullptr, false};
         list_.setItems(items_.data(), 1);
         std::snprintf(status_, sizeof(status_), "SD IS NOT MOUNTED");
@@ -254,17 +267,24 @@ void PogoDateBrowserApp::rescan(AppContext& context) {
             struct stat value{};
             if (stat(path, &value) != 0 || !S_ISDIR(value.st_mode)) continue;
             playdate::PackageInfo info{};
-            if (playdate::inspectPackage(path, info) != ESP_OK) continue;
+            const esp_err_t inspect_error = playdate::inspectPackage(path, info);
+            if (inspect_error != ESP_OK) {
+                ESP_LOGW(TAG, "Skipping PDX %s: %s", path,
+                         esp_err_to_name(inspect_error));
+                continue;
+            }
             packages_[package_count_] = info;
             std::snprintf(subtitles_[package_count_].data(), subtitles_[package_count_].size(),
-                          "%s  %u LUA  %u IMG  %u AUD",
+                          "%s  %u LUA MODULES",
                           playdate::packageKindName(info.kind),
-                          static_cast<unsigned>(info.lua_modules),
-                          static_cast<unsigned>(info.image_files),
-                          static_cast<unsigned>(info.audio_files));
+                          static_cast<unsigned>(info.lua_modules));
             items_[package_count_] = {packages_[package_count_].name,
                                       subtitles_[package_count_].data(),
                                       packages_[package_count_].path, true};
+            ESP_LOGI(TAG, "Found PDX: %s (%s, %u Lua modules)",
+                     packages_[package_count_].name,
+                     playdate::packageKindName(info.kind),
+                     static_cast<unsigned>(info.lua_modules));
             ++package_count_;
         }
         closedir(directory);
