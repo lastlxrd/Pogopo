@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <new>
 #include <string>
 #include <sys/stat.h>
@@ -35,6 +37,7 @@ constexpr char kImageMetatable[] = "PogoDate.Image";
 constexpr char kImageTableMetatable[] = "PogoDate.ImageTable";
 constexpr char kFontMetatable[] = "PogoDate.Font";
 constexpr char kSoundMetatable[] = "PogoDate.Sound";
+constexpr char kFileMetatable[] = "PogoDate.File";
 char kTimerRegistryKey;
 
 enum Pixel : uint8_t {
@@ -90,6 +93,11 @@ struct Sound {
     bool loop = false;
     float volume = 1.0f;
     char path[160]{};
+};
+
+struct PdFile {
+    FILE* handle = nullptr;
+    bool writable = false;
 };
 
 struct ClipRect {
@@ -1385,7 +1393,13 @@ struct Runtime::Impl {
             static_cast<int>(luaL_checkinteger(state, 1)), 1,
             static_cast<int>(kMaximumFps)));
         runtime->runtime_stats.requested_fps = runtime->refresh_rate;
-        return 0;
+        lua_pushinteger(state, static_cast<lua_Integer>(runtime->refresh_rate));
+        return 1;
+    }
+
+    static int cGetRefreshRate(lua_State* state) {
+        lua_pushinteger(state, static_cast<lua_Integer>(self(state)->refresh_rate));
+        return 1;
     }
 
     static int cSetScale(lua_State* state) {
@@ -1780,6 +1794,516 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static void sanitizeIdentifier(const char* value, char* output,
+                                   size_t capacity) {
+        if (!output || capacity == 0) return;
+        size_t written = 0;
+        for (const char* cursor = value && value[0] ? value : "external";
+             *cursor && written + 1U < capacity; ++cursor) {
+            const char c = *cursor;
+            const bool safe = (c >= 'a' && c <= 'z') ||
+                              (c >= 'A' && c <= 'Z') ||
+                              (c >= '0' && c <= '9') || c == '_' || c == '-';
+            output[written++] = safe ? c : '_';
+        }
+        if (written == 0) {
+            std::snprintf(output, capacity, "%s", "game");
+            return;
+        }
+        output[written] = '\0';
+    }
+
+    static bool normalizeGamePath(const char* input, char* output,
+                                  size_t capacity) {
+        if (!output || capacity == 0) return false;
+        output[0] = '\0';
+        const char* cursor = input ? input : "";
+        while (*cursor == '/') ++cursor;
+        size_t written = 0;
+        while (*cursor) {
+            while (*cursor == '/') ++cursor;
+            if (!*cursor) break;
+            const char* segment = cursor;
+            while (*cursor && *cursor != '/') ++cursor;
+            const size_t length = static_cast<size_t>(cursor - segment);
+            if (length == 1U && segment[0] == '.') continue;
+            if (length == 2U && segment[0] == '.' && segment[1] == '.') {
+                return false;
+            }
+            for (size_t i = 0; i < length; ++i) {
+                const unsigned char c = static_cast<unsigned char>(segment[i]);
+                if (c < 32U || c == '\\' || c == ':') return false;
+            }
+            const size_t needed = written + (written ? 1U : 0U) + length + 1U;
+            if (needed > capacity) return false;
+            if (written) output[written++] = '/';
+            std::memcpy(output + written, segment, length);
+            written += length;
+            output[written] = '\0';
+        }
+        return true;
+    }
+
+    bool dataRoot(char* output, size_t capacity) const {
+        if (!output || capacity == 0 || !storage || !storage->mounted()) {
+            return false;
+        }
+        char identifier[96]{};
+        const char* source = package_mode && package_info.bundle_id[0]
+            ? package_info.bundle_id
+            : (package_mode && package_info.name[0] ? package_info.name
+               : (game == Game::Celeste ? "celeste" :
+                  (game == Game::PDSnake ? "pdsnake" : "external")));
+        sanitizeIdentifier(source, identifier, sizeof(identifier));
+        const int length = std::snprintf(output, capacity, "%s/pogodate/data/%s",
+                                         storage->mountPoint(), identifier);
+        return length > 0 && static_cast<size_t>(length) < capacity;
+    }
+
+    static bool ensureDirectoryTree(const char* path) {
+        if (!path || !path[0] || std::strlen(path) >= 384U) return false;
+        char copy[384]{};
+        std::snprintf(copy, sizeof(copy), "%s", path);
+        for (char* cursor = copy + 1; *cursor; ++cursor) {
+            if (*cursor != '/') continue;
+            *cursor = '\0';
+            if (copy[0] && mkdir(copy, 0775) != 0 && errno != EEXIST) {
+                *cursor = '/';
+                return false;
+            }
+            *cursor = '/';
+        }
+        return mkdir(copy, 0775) == 0 || errno == EEXIST;
+    }
+
+    static bool ensureParentDirectory(const char* path) {
+        if (!path || std::strlen(path) >= 384U) return false;
+        char parent[384]{};
+        std::snprintf(parent, sizeof(parent), "%s", path);
+        char* slash = std::strrchr(parent, '/');
+        if (!slash) return true;
+        *slash = '\0';
+        return ensureDirectoryTree(parent);
+    }
+
+    bool dataPath(const char* requested, char* output, size_t capacity) const {
+        char relative[192]{}, root[256]{};
+        if (!normalizeGamePath(requested, relative, sizeof(relative)) ||
+            !dataRoot(root, sizeof(root))) {
+            return false;
+        }
+        const int length = relative[0]
+            ? std::snprintf(output, capacity, "%s/%s", root, relative)
+            : std::snprintf(output, capacity, "%s", root);
+        return length > 0 && static_cast<size_t>(length) < capacity;
+    }
+
+    bool packagePath(const char* requested, char* output,
+                     size_t capacity) const {
+        if (!package_mode) return false;
+        char relative[192]{};
+        if (!normalizeGamePath(requested, relative, sizeof(relative))) return false;
+        if (!relative[0]) {
+            const int length = std::snprintf(output, capacity, "%s",
+                                             package_info.path);
+            return length > 0 && static_cast<size_t>(length) < capacity;
+        }
+        return pdxJoinPath(output, capacity, package_info.path, relative);
+    }
+
+    bool mergedStat(const char* requested, struct stat& value,
+                    char* resolved = nullptr, size_t resolved_capacity = 0) const {
+        char path[384]{};
+        if (dataPath(requested, path, sizeof(path)) && stat(path, &value) == 0) {
+            if (resolved && resolved_capacity) {
+                std::snprintf(resolved, resolved_capacity, "%s", path);
+            }
+            return true;
+        }
+        if (packagePath(requested, path, sizeof(path)) && stat(path, &value) == 0) {
+            if (resolved && resolved_capacity) {
+                std::snprintf(resolved, resolved_capacity, "%s", path);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    static int pushFileError(lua_State* state, const char* fallback) {
+        lua_pushnil(state);
+        lua_pushstring(state, errno ? std::strerror(errno) : fallback);
+        return 2;
+    }
+
+    static PdFile* checkedFile(lua_State* state) {
+        return static_cast<PdFile*>(luaL_checkudata(state, 1, kFileMetatable));
+    }
+
+    static int cFileGc(lua_State* state) {
+        auto* file = static_cast<PdFile*>(luaL_testudata(state, 1, kFileMetatable));
+        if (file && file->handle) {
+            std::fclose(file->handle);
+            file->handle = nullptr;
+        }
+        return 0;
+    }
+
+    static int cFileClose(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        if (file->handle) {
+            std::fclose(file->handle);
+            file->handle = nullptr;
+        }
+        return 0;
+    }
+
+    static int cFileWrite(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        size_t length = 0;
+        const char* bytes = luaL_checklstring(state, 2, &length);
+        if (!file->handle || !file->writable) {
+            lua_pushinteger(state, 0);
+            lua_pushliteral(state, "file is not open for writing");
+            return 2;
+        }
+        errno = 0;
+        const size_t written = std::fwrite(bytes, 1, length, file->handle);
+        lua_pushinteger(state, static_cast<lua_Integer>(written));
+        if (written == length) return 1;
+        lua_pushstring(state, errno ? std::strerror(errno) : "short write");
+        return 2;
+    }
+
+    static int cFileFlush(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        if (!file->handle) return pushFileError(state, "file is closed");
+        errno = 0;
+        if (std::fflush(file->handle) != 0) {
+            return pushFileError(state, "flush failed");
+        }
+        return 0;
+    }
+
+    static int cFileRead(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        const lua_Integer requested = luaL_checkinteger(state, 2);
+        if (!file->handle) return pushFileError(state, "file is closed");
+        if (requested < 0 || requested > 1024 * 1024) {
+            return luaL_error(state, "read size must be between 0 and 1048576");
+        }
+        luaL_Buffer buffer;
+        const size_t capacity = static_cast<size_t>(requested);
+        char* output = luaL_buffinitsize(state, &buffer, capacity);
+        errno = 0;
+        const size_t got = capacity ? std::fread(output, 1, capacity, file->handle) : 0;
+        if (got < capacity && std::ferror(file->handle)) {
+            luaL_pushresultsize(&buffer, 0);
+            lua_pop(state, 1);
+            std::clearerr(file->handle);
+            return pushFileError(state, "read failed");
+        }
+        luaL_pushresultsize(&buffer, got);
+        lua_pushinteger(state, static_cast<lua_Integer>(got));
+        return 2;
+    }
+
+    static int cFileReadline(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        if (!file->handle) return pushFileError(state, "file is closed");
+        luaL_Buffer buffer;
+        luaL_buffinit(state, &buffer);
+        size_t length = 0;
+        errno = 0;
+        for (;;) {
+            const int value = std::fgetc(file->handle);
+            if (value == EOF) break;
+            if (value == '\n') break;
+            if (value == '\r') {
+                const int next = std::fgetc(file->handle);
+                if (next != '\n' && next != EOF) std::ungetc(next, file->handle);
+                break;
+            }
+            if (++length > 1024U * 1024U) {
+                luaL_pushresult(&buffer);
+                lua_pop(state, 1);
+                return pushFileError(state, "line is too long");
+            }
+            luaL_addchar(&buffer, static_cast<char>(value));
+        }
+        if (length == 0 && std::feof(file->handle)) {
+            luaL_pushresult(&buffer);
+            lua_pop(state, 1);
+            lua_pushnil(state);
+            return 1;
+        }
+        if (std::ferror(file->handle)) {
+            luaL_pushresult(&buffer);
+            lua_pop(state, 1);
+            std::clearerr(file->handle);
+            return pushFileError(state, "readline failed");
+        }
+        luaL_pushresult(&buffer);
+        return 1;
+    }
+
+    static int cFileSeek(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        const long offset = static_cast<long>(luaL_checkinteger(state, 2));
+        const int requested = static_cast<int>(luaL_optinteger(state, 3, 0));
+        if (!file->handle) return pushFileError(state, "file is closed");
+        const int origin = requested == 1 ? SEEK_CUR : (requested == 2 ? SEEK_END : SEEK_SET);
+        errno = 0;
+        if (std::fseek(file->handle, offset, origin) != 0) {
+            return pushFileError(state, "seek failed");
+        }
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+
+    static int cFileTell(lua_State* state) {
+        PdFile* file = checkedFile(state);
+        if (!file->handle) return pushFileError(state, "file is closed");
+        errno = 0;
+        const long position = std::ftell(file->handle);
+        if (position < 0) return pushFileError(state, "tell failed");
+        lua_pushinteger(state, static_cast<lua_Integer>(position));
+        return 1;
+    }
+
+    static int cFileOpen(lua_State* state) {
+        Impl* runtime = self(state);
+        const char* requested = luaL_checkstring(state, 1);
+        const int mode = static_cast<int>(luaL_optinteger(state, 2, 0));
+        if (!runtime->storage || !runtime->storage->mounted()) {
+            errno = 0;
+            return pushFileError(state, "SD card is not mounted");
+        }
+        char path[384]{};
+        const char* fopen_mode = "rb";
+        bool writable = false;
+        if (mode == 1 || mode == 2) {
+            writable = true;
+            fopen_mode = mode == 1 ? "wb" : "ab";
+            if (!runtime->dataPath(requested, path, sizeof(path)) ||
+                !ensureParentDirectory(path)) {
+                errno = 0;
+                return pushFileError(state, "invalid or oversized file path");
+            }
+        } else {
+            struct stat ignored{};
+            if (!runtime->mergedStat(requested, ignored, path, sizeof(path)) ||
+                S_ISDIR(ignored.st_mode)) {
+                errno = ENOENT;
+                return pushFileError(state, "file not found");
+            }
+        }
+        errno = 0;
+        FILE* handle = std::fopen(path, fopen_mode);
+        if (!handle) return pushFileError(state, "open failed");
+        auto* file = static_cast<PdFile*>(
+            lua_newuserdatauv(state, sizeof(PdFile), 0));
+        new (file) PdFile{handle, writable};
+        luaL_getmetatable(state, kFileMetatable);
+        lua_setmetatable(state, -2);
+        return 1;
+    }
+
+    static bool appendDirectory(lua_State* state, const char* path,
+                                bool show_hidden, int result, int seen,
+                                size_t& count) {
+        DIR* directory = opendir(path);
+        if (!directory) return false;
+        while (count < 256U) {
+            dirent* entry = readdir(directory);
+            if (!entry) break;
+            if (!std::strcmp(entry->d_name, ".") ||
+                !std::strcmp(entry->d_name, "..") ||
+                (!show_hidden && entry->d_name[0] == '.')) {
+                continue;
+            }
+            lua_getfield(state, seen, entry->d_name);
+            const bool duplicate = lua_toboolean(state, -1) != 0;
+            lua_pop(state, 1);
+            if (duplicate) continue;
+            char child[384]{};
+            const int child_length = std::snprintf(child, sizeof(child), "%s/%s",
+                                                   path, entry->d_name);
+            if (child_length <= 0 || static_cast<size_t>(child_length) >= sizeof(child)) {
+                continue;
+            }
+            struct stat value{};
+            const bool directory_entry = stat(child, &value) == 0 &&
+                                         S_ISDIR(value.st_mode);
+            lua_pushboolean(state, 1);
+            lua_setfield(state, seen, entry->d_name);
+            if (directory_entry) {
+                char name[272]{};
+                std::snprintf(name, sizeof(name), "%s/", entry->d_name);
+                lua_pushstring(state, name);
+            } else {
+                lua_pushstring(state, entry->d_name);
+            }
+            lua_rawseti(state, result, static_cast<lua_Integer>(++count));
+        }
+        closedir(directory);
+        return true;
+    }
+
+    static int cFileList(lua_State* state) {
+        Impl* runtime = self(state);
+        const char* requested = luaL_optstring(state, 1, "");
+        const bool show_hidden = lua_toboolean(state, 2) != 0;
+        char relative[192]{};
+        if (!normalizeGamePath(requested, relative, sizeof(relative))) {
+            return luaL_error(state, "invalid file path");
+        }
+        lua_newtable(state);
+        const int result = lua_absindex(state, -1);
+        lua_newtable(state);
+        const int seen = lua_absindex(state, -1);
+        size_t count = 0;
+        char path[384]{};
+        if (runtime->dataPath(relative, path, sizeof(path))) {
+            appendDirectory(state, path, show_hidden, result, seen, count);
+        }
+        if (runtime->packagePath(relative, path, sizeof(path))) {
+            appendDirectory(state, path, show_hidden, result, seen, count);
+        }
+        lua_remove(state, seen);
+        lua_getglobal(state, "table");
+        lua_getfield(state, -1, "sort");
+        lua_pushvalue(state, result);
+        if (lua_pcall(state, 1, 0, 0) != LUA_OK) lua_pop(state, 1);
+        lua_pop(state, 1);
+        return 1;
+    }
+
+    static int cFileExists(lua_State* state) {
+        struct stat value{};
+        lua_pushboolean(state, self(state)->mergedStat(
+            luaL_checkstring(state, 1), value));
+        return 1;
+    }
+
+    static int cFileIsDir(lua_State* state) {
+        struct stat value{};
+        const bool exists = self(state)->mergedStat(luaL_checkstring(state, 1), value);
+        lua_pushboolean(state, exists && S_ISDIR(value.st_mode));
+        return 1;
+    }
+
+    static int cFileGetSize(lua_State* state) {
+        struct stat value{};
+        if (!self(state)->mergedStat(luaL_checkstring(state, 1), value)) {
+            lua_pushnil(state);
+            return 1;
+        }
+        lua_pushinteger(state, static_cast<lua_Integer>(value.st_size));
+        return 1;
+    }
+
+    static int cFileGetType(lua_State* state) {
+        struct stat value{};
+        if (!self(state)->mergedStat(luaL_checkstring(state, 1), value)) {
+            lua_pushnil(state);
+            return 1;
+        }
+        lua_pushstring(state, S_ISDIR(value.st_mode) ? "directory" : "file");
+        return 1;
+    }
+
+    static int cFileModtime(lua_State* state) {
+        struct stat value{};
+        if (!self(state)->mergedStat(luaL_checkstring(state, 1), value)) {
+            lua_pushnil(state);
+            return 1;
+        }
+        const std::tm* time = std::localtime(&value.st_mtime);
+        if (!time) {
+            lua_pushnil(state);
+            return 1;
+        }
+        lua_newtable(state);
+        auto set = [&](const char* name, int number) {
+            lua_pushinteger(state, number);
+            lua_setfield(state, -2, name);
+        };
+        set("year", time->tm_year + 1900);
+        set("month", time->tm_mon + 1);
+        set("day", time->tm_mday);
+        set("hour", time->tm_hour);
+        set("minute", time->tm_min);
+        set("second", time->tm_sec);
+        return 1;
+    }
+
+    static int cFileMkdir(lua_State* state) {
+        Impl* runtime = self(state);
+        char path[384]{};
+        if (!runtime->dataPath(luaL_checkstring(state, 1), path, sizeof(path))) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        lua_pushboolean(state, ensureDirectoryTree(path));
+        return 1;
+    }
+
+    static bool removeTree(const char* path, bool recursive, int depth = 0) {
+        // The UI task has an 8 KiB stack. Keep recursive FAT traversal shallow
+        // enough that a malicious package cannot turn delete() into a reboot.
+        if (!path || depth > 6) return false;
+        struct stat value{};
+        if (stat(path, &value) != 0) return false;
+        if (!S_ISDIR(value.st_mode)) return std::remove(path) == 0;
+        if (!recursive) return std::remove(path) == 0;
+        DIR* directory = opendir(path);
+        if (!directory) return false;
+        bool ok = true;
+        while (dirent* entry = readdir(directory)) {
+            if (!std::strcmp(entry->d_name, ".") ||
+                !std::strcmp(entry->d_name, "..")) continue;
+            char child[384]{};
+            const int length = std::snprintf(child, sizeof(child), "%s/%s",
+                                             path, entry->d_name);
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(child) ||
+                !removeTree(child, true, depth + 1)) {
+                ok = false;
+                break;
+            }
+        }
+        closedir(directory);
+        return ok && std::remove(path) == 0;
+    }
+
+    static int cFileDelete(lua_State* state) {
+        Impl* runtime = self(state);
+        const char* requested = luaL_checkstring(state, 1);
+        const bool recursive = lua_toboolean(state, 2) != 0;
+        char relative[192]{}, path[384]{};
+        if (!normalizeGamePath(requested, relative, sizeof(relative)) ||
+            !relative[0] || !runtime->dataPath(relative, path, sizeof(path))) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        lua_pushboolean(state, removeTree(path, recursive));
+        return 1;
+    }
+
+    static int cFileRename(lua_State* state) {
+        Impl* runtime = self(state);
+        char from_relative[192]{}, to_relative[192]{};
+        char from[384]{}, to[384]{};
+        const bool valid = normalizeGamePath(luaL_checkstring(state, 1),
+                                             from_relative, sizeof(from_relative)) &&
+                           normalizeGamePath(luaL_checkstring(state, 2),
+                                             to_relative, sizeof(to_relative)) &&
+                           from_relative[0] && to_relative[0] &&
+                           runtime->dataPath(from_relative, from, sizeof(from)) &&
+                           runtime->dataPath(to_relative, to, sizeof(to));
+        lua_pushboolean(state, valid && std::rename(from, to) == 0);
+        return 1;
+    }
+
     void savePath(char* path, size_t capacity, const char* name, const char* extension) const {
         const char* mount = storage ? storage->mountPoint() : "/sdcard";
         const char* prefix = game == Game::Celeste ? "celeste" :
@@ -1791,7 +2315,13 @@ struct Runtime::Impl {
             safe[out++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                            (c >= '0' && c <= '9') || c == '_') ? c : '_';
         }
-        std::snprintf(path, capacity, "%s/pogodate/%s_%s.%s", mount, prefix, safe, extension);
+        char root[256]{};
+        if (package_mode && dataRoot(root, sizeof(root))) {
+            std::snprintf(path, capacity, "%s/%s.%s", root, safe, extension);
+        } else {
+            std::snprintf(path, capacity, "%s/pogodate/%s_%s.%s", mount,
+                          prefix, safe, extension);
+        }
     }
 
     bool writeValue(FILE* file, int index, int depth) {
@@ -1849,8 +2379,8 @@ struct Runtime::Impl {
     static int cDatastoreWrite(lua_State* state) {
         Impl* runtime=self(state); luaL_checktype(state,1,LUA_TTABLE); const char* name=luaL_optstring(state,2,"data");
         if(!runtime->storage || !runtime->storage->mounted()){lua_pushboolean(state,0);return 1;}
-        char directory[208]{}; std::snprintf(directory,sizeof(directory),"%s/pogodate",runtime->storage->mountPoint()); mkdir(directory,0775);
         char path[240]{},temporary[240]{}; runtime->savePath(path,sizeof(path),name,"lua"); runtime->savePath(temporary,sizeof(temporary),name,"tmp");
+        if (!ensureParentDirectory(temporary)) { lua_pushboolean(state,0);return 1; }
         FILE* file=std::fopen(temporary,"wb"); if(!file){lua_pushboolean(state,0);return 1;}
         std::fputs("return ",file); runtime->writeValue(file,1,0); std::fputc('\n',file);
         bool wrote=std::fclose(file)==0; if(wrote && std::rename(temporary,path)!=0){std::remove(path);wrote=std::rename(temporary,path)==0;}
@@ -1898,6 +2428,14 @@ struct Runtime::Impl {
             setFunction(-1,"setVolume",cSoundSetVolume);setFunction(-1,"setSample",cSoundSetSample);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
+        if(luaL_newmetatable(lua,kFileMetatable)){
+            lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
+            lua_pushcfunction(lua,cFileGc);lua_setfield(lua,-2,"__gc");
+            setFunction(-1,"close",cFileClose);setFunction(-1,"write",cFileWrite);
+            setFunction(-1,"flush",cFileFlush);setFunction(-1,"read",cFileRead);
+            setFunction(-1,"readline",cFileReadline);setFunction(-1,"seek",cFileSeek);
+            setFunction(-1,"tell",cFileTell);
+        } lua_pop(lua,1);
     }
 
     void createTimerRegistry() {
@@ -1924,6 +2462,7 @@ struct Runtime::Impl {
         setInteger(playdate,"kButtonA",0x20);setInteger(playdate,"kButtonB",0x10);
         setBoolean(playdate,"isSimulator",false);
         setFunction(playdate,"getCurrentTimeMilliseconds",cGetCurrentTime);
+        setFunction(playdate,"getFPS",cGetRefreshRate);
         setFunction(playdate,"buttonJustPressed",cButtonJustPressed);setFunction(playdate,"buttonIsPressed",cButtonIsPressed);
         setFunction(playdate,"getSystemMenu",cGetSystemMenu);setFunction(playdate,"setMenuImage",cSetMenuImage);
         setFunction(playdate,"drawFPS",cDrawFps);setFunction(playdate,"getSecondsSinceEpoch",cGetSecondsSinceEpoch);
@@ -1941,10 +2480,15 @@ struct Runtime::Impl {
         lua_pushstring(lua,metadata_version);lua_setfield(lua,-2,"version");
         lua_pushstring(lua,game==Game::Celeste?"8":"0");lua_setfield(lua,-2,"buildNumber");
         lua_pushstring(lua,metadata_author);lua_setfield(lua,-2,"author");
+        lua_pushstring(lua,package_mode && package_info.bundle_id[0]
+            ? package_info.bundle_id : (game==Game::Celeste
+                ? "com.hteumeuleu.celeste" : "com.pogopo.pdsnake"));
+        lua_setfield(lua,-2,"bundleID");
         lua_setfield(lua,playdate,"metadata");
 
         lua_newtable(lua);setFunction(-1,"getWidth",cDisplayWidth);setFunction(-1,"getHeight",cDisplayHeight);
-        setFunction(-1,"setRefreshRate",cSetRefreshRate);setFunction(-1,"setScale",cSetScale);
+        setFunction(-1,"setRefreshRate",cSetRefreshRate);setFunction(-1,"getRefreshRate",cGetRefreshRate);
+        setFunction(-1,"flush",cNoop);setFunction(-1,"setScale",cSetScale);
         setFunction(-1,"setOffset",cSetOffset);setFunction(-1,"setInverted",cSetInverted);
         lua_setfield(lua,playdate,"display");
 
@@ -1983,6 +2527,17 @@ struct Runtime::Impl {
         setFunction(-1,"updateTimers",cUpdateTimers);lua_setfield(lua,playdate,"timer");
         lua_newtable(lua);setFunction(-1,"read",cDatastoreRead);setFunction(-1,"write",cDatastoreWrite);
         setFunction(-1,"delete",cDatastoreDelete);lua_setfield(lua,playdate,"datastore");
+        lua_newtable(lua);const int file=lua_gettop(lua);
+        setInteger(file,"kFileRead",0);setInteger(file,"kFileWrite",1);
+        setInteger(file,"kFileAppend",2);setInteger(file,"kSeekSet",0);
+        setInteger(file,"kSeekFromCurrent",1);setInteger(file,"kSeekFromEnd",2);
+        setFunction(file,"open",cFileOpen);setFunction(file,"listFiles",cFileList);
+        setFunction(file,"exists",cFileExists);setFunction(file,"isdir",cFileIsDir);
+        setFunction(file,"mkdir",cFileMkdir);setFunction(file,"delete",cFileDelete);
+        setFunction(file,"getSize",cFileGetSize);setFunction(file,"getType",cFileGetType);
+        setFunction(file,"modtime",cFileModtime);setFunction(file,"rename",cFileRename);
+        lua_newtable(lua);lua_setfield(lua,file,"file");
+        lua_setfield(lua,playdate,"file");
         lua_setglobal(lua,"playdate");
     }
 
@@ -2036,7 +2591,10 @@ struct Runtime::Impl {
                 std::strstr(package_info.name, "Celeste")) game = Game::Celeste;
             else game = Game::External;
         }
-        refresh_rate=game==Game::Celeste?30:50;runtime_stats.requested_fps=refresh_rate;
+        // Playdate's documented default is 30 FPS.  Celeste is the explicit
+        // PogoDate 50 FPS performance test; every other package starts at the
+        // compatible default and can request up to 50 with setRefreshRate().
+        refresh_rate=game==Game::Celeste?50:30;runtime_stats.requested_fps=refresh_rate;
         frame_accumulator_ms=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
         inverted_display=false;background_color=White;current_font=nullptr;
@@ -2050,7 +2608,7 @@ struct Runtime::Impl {
         }
         lua_gc(lua, LUA_GCGEN, 20, 100);
         is_running=true;
-        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=30",
+        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50",
                  package_mode ? package_info.name :
                     (game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2"),
                  package_mode ? "SD main.pdz" : "source",

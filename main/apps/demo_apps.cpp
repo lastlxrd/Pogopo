@@ -106,7 +106,7 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
     canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP11.2");
+    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP11.3");
     list_.draw(canvas, context.theme);
     gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
 }

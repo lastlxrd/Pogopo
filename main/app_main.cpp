@@ -147,6 +147,7 @@ esp_err_t start_storage() {
     config.d0_io = board::SD_D0; config.d1_io = board::SD_D1;
     config.d2_io = board::SD_D2; config.d3_io = board::SD_D3;
     config.mount_point = "/sdcard";
+    config.max_files = 16;
     return g_storage.begin(config);
 }
 
@@ -310,7 +311,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.2.1 POGODATE SD STACK/HOT-MOUNT FIX");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.3 POGODATE 50 FPS + FILE API");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -341,5 +342,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.2.1 ready: stable GB + safe SD PDX/PDZ loader + PDA audio");
+    ESP_LOGI(TAG, "STEP11.3 ready: stable GB + 50 FPS Celeste + Playdate file API");
 }

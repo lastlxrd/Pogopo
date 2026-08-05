@@ -13,7 +13,7 @@
 namespace pogopo::demo {
 namespace {
 constexpr char TAG[] = "pogodate_app";
-constexpr uint32_t LCD_FRAME_MS = 33;
+constexpr uint32_t LCD_FRAME_MS = 20;
 
 bool navigationEvent(const input::Event& event) {
     return event.type == input::EventType::Pressed ||
