@@ -13,7 +13,30 @@ namespace pogopo::playdate {
 enum class Game : uint8_t {
     PDSnake,
     Celeste,
+    External,
 };
+
+enum class PackageKind : uint8_t {
+    Invalid,
+    LuaPdz,
+    NativeBinary,
+};
+
+struct PackageInfo {
+    char path[192]{};
+    char name[64]{};
+    char author[64]{};
+    char version[24]{};
+    char bundle_id[80]{};
+    PackageKind kind = PackageKind::Invalid;
+    uint16_t lua_modules = 0;
+    uint16_t image_files = 0;
+    uint16_t audio_files = 0;
+};
+
+// Reads pdxinfo and validates main.pdz/pdex.bin without executing the package.
+esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info);
+const char* packageKindName(PackageKind kind);
 
 struct Stats {
     uint32_t lua_frames = 0;
@@ -38,6 +61,9 @@ public:
     esp_err_t start(gfx::Canvas& canvas, audio::Audio& audio,
                     storage::Storage& storage,
                     Game game = Game::PDSnake);
+    esp_err_t startPackage(gfx::Canvas& canvas, audio::Audio& audio,
+                           storage::Storage& storage,
+                           const char* pdx_path);
     void stop();
 
     void setInput(uint8_t held_mask, uint8_t pressed_mask);

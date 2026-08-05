@@ -10,6 +10,7 @@ namespace pogopo::demo {
 namespace {
 constexpr gui::ListItem kLauncherItems[] = {
     {"Game Boy", "Peanut-GB emulator + SD ROMs", "gb_browser", true},
+    {"Playdate games (SD)", "Open extracted .pdx packages", "pogodate_browser", true},
     {"PogoDate: Celeste", "Celeste Classic 1.0.3 Lua", "pogodate_celeste", true},
     {"PogoDate: PDSnake", "Original Playdate Lua source", "pogodate", true},
     {"Graphics demo", "Sprites + partial redraw", "graphics", true},
@@ -105,7 +106,7 @@ void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
     canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP11.1.2");
+    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP11.2");
     list_.draw(canvas, context.theme);
     gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
 }

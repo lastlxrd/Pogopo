@@ -115,6 +115,10 @@ public:
     // Takes ownership of samples allocated with heap_caps_malloc()/malloc-compatible heap.
     // Mono signed 16-bit PCM; the audio task frees it after playback or StopAll.
     bool playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume = 80);
+    bool playMusicPcmOwned(int16_t* samples, uint32_t frames,
+                           uint32_t sample_rate, uint8_t volume = 80,
+                           bool loop = true);
+    void stopMusicPcm();
     void stopAll();
 
     // Low-latency stereo PCM ring used by emulators. The producer may run on
@@ -144,6 +148,7 @@ public:
     bool ok() const { return ok_.load(); }
     bool active() const {
         return active_voices_.load() != 0 || pcm_active_.load() ||
+               music_pcm_active_.load() ||
                realtime_active_.load() || streamActive();
     }
     uint8_t activeVoices() const { return active_voices_.load(); }
@@ -161,6 +166,8 @@ private:
         PlayEffect,
         PlayTone,
         PlayPcm,
+        PlayMusicPcm,
+        StopMusicPcm,
         StopAll,
     };
 
@@ -182,6 +189,7 @@ private:
         int16_t* pcm_samples = nullptr;
         uint32_t pcm_frames = 0;
         uint32_t pcm_sample_rate = 0;
+        bool pcm_loop = false;
     };
 
     struct StreamCommand {
@@ -206,6 +214,7 @@ private:
         uint64_t position_q16 = 0;
         uint64_t step_q16 = 0;
         uint8_t volume = 80;
+        bool loop = false;
         bool active = false;
     };
 
@@ -248,9 +257,12 @@ private:
     void startTone(const Command& command);
     void startPcm(Command& command);
     int32_t renderPcm();
+    void startMusicPcm(Command& command);
+    int32_t renderMusicPcm();
     int32_t renderStream();
     void renderRealtime(int32_t& left, int32_t& right);
     void clearPcm();
+    void clearMusicPcm();
     Voice& chooseVoice(bool custom, Effect effect);
     void loadCurrentNote(Voice& voice);
     void advanceVoice(Voice& voice);
@@ -286,6 +298,7 @@ private:
     uint32_t voice_serial_ = 0;
     uint32_t noise_state_ = 0xA5C31E27u;
     PcmVoice pcm_{};
+    PcmVoice music_pcm_{};
 
     int16_t* realtime_buffer_ = nullptr;
     uint32_t realtime_capacity_frames_ = 0;
@@ -311,6 +324,7 @@ private:
     std::atomic<uint8_t> master_volume_{68};
     std::atomic<uint8_t> active_voices_{0};
     std::atomic<bool> pcm_active_{false};
+    std::atomic<bool> music_pcm_active_{false};
     std::atomic<uint32_t> buffers_written_{0};
     std::atomic<uint32_t> write_errors_{0};
     std::atomic<uint32_t> short_writes_{0};

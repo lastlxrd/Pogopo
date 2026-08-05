@@ -61,6 +61,10 @@ static pogopo::demo::PogoDateApp g_pdsnake_app(
 static pogopo::demo::PogoDateApp g_celeste_app(
     pogopo::playdate::Game::Celeste, "pogodate_celeste", "Celeste Classic",
     "CELESTE CLASSIC 1.0.3");
+static pogopo::demo::PogoDateApp g_pogodate_player(
+    pogopo::playdate::Game::External, "pogodate_player", "Playdate SD Game",
+    "SD PACKAGE");
+static pogopo::demo::PogoDateBrowserApp g_pogodate_browser(g_pogodate_player);
 
 namespace {
 
@@ -247,6 +251,8 @@ void os_task(void*) {
     g_app_manager.registerApp(g_launcher_app, true);
     g_app_manager.registerApp(g_gameboy_browser_app);
     g_app_manager.registerApp(g_gameboy_app);
+    g_app_manager.registerApp(g_pogodate_browser);
+    g_app_manager.registerApp(g_pogodate_player);
     g_app_manager.registerApp(g_pdsnake_app);
     g_app_manager.registerApp(g_celeste_app);
     g_app_manager.registerApp(g_graphics_app);
@@ -304,7 +310,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.1.2 POGODATE CELESTE PERFORMANCE");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.2 POGODATE SD PDX/PDZ + PDA AUDIO");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -335,5 +341,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.1.2 ready: stable GB + optimized PDSnake/Celeste");
+    ESP_LOGI(TAG, "STEP11.2 ready: stable GB + SD PDX/PDZ loader + PDA audio");
 }

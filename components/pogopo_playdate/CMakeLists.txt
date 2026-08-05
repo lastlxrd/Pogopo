@@ -84,6 +84,7 @@ file(WRITE "${COMPAT_GENERATED}"
 idf_component_register(
     SRCS
         "src/runtime_celeste.cpp"
+        "src/pdx_package.cpp"
         "src/celeste_assets.cpp"
         "${PDSNAKE_GENERATED}"
         "${CELESTE_GENERATED}"
@@ -99,6 +100,7 @@ idf_component_register(
         pogopo_storage
         esp_timer
         heap
+        zlib
 )
 
 # These commands intentionally remain after idf_component_register(): ESP-IDF

@@ -19,9 +19,11 @@ extern "C" {
 
 #include "celeste_assets.h"
 #include "embedded_source.h"
+#include "pdx_package.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "zlib.h"
 
 namespace pogopo::playdate {
 namespace {
@@ -69,6 +71,11 @@ struct Image {
 
 struct ImageTable {
     const CelesteAsset* asset = nullptr;
+    uint8_t* data = nullptr;
+    size_t data_size = 0;
+    uint16_t frame_width = 0;
+    uint16_t frame_height = 0;
+    uint16_t frame_count = 0;
 };
 
 struct PdFont {
@@ -80,7 +87,9 @@ struct Sound {
     audio::Effect effect = audio::Effect::Click;
     bool playing = false;
     bool music = false;
+    bool loop = false;
     float volume = 1.0f;
+    char path[160]{};
 };
 
 struct ClipRect {
@@ -155,6 +164,9 @@ struct Runtime::Impl {
     audio::Audio* audio = nullptr;
     storage::Storage* storage = nullptr;
     Game game = Game::PDSnake;
+    PackageInfo package_info{};
+    PdzArchive pdz{};
+    bool package_mode = false;
 
     bool is_running = false;
     bool inverted_display = false;
@@ -191,7 +203,7 @@ struct Runtime::Impl {
     size_t allocated_bytes = 0;
     size_t peak_allocated_bytes = 0;
     Stats runtime_stats{};
-    std::array<bool, 64> loaded_modules{};
+    std::array<bool, PdzArchive::MAX_ENTRIES> loaded_modules{};
     char last_error[kErrorCapacity]{};
 
     static Impl* self(lua_State* state) {
@@ -256,8 +268,25 @@ struct Runtime::Impl {
         return true;
     }
 
+    bool loadBytecode(const char* name, const uint8_t* bytes, size_t size) {
+        if (!bytes || size < 4U || bytes[0] != 0x1BU ||
+            std::memcmp(bytes + 1U, "Lua", 3U) != 0) {
+            setError(name, "PDZ record is not Lua bytecode");
+            return false;
+        }
+        if (luaL_loadbufferx(lua, reinterpret_cast<const char*>(bytes), size,
+                             name, "b") != LUA_OK) {
+            return takeLuaError(name);
+        }
+        if (lua_pcall(lua, 0, 0, 0) != LUA_OK) return takeLuaError(name);
+        return true;
+    }
+
     const EmbeddedSource* sources(size_t& count) const {
-        return game == Game::Celeste ? celesteSources(count) : pdsnakeSources(count);
+        if (game == Game::Celeste) return celesteSources(count);
+        if (game == Game::PDSnake) return pdsnakeSources(count);
+        count = 0;
+        return nullptr;
     }
 
     const EmbeddedSource* findSource(const char* requested, size_t& index) const {
@@ -283,6 +312,33 @@ struct Runtime::Impl {
     bool importModule(const char* requested) {
         if (!requested) return false;
         if (std::strncmp(requested, "CoreLibs/", 9) == 0) return true;
+        if (package_mode) {
+            const PdzEntry* entry = pdz.findLua(requested);
+            if (!entry) {
+                setError("import", requested);
+                return false;
+            }
+            const size_t slot = entry->slot;
+            if (slot >= loaded_modules.size()) {
+                setError("import", "PDZ module index overflow");
+                return false;
+            }
+            if (loaded_modules[slot]) return true;
+            uint8_t* bytecode = nullptr;
+            size_t bytecode_size = 0;
+            char archive_error[128]{};
+            const esp_err_t err = pdz.load(*entry, bytecode, bytecode_size,
+                                           archive_error, sizeof(archive_error));
+            if (err != ESP_OK) {
+                setError(entry->name, archive_error);
+                return false;
+            }
+            loaded_modules[slot] = true;
+            const bool ok = loadBytecode(entry->name, bytecode, bytecode_size);
+            heap_caps_free(bytecode);
+            if (!ok) loaded_modules[slot] = false;
+            return ok;
+        }
         size_t index = 0;
         const EmbeddedSource* source = findSource(requested, index);
         if (!source || index >= loaded_modules.size()) {
@@ -585,10 +641,171 @@ struct Runtime::Impl {
             screen.height * display_scale, false, false);
     }
 
+    static uint16_t readLe16(const uint8_t* value) {
+        return static_cast<uint16_t>(value[0] |
+            (static_cast<uint16_t>(value[1]) << 8U));
+    }
+
+    static uint32_t readLe32(const uint8_t* value) {
+        return static_cast<uint32_t>(value[0]) |
+            (static_cast<uint32_t>(value[1]) << 8U) |
+            (static_cast<uint32_t>(value[2]) << 16U) |
+            (static_cast<uint32_t>(value[3]) << 24U);
+    }
+
+    bool resourcePath(char* output, size_t capacity, const char* requested,
+                      const char* extension) const {
+        if (!package_mode || !requested || !requested[0] ||
+            std::strstr(requested, "..") || requested[0] == '/') return false;
+        const size_t length = std::strlen(requested);
+        const size_t extension_length = std::strlen(extension);
+        const bool has_extension = length >= extension_length &&
+            std::strcmp(requested + length - extension_length, extension) == 0;
+        return pdxJoinPath(output, capacity, package_info.path, requested,
+                           has_extension ? nullptr : extension);
+    }
+
+    bool loadCompiledResource(const char* requested, const char* extension,
+                              const char* magic, uint8_t*& unpacked,
+                              size_t& unpacked_size, uint32_t& width,
+                              uint32_t& height, uint32_t& count) {
+        unpacked = nullptr; unpacked_size = 0; width = height = count = 0;
+        char path[256]{};
+        if (!resourcePath(path, sizeof(path), requested, extension)) return false;
+        FILE* file = std::fopen(path, "rb");
+        if (!file) return false;
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        uint8_t header[32]{};
+        if (length < 32 || std::fread(header, 1, sizeof(header), file) != sizeof(header) ||
+            std::memcmp(header, magic, 12) != 0) {
+            std::fclose(file);
+            return false;
+        }
+        const uint32_t target_size = readLe32(header + 16);
+        width = readLe32(header + 20);
+        height = readLe32(header + 24);
+        count = readLe32(header + 28);
+        if (!(header[15] & 0x80U) || target_size < 16U ||
+            target_size > 4U * 1024U * 1024U || width == 0 || height == 0 ||
+            width > 1024U || height > 1024U) {
+            std::fclose(file);
+            return false;
+        }
+        const size_t packed_size = static_cast<size_t>(length - 32);
+        if (packed_size == 0 || packed_size > 4U * 1024U * 1024U) {
+            std::fclose(file);
+            return false;
+        }
+        uint8_t* packed = static_cast<uint8_t*>(heap_caps_malloc(
+            packed_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        uint8_t* output = static_cast<uint8_t*>(heap_caps_malloc(
+            target_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if ((!packed || !output) && packed_size < 128U * 1024U && target_size < 128U * 1024U) {
+            if (!packed) packed = static_cast<uint8_t*>(heap_caps_malloc(packed_size, MALLOC_CAP_8BIT));
+            if (!output) output = static_cast<uint8_t*>(heap_caps_malloc(target_size, MALLOC_CAP_8BIT));
+        }
+        if (!packed || !output || std::fread(packed, 1, packed_size, file) != packed_size) {
+            if (packed) heap_caps_free(packed);
+            if (output) heap_caps_free(output);
+            std::fclose(file);
+            return false;
+        }
+        std::fclose(file);
+        uLongf actual = target_size;
+        const int zerr = uncompress(output, &actual, packed, packed_size);
+        heap_caps_free(packed);
+        if (zerr != Z_OK || actual != target_size) {
+            heap_caps_free(output);
+            return false;
+        }
+        unpacked = output;
+        unpacked_size = target_size;
+        return true;
+    }
+
+    bool decodeSerializedImage(Image& image, const uint8_t* bytes, size_t size,
+                               int full_width, int full_height) {
+        if (!bytes || size < 16U || !image.pixels ||
+            image.width != full_width || image.height != full_height) return false;
+        const uint16_t stored_width = readLe16(bytes);
+        const uint16_t stored_height = readLe16(bytes + 2);
+        const uint16_t row_bytes = readLe16(bytes + 4);
+        const uint16_t left = readLe16(bytes + 6);
+        const uint16_t top = readLe16(bytes + 10);
+        const uint16_t flags = readLe16(bytes + 14);
+        const size_t plane_size = static_cast<size_t>(row_bytes) * stored_height;
+        const bool has_mask = (flags & 0x03U) == 0x03U;
+        if (stored_width == 0 || stored_height == 0 || row_bytes == 0 ||
+            stored_width > row_bytes * 8U || left + stored_width > full_width ||
+            top + stored_height > full_height ||
+            16U + plane_size * (has_mask ? 2U : 1U) > size) return false;
+        const uint8_t* bitmap = bytes + 16U;
+        const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
+        std::memset(image.pixels, Clear,
+                    static_cast<size_t>(image.stride) * image.height);
+        for (uint16_t y = 0; y < stored_height; ++y) {
+            for (uint16_t x = 0; x < stored_width; ++x) {
+                const uint8_t bit = static_cast<uint8_t>(0x80U >> (x & 7U));
+                const size_t index = static_cast<size_t>(y) * row_bytes + (x >> 3U);
+                if (mask && !(mask[index] & bit)) continue;
+                image.pixels[static_cast<size_t>(top + y) * image.stride + left + x] =
+                    (bitmap[index] & bit) ? White : Black;
+            }
+        }
+        return true;
+    }
+
+    bool pushPdiImage(const char* path) {
+        uint8_t* bytes = nullptr; size_t size = 0;
+        uint32_t width = 0, height = 0, unused = 0;
+        if (!loadCompiledResource(path, ".pdi", "Playdate IMG", bytes, size,
+                                  width, height, unused)) return false;
+        Image* image = pushDynamicImage(static_cast<int>(width),
+                                        static_cast<int>(height), Clear);
+        const bool ok = image && decodeSerializedImage(*image, bytes, size,
+            static_cast<int>(width), static_cast<int>(height));
+        heap_caps_free(bytes);
+        if (!ok) {
+            if (image) lua_pop(lua, 1);
+            return false;
+        }
+        return true;
+    }
+
+    bool pushPdtTable(const char* path) {
+        uint8_t* bytes = nullptr; size_t size = 0;
+        uint32_t width = 0, height = 0, count = 0;
+        if (!loadCompiledResource(path, ".pdt", "Playdate IMT", bytes, size,
+                                  width, height, count)) return false;
+        if (count == 0 || count > 2048U || size < 4U + count * 4U ||
+            readLe16(bytes) != count) {
+            heap_caps_free(bytes);
+            return false;
+        }
+        auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
+            lua, sizeof(ImageTable) + size, 1));
+        new (table) ImageTable{};
+        table->data = reinterpret_cast<uint8_t*>(table + 1);
+        table->data_size = size;
+        table->frame_width = static_cast<uint16_t>(width);
+        table->frame_height = static_cast<uint16_t>(height);
+        table->frame_count = static_cast<uint16_t>(count);
+        std::memcpy(table->data, bytes, size);
+        heap_caps_free(bytes);
+        luaL_getmetatable(lua, kImageTableMetatable);
+        lua_setmetatable(lua, -2);
+        lua_newtable(lua);
+        lua_setiuservalue(lua, -2, 1);
+        return true;
+    }
+
     static int cImageNew(lua_State* state) {
         Impl* runtime = self(state);
         if (lua_type(state, 1) == LUA_TSTRING) {
             const char* path = lua_tostring(state, 1);
+            if (runtime->pushPdiImage(path)) return 1;
             const CelesteAsset* asset = findCelesteAsset(path);
             if (asset) {
                 Image* image = runtime->pushImage();
@@ -734,7 +951,9 @@ struct Runtime::Impl {
     }
 
     static int cImageTableNew(lua_State* state) {
+        Impl* runtime = self(state);
         const char* path = luaL_checkstring(state, 1);
+        if (runtime->pushPdtTable(path)) return 1;
         const CelesteAsset* asset = findCelesteAsset(path);
         if (!asset || asset->frame_count <= 1) {
             lua_pushnil(state);
@@ -754,7 +973,8 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* table = static_cast<ImageTable*>(luaL_checkudata(state, 1, kImageTableMetatable));
         const int index = static_cast<int>(luaL_checkinteger(state, 2));
-        if (!table || !table->asset || index < 1 || index > table->asset->frame_count) {
+        const int count = table ? (table->asset ? table->asset->frame_count : table->frame_count) : 0;
+        if (!table || index < 1 || index > count) {
             lua_pushnil(state);
             return 1;
         }
@@ -765,11 +985,35 @@ struct Runtime::Impl {
             return 1;
         }
         lua_pop(state, 1);
-        Image* image = runtime->pushImage();
-        image->width = table->asset->frame_width;
-        image->height = table->asset->frame_height;
-        image->asset = table->asset;
-        image->frame = index - 1;
+        Image* image = nullptr;
+        if (table->asset) {
+            image = runtime->pushImage();
+            image->width = table->asset->frame_width;
+            image->height = table->asset->frame_height;
+            image->asset = table->asset;
+            image->frame = index - 1;
+        } else {
+            const size_t table_bytes = 4U + static_cast<size_t>(table->frame_count) * 4U;
+            const uint32_t previous = index > 1
+                ? readLe32(table->data + 4U + static_cast<size_t>(index - 2) * 4U)
+                : 0U;
+            const uint32_t end = readLe32(table->data + 4U + static_cast<size_t>(index - 1) * 4U);
+            if (table_bytes + end > table->data_size || previous >= end) {
+                lua_pop(state, 1);
+                lua_pushnil(state);
+                return 1;
+            }
+            image = runtime->pushDynamicImage(table->frame_width,
+                                              table->frame_height, Clear);
+            if (!image || !runtime->decodeSerializedImage(
+                    *image, table->data + table_bytes + previous, end - previous,
+                    table->frame_width, table->frame_height)) {
+                if (image) lua_pop(state, 1);
+                lua_pop(state, 1);
+                lua_pushnil(state);
+                return 1;
+            }
+        }
         lua_pushvalue(state, -1);
         lua_rawseti(state, -3, index);
         lua_remove(state, -2);
@@ -778,7 +1022,8 @@ struct Runtime::Impl {
 
     static int cImageTableLen(lua_State* state) {
         auto* table = static_cast<ImageTable*>(luaL_checkudata(state, 1, kImageTableMetatable));
-        lua_pushinteger(state, table && table->asset ? table->asset->frame_count : 0);
+        lua_pushinteger(state, table ? (table->asset ? table->asset->frame_count :
+                                        table->frame_count) : 0);
         return 1;
     }
 
@@ -1204,6 +1449,140 @@ struct Runtime::Impl {
     static int cDrawFps(lua_State*) { return 0; }
     static int cSetMenuImage(lua_State*) { return 0; }
 
+    bool pdaPath(char* output, size_t capacity, const char* requested) const {
+        if (!package_mode || !requested || !requested[0] ||
+            std::strstr(requested, "..") || requested[0] == '/') return false;
+        char relative[176]{};
+        std::snprintf(relative, sizeof(relative), "%s", requested);
+        const size_t length = std::strlen(relative);
+        const char* extensions[] = {".wav", ".aiff", ".aif"};
+        bool replaced = false;
+        for (const char* extension : extensions) {
+            const size_t suffix = std::strlen(extension);
+            if (length >= suffix && !std::strcmp(relative + length - suffix, extension)) {
+                relative[length - suffix] = '\0';
+                replaced = true;
+                break;
+            }
+        }
+        (void)replaced;
+        return pdxJoinPath(output, capacity, package_info.path, relative, ".pda");
+    }
+
+    bool loadPda(const char* requested, int16_t*& samples, uint32_t& frames,
+                 uint32_t& sample_rate) {
+        samples = nullptr; frames = 0; sample_rate = 0;
+        char path[256]{};
+        if (!pdaPath(path, sizeof(path), requested)) return false;
+        FILE* file = std::fopen(path, "rb");
+        if (!file) return false;
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        uint8_t header[16]{};
+        if (length <= 16 || std::fread(header, 1, sizeof(header), file) != sizeof(header) ||
+            std::memcmp(header, "Playdate AUD", 12) != 0) {
+            std::fclose(file);
+            return false;
+        }
+        sample_rate = readLe16(header + 12);
+        const uint8_t format = header[15];
+        const size_t payload_size = static_cast<size_t>(length - 16);
+        if (sample_rate < 8000U || sample_rate > 48000U ||
+            payload_size > 4U * 1024U * 1024U ||
+            (format != 2U && format != 4U)) {
+            std::fclose(file);
+            return false;
+        }
+
+        if (format == 2U) {
+            frames = static_cast<uint32_t>(payload_size / 2U);
+            samples = static_cast<int16_t*>(heap_caps_malloc(
+                static_cast<size_t>(frames) * sizeof(int16_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!samples) samples = static_cast<int16_t*>(heap_caps_malloc(
+                static_cast<size_t>(frames) * sizeof(int16_t), MALLOC_CAP_8BIT));
+            const bool ok = samples && std::fread(samples, sizeof(int16_t), frames, file) == frames;
+            std::fclose(file);
+            if (!ok) {
+                if (samples) heap_caps_free(samples);
+                samples = nullptr; frames = 0;
+            }
+            return ok;
+        }
+
+        uint8_t block_bytes[2]{};
+        if (payload_size < 6U || std::fread(block_bytes, 1, 2, file) != 2) {
+            std::fclose(file);
+            return false;
+        }
+        const uint16_t block_align = readLe16(block_bytes);
+        if (block_align < 5U || block_align > 4096U) {
+            std::fclose(file);
+            return false;
+        }
+        const uint32_t block_count = static_cast<uint32_t>((payload_size - 2U) / block_align);
+        const uint32_t samples_per_block = 1U + (block_align - 4U) * 2U;
+        const uint64_t total_frames = static_cast<uint64_t>(block_count) * samples_per_block;
+        if (block_count == 0 || total_frames > 2U * 1024U * 1024U) {
+            std::fclose(file);
+            return false;
+        }
+        frames = static_cast<uint32_t>(total_frames);
+        samples = static_cast<int16_t*>(heap_caps_malloc(
+            static_cast<size_t>(frames) * sizeof(int16_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        uint8_t* block = static_cast<uint8_t*>(heap_caps_malloc(
+            block_align, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (!block) block = static_cast<uint8_t*>(heap_caps_malloc(block_align, MALLOC_CAP_8BIT));
+        if (!samples || !block) {
+            if (samples) heap_caps_free(samples);
+            if (block) heap_caps_free(block);
+            samples = nullptr; frames = 0;
+            std::fclose(file);
+            return false;
+        }
+        static constexpr int step_table[89] = {
+            7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+            50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,
+            230,253,279,307,337,371,408,449,494,544,598,658,724,796,
+            876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,
+            2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,
+            7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,
+            20350,22385,24623,27086,29794,32767};
+        static constexpr int index_table[16] = {
+            -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
+        uint32_t output = 0;
+        bool ok = true;
+        for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
+            if (std::fread(block, 1, block_align, file) != block_align) {
+                ok = false; break;
+            }
+            int predictor = static_cast<int16_t>(readLe16(block));
+            int step_index = std::clamp<int>(block[2], 0, 88);
+            samples[output++] = static_cast<int16_t>(predictor);
+            for (uint16_t byte_index = 4; byte_index < block_align; ++byte_index) {
+                for (int shift : {0, 4}) {
+                    const int nibble = (block[byte_index] >> shift) & 0x0F;
+                    const int step = step_table[step_index];
+                    const int delta = (((nibble & 7) * 2 + 1) * step) >> 3;
+                    predictor += (nibble & 8) ? -delta : delta;
+                    predictor = std::clamp(predictor, -32768, 32767);
+                    step_index = std::clamp(step_index + index_table[nibble], 0, 88);
+                    samples[output++] = static_cast<int16_t>(predictor);
+                }
+            }
+        }
+        heap_caps_free(block);
+        std::fclose(file);
+        if (!ok || output != frames) {
+            heap_caps_free(samples);
+            samples = nullptr; frames = 0;
+            return false;
+        }
+        return true;
+    }
+
     static int cSoundNew(lua_State* state) {
         const char* path = lua_type(state, 1) == LUA_TSTRING ? lua_tostring(state, 1) : "";
         auto* original = static_cast<Sound*>(luaL_testudata(state, 1, kSoundMetatable));
@@ -1213,6 +1592,7 @@ struct Runtime::Impl {
         else {
             sound->effect = effectForPath(path);
             sound->music = path && std::strstr(path, "Sounds/music");
+            std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
         }
         luaL_getmetatable(state, kSoundMetatable);
         lua_setmetatable(state, -2);
@@ -1224,15 +1604,37 @@ struct Runtime::Impl {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         if (sound) {
             sound->playing = true;
-            if (!sound->music && runtime->audio) runtime->audio->play(sound->effect);
+            int16_t* samples = nullptr;
+            uint32_t frames = 0, sample_rate = 0;
+            const bool loaded = runtime->audio && sound->path[0] &&
+                runtime->loadPda(sound->path, samples, frames, sample_rate);
+            if (loaded) {
+                const uint8_t volume = static_cast<uint8_t>(std::clamp<int>(
+                    static_cast<int>(std::lround(sound->volume * 100.0f)), 0, 100));
+                if (!lua_isnoneornil(state, 2)) {
+                    sound->loop = luaL_checkinteger(state, 2) == 0;
+                }
+                if (sound->music) {
+                    runtime->audio->playMusicPcmOwned(samples, frames, sample_rate,
+                                                      volume, sound->loop);
+                } else {
+                    runtime->audio->playPcmOwned(samples, frames, sample_rate, volume);
+                }
+            } else if (!sound->music && runtime->audio) {
+                runtime->audio->play(sound->effect);
+            }
         }
         lua_pushboolean(state, sound != nullptr);
         return 1;
     }
 
     static int cSoundStop(lua_State* state) {
+        Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
-        if (sound) sound->playing = false;
+        if (sound) {
+            sound->playing = false;
+            if (sound->music && runtime->audio) runtime->audio->stopMusicPcm();
+        }
         return 0;
     }
 
@@ -1256,14 +1658,18 @@ struct Runtime::Impl {
     static int cSoundSetSample(lua_State* state) {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         auto* sample = static_cast<Sound*>(luaL_checkudata(state, 2, kSoundMetatable));
-        if (sound && sample) { sound->effect = sample->effect; sound->music = sample->music; }
+        if (sound && sample) *sound = *sample;
         return 0;
     }
 
     static int cSoundLoad(lua_State* state) {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         const char* path = luaL_checkstring(state, 2);
-        if (sound) { sound->effect = effectForPath(path); sound->music = std::strstr(path, "Sounds/music"); }
+        if (sound) {
+            sound->effect = effectForPath(path);
+            sound->music = std::strstr(path, "Sounds/music") != nullptr;
+            std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
+        }
         lua_pushboolean(state, sound != nullptr);
         return 1;
     }
@@ -1362,7 +1768,8 @@ struct Runtime::Impl {
 
     void savePath(char* path, size_t capacity, const char* name, const char* extension) const {
         const char* mount = storage ? storage->mountPoint() : "/sdcard";
-        const char* prefix = game == Game::Celeste ? "celeste" : "pdsnake";
+        const char* prefix = game == Game::Celeste ? "celeste" :
+                             (game == Game::PDSnake ? "pdsnake" : "external");
         char safe[48]{};
         size_t out = 0;
         for (const char* value = name && name[0] ? name : "data"; *value && out + 1 < sizeof(safe); ++value) {
@@ -1510,10 +1917,16 @@ struct Runtime::Impl {
         setFunction(playdate,"getReduceFlashing",cGetReduceFlashing);setFunction(playdate,"getCrankTicks",cGetCrankTicks);
         setFunction(playdate,"setCrankSoundsDisabled",cNoop);
         lua_newtable(lua);
-        lua_pushstring(lua,game==Game::Celeste?"Celeste Classic":"PDSnake");lua_setfield(lua,-2,"name");
-        lua_pushstring(lua,game==Game::Celeste?"1.0.3":"1.2");lua_setfield(lua,-2,"version");
-        lua_pushstring(lua,game==Game::Celeste?"8":"7");lua_setfield(lua,-2,"buildNumber");
-        lua_pushstring(lua,game==Game::Celeste?"HTeuMeuLeu":"Brett Chalupa");lua_setfield(lua,-2,"author");
+        const char* metadata_name = package_mode && package_info.name[0]
+            ? package_info.name : (game==Game::Celeste?"Celeste Classic":"PDSnake");
+        const char* metadata_version = package_mode && package_info.version[0]
+            ? package_info.version : (game==Game::Celeste?"1.0.3":"1.2");
+        const char* metadata_author = package_mode && package_info.author[0]
+            ? package_info.author : (game==Game::Celeste?"HTeuMeuLeu":"Brett Chalupa");
+        lua_pushstring(lua,metadata_name);lua_setfield(lua,-2,"name");
+        lua_pushstring(lua,metadata_version);lua_setfield(lua,-2,"version");
+        lua_pushstring(lua,game==Game::Celeste?"8":"0");lua_setfield(lua,-2,"buildNumber");
+        lua_pushstring(lua,metadata_author);lua_setfield(lua,-2,"author");
         lua_setfield(lua,playdate,"metadata");
 
         lua_newtable(lua);setFunction(-1,"getWidth",cDisplayWidth);setFunction(-1,"getHeight",cDisplayHeight);
@@ -1577,10 +1990,38 @@ struct Runtime::Impl {
     }
 
     esp_err_t start(gfx::Canvas& target_canvas,audio::Audio& target_audio,
-                    storage::Storage& target_storage,Game selected_game) {
+                    storage::Storage& target_storage,Game selected_game,
+                    const char* package_path = nullptr) {
         canvas=&target_canvas;audio=&target_audio;storage=&target_storage;game=selected_game;
         last_error[0]='\0';loaded_modules.fill(false);runtime_stats={};
         allocated_bytes=0;peak_allocated_bytes=0;
+        package_mode=false;package_info={};pdz.close();
+        if (package_path && package_path[0]) {
+            const esp_err_t inspect_error = inspectPackage(package_path, package_info);
+            if (inspect_error != ESP_OK) {
+                setError("PDX", "invalid or incomplete package");
+                return inspect_error;
+            }
+            if (package_info.kind == PackageKind::NativeBinary) {
+                setError("PDX", "pdex.bin is ARM code; ESP32-S3 requires Lua main.pdz");
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            char pdz_path[224]{}, archive_error[128]{};
+            if (!pdxJoinPath(pdz_path, sizeof(pdz_path), package_info.path, "main.pdz")) {
+                setError("PDX", "main.pdz path is too long");
+                return ESP_ERR_INVALID_SIZE;
+            }
+            const esp_err_t archive_result = pdz.open(
+                pdz_path, archive_error, sizeof(archive_error));
+            if (archive_result != ESP_OK) {
+                setError("PDZ", archive_error);
+                return archive_result;
+            }
+            package_mode = true;
+            if (!std::strcmp(package_info.bundle_id, "com.hteumeuleu.celeste") ||
+                std::strstr(package_info.name, "Celeste")) game = Game::Celeste;
+            else game = Game::External;
+        }
         refresh_rate=game==Game::Celeste?30:50;runtime_stats.requested_fps=refresh_rate;
         frame_accumulator_ms=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
@@ -1595,15 +2036,19 @@ struct Runtime::Impl {
         }
         lua_gc(lua, LUA_GCGEN, 20, 100);
         is_running=true;
-        ESP_LOGI(TAG,"PogoDate Lite ready: %s source Lua 5.4, 400x240, logic=%lu FPS LCD cap=30",
-                 game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2",
+        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=30",
+                 package_mode ? package_info.name :
+                    (game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2"),
+                 package_mode ? "SD main.pdz" : "source",
                  static_cast<unsigned long>(refresh_rate));
         return ESP_OK;
     }
 
     void stop() {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
+        if(audio)audio->stopMusicPcm();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
+        pdz.close();package_mode=false;package_info={};
         releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;canvas=nullptr;audio=nullptr;storage=nullptr;
     }
@@ -1644,6 +2089,12 @@ esp_err_t Runtime::start(gfx::Canvas& canvas,audio::Audio& audio,
     if (!impl_) return ESP_ERR_NO_MEM;
     impl_->stop();
     return impl_->start(canvas, audio, storage, game);
+}
+esp_err_t Runtime::startPackage(gfx::Canvas& canvas,audio::Audio& audio,
+                                storage::Storage& storage,const char* pdx_path){
+    if (!impl_) return ESP_ERR_NO_MEM;
+    impl_->stop();
+    return impl_->start(canvas, audio, storage, Game::External, pdx_path);
 }
 void Runtime::stop(){if(impl_)impl_->stop();}
 void Runtime::setInput(uint8_t held_mask,uint8_t pressed_mask){if(!impl_)return;impl_->held_buttons=held_mask;impl_->pressed_buttons=static_cast<uint8_t>(impl_->pressed_buttons|pressed_mask);}

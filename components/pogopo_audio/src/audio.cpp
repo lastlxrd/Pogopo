@@ -60,6 +60,7 @@ esp_err_t Audio::begin(const Config& config) {
     noise_state_ = 0xA5C31E27u;
     silenceVoices();
     clearPcm();
+    clearMusicPcm();
     initSineTable();
 
     realtime_capacity_frames_ = config_.realtime_buffer_frames;
@@ -210,7 +211,8 @@ void Audio::end() {
     if (queue_) {
         Command pending;
         while (xQueueReceive(queue_, &pending, 0) == pdTRUE) {
-            if (pending.type == CommandType::PlayPcm && pending.pcm_samples) {
+            if ((pending.type == CommandType::PlayPcm ||
+                 pending.type == CommandType::PlayMusicPcm) && pending.pcm_samples) {
                 heap_caps_free(pending.pcm_samples);
             }
         }
@@ -224,6 +226,7 @@ void Audio::end() {
 
     silenceVoices();
     clearPcm();
+    clearMusicPcm();
     active_voices_.store(0);
     cleanupI2s();
     cleanupStreamResources();
@@ -284,6 +287,36 @@ bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate
         return false;
     }
     return true;
+}
+
+bool Audio::playMusicPcmOwned(int16_t* samples, uint32_t frames,
+                              uint32_t sample_rate, uint8_t volume, bool loop) {
+    if (!samples || frames == 0 || sample_rate < 8000 || sample_rate > 96000) {
+        if (samples) heap_caps_free(samples);
+        return false;
+    }
+    if (!enabled_.load()) {
+        heap_caps_free(samples);
+        return true;
+    }
+    Command command;
+    command.type = CommandType::PlayMusicPcm;
+    command.volume = std::min<uint8_t>(volume, 100);
+    command.pcm_samples = samples;
+    command.pcm_frames = frames;
+    command.pcm_sample_rate = sample_rate;
+    command.pcm_loop = loop;
+    if (!enqueue(command)) {
+        heap_caps_free(samples);
+        return false;
+    }
+    return true;
+}
+
+void Audio::stopMusicPcm() {
+    Command command;
+    command.type = CommandType::StopMusicPcm;
+    enqueue(command);
 }
 
 void Audio::stopAll() {
@@ -541,6 +574,7 @@ void Audio::task_loop() {
             // four synth voices, WAV streaming and the generic mixer.
             silenceVoices();
             clearPcm();
+            clearMusicPcm();
             active_voices_.store(0);
             for (size_t frame = 0; frame < config_.render_frames; ++frame) {
                 int32_t left = 0;
@@ -558,6 +592,7 @@ void Audio::task_loop() {
                     mono += renderVoice(voice);
                 }
                 mono += renderPcm();
+                mono += renderMusicPcm();
                 mono += renderStream();
 
                 int32_t realtime_left = 0;
@@ -636,9 +671,16 @@ void Audio::processCommands() {
             case CommandType::PlayPcm:
                 startPcm(command);
                 break;
+            case CommandType::PlayMusicPcm:
+                startMusicPcm(command);
+                break;
+            case CommandType::StopMusicPcm:
+                clearMusicPcm();
+                break;
             case CommandType::StopAll:
                 silenceVoices();
                 clearPcm();
+                clearMusicPcm();
                 break;
         }
     }
@@ -726,6 +768,21 @@ void Audio::startPcm(Command& command) {
     command.pcm_samples = nullptr;
 }
 
+void Audio::startMusicPcm(Command& command) {
+    clearMusicPcm();
+    music_pcm_.samples = command.pcm_samples;
+    music_pcm_.frames = command.pcm_frames;
+    music_pcm_.position_q16 = 0;
+    music_pcm_.step_q16 =
+        (static_cast<uint64_t>(command.pcm_sample_rate) << 16U) / config_.sample_rate;
+    music_pcm_.step_q16 = std::max<uint64_t>(1U, music_pcm_.step_q16);
+    music_pcm_.volume = command.volume;
+    music_pcm_.loop = command.pcm_loop;
+    music_pcm_.active = true;
+    music_pcm_active_.store(true);
+    command.pcm_samples = nullptr;
+}
+
 int32_t Audio::renderPcm() {
     if (!pcm_.active || !pcm_.samples || pcm_.frames == 0 || !enabled_.load()) {
         return 0;
@@ -742,6 +799,25 @@ int32_t Audio::renderPcm() {
     if ((pcm_.position_q16 >> 16U) >= pcm_.frames) {
         clearPcm();
     }
+    return sample;
+}
+
+int32_t Audio::renderMusicPcm() {
+    if (!music_pcm_.active || !music_pcm_.samples || music_pcm_.frames == 0 ||
+        !enabled_.load()) return 0;
+    uint32_t index = static_cast<uint32_t>(music_pcm_.position_q16 >> 16U);
+    if (index >= music_pcm_.frames) {
+        if (!music_pcm_.loop) {
+            clearMusicPcm();
+            return 0;
+        }
+        music_pcm_.position_q16 %= static_cast<uint64_t>(music_pcm_.frames) << 16U;
+        index = static_cast<uint32_t>(music_pcm_.position_q16 >> 16U);
+    }
+    const int32_t raw = music_pcm_.samples[index];
+    const int32_t sample = static_cast<int32_t>(
+        (static_cast<int64_t>(raw) * music_pcm_.volume * master_volume_.load()) / 10000LL);
+    music_pcm_.position_q16 += music_pcm_.step_q16;
     return sample;
 }
 
@@ -932,6 +1008,12 @@ void Audio::clearPcm() {
     }
     pcm_ = {};
     pcm_active_.store(false);
+}
+
+void Audio::clearMusicPcm() {
+    if (music_pcm_.samples) heap_caps_free(music_pcm_.samples);
+    music_pcm_ = {};
+    music_pcm_active_.store(false);
 }
 
 void Audio::loadCurrentNote(Voice& voice) {
