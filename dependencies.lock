@@ -73,5 +73,5 @@ direct_dependencies:
 - espressif/bmi270
 - georgik/lua
 manifest_hash: f526d5915c4c3685cccbba0ef4d0e73c0b38ecb719dfcfad296c95694dcdc04f
-target: esp32
+target: esp32s3
 version: 3.0.0

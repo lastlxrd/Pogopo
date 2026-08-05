@@ -40,8 +40,6 @@ file(APPEND "${PDSNAKE_GENERATED}"
     "const EmbeddedSource* pdsnakeSources(size_t& count) {\n"
     "    count = sizeof(sources) / sizeof(sources[0]);\n"
     "    return sources;\n}\n\n} // namespace pogopo::playdate\n")
-set_source_files_properties("${PDSNAKE_GENERATED}" PROPERTIES GENERATED TRUE)
-
 idf_component_register(
     SRCS
         "src/runtime.cpp"
@@ -58,5 +56,6 @@ idf_component_register(
         esp_timer
         heap
 )
+set_source_files_properties("${PDSNAKE_GENERATED}" PROPERTIES GENERATED TRUE)
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
