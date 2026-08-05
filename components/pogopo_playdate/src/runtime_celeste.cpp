@@ -474,6 +474,41 @@ struct Runtime::Impl {
                     static_cast<size_t>(source_y) * image.stride;
                 uint8_t* destination_row = target->pixels +
                     static_cast<size_t>(y + dy) * target->stride;
+
+                // The persistent terrain/cache layers use ordinary Copy mode,
+                // no flip and byte pixels where 0 is transparent.  Handle
+                // four pixels per load: fully transparent groups are skipped
+                // and fully opaque groups become one memcpy.  This removes
+                // the per-pixel flip/draw-mode/inversion branches from the
+                // hottest remaining Celeste renderer path, especially when
+                // the layer pixels live in PSRAM.
+                const bool plain_copy = flip == Unflipped && draw_mode == Copy &&
+                    (target != &screen || !inverted_display);
+                if (plain_copy) {
+                    int dx = start_x;
+                    for (; dx + 4 <= end_x; dx += 4) {
+                        uint32_t group = 0;
+                        std::memcpy(&group, source_row + dx, sizeof(group));
+                        if (group == 0U) continue;
+                        const bool has_clear = ((group - 0x01010101U) &
+                            ~group & 0x80808080U) != 0U;
+                        if (!has_clear) {
+                            std::memcpy(destination_row + x + dx,
+                                        &group, sizeof(group));
+                            continue;
+                        }
+                        for (int index = 0; index < 4; ++index) {
+                            const uint8_t value = source_row[dx + index];
+                            if (value != Clear) destination_row[x + dx + index] = value;
+                        }
+                    }
+                    for (; dx < end_x; ++dx) {
+                        const uint8_t value = source_row[dx];
+                        if (value != Clear) destination_row[x + dx] = value;
+                    }
+                    continue;
+                }
+
                 for (int dx = start_x; dx < end_x; ++dx) {
                     const int source_x = (flip & FlippedX)
                         ? image.width - 1 - dx : dx;
@@ -807,11 +842,45 @@ struct Runtime::Impl {
         return 0;
     }
 
+    void fillRect(int x, int y, int width, int height, uint8_t color) {
+        if (!target || !target->pixels || width <= 0 || height <= 0) return;
+        const int left = std::max({x, clip.x, 0});
+        const int top = std::max({y, clip.y, 0});
+        const int right = std::min({x + width, clip.x + clip.w, target->width});
+        const int bottom = std::min({y + height, clip.y + clip.h, target->height});
+        if (left >= right || top >= bottom) return;
+
+        // Background clears and layer rectangles account for most of
+        // Celeste's filled pixels.  Clip once and write complete byte-pixel
+        // spans instead of calling the generic compositor for every pixel
+        // (the old 400x240 background call performed 96,000 function calls
+        // even though the fullscreen logical target is only 200x120).
+        if (!stencil && draw_mode != Nxor) {
+            uint8_t value = mappedColor(color, left, top);
+            if (value == Clear && target == &screen) return;
+            if (target == &screen && inverted_display && value != Clear) {
+                value = value == Black ? White : Black;
+            }
+            const size_t span = static_cast<size_t>(right - left);
+            for (int row = top; row < bottom; ++row) {
+                std::memset(target->pixels +
+                    static_cast<size_t>(row) * target->stride + left,
+                    value, span);
+            }
+            return;
+        }
+
+        for (int row = top; row < bottom; ++row) {
+            for (int column = left; column < right; ++column) {
+                putLogicalPixel(column, row, color);
+            }
+        }
+    }
+
     static int cFillRect(lua_State* state) {
         Impl* runtime = self(state);
         int x, y, w, h; runtime->readRect(state, 1, x, y, w, h);
-        for (int row = 0; row < h; ++row) for (int column = 0; column < w; ++column)
-            runtime->putLogicalPixel(x + column, y + row, runtime->draw_color);
+        runtime->fillRect(x, y, w, h, runtime->draw_color);
         return 0;
     }
 

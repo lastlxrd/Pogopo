@@ -234,6 +234,49 @@ void Canvas::draw_indexed2_fast(int x, int y, int source_width, int source_heigh
         return;
     }
 
+    // Celeste's fullscreen mode is exactly 200x120 -> 400x240, monochrome,
+    // and covers the complete Sharp panel.  The generic scaler below visits
+    // all 96,000 destination pixels and updates one bit at a time.  Pack four
+    // logical pixels straight into one Sharp byte, then duplicate the finished
+    // row.  Clear and white are both white on the final opaque framebuffer.
+    const bool native_mono_2x = !dither && !invert && x == 0 && y == 0 &&
+        source_width == 200 && source_height == 120 &&
+        destination_width == SharpDisplay::WIDTH &&
+        destination_height == SharpDisplay::HEIGHT &&
+        clip_.x <= 0 && clip_.y <= 0 &&
+        clip_.right() >= SharpDisplay::WIDTH &&
+        clip_.bottom() >= SharpDisplay::HEIGHT;
+    if (native_mono_2x) {
+        static constexpr uint8_t white_pair[4] = {
+            0x03U, 0x03U, 0x00U, 0x00U,
+        };
+        display_.lock();
+        for (int sy = 0; sy < source_height; ++sy) {
+            const uint8_t* source_row = pixels +
+                static_cast<size_t>(sy) * source_width;
+            uint8_t packed[SharpDisplay::BYTES_PER_ROW];
+            for (int group = 0; group < SharpDisplay::BYTES_PER_ROW; ++group) {
+                const uint8_t* source = source_row + group * 4;
+                packed[group] = static_cast<uint8_t>(
+                    white_pair[source[0] & 0x03U] |
+                    (white_pair[source[1] & 0x03U] << 2U) |
+                    (white_pair[source[2] & 0x03U] << 4U) |
+                    (white_pair[source[3] & 0x03U] << 6U));
+            }
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                const int py = sy * 2 + repeat;
+                uint8_t* framebuffer_row = display_.fb_ +
+                    static_cast<size_t>(py) * SharpDisplay::BYTES_PER_ROW;
+                if (std::memcmp(framebuffer_row, packed, sizeof(packed)) != 0) {
+                    std::memcpy(framebuffer_row, packed, sizeof(packed));
+                    display_.mark_dirty_row_unlocked(py);
+                }
+            }
+        }
+        display_.unlock();
+        return;
+    }
+
     static constexpr uint8_t bayer2x2[4] = {0, 2, 3, 1};
     static constexpr uint8_t black_levels[4] = {0, 1, 3, 4};
     uint16_t source_x[SharpDisplay::WIDTH]{};
