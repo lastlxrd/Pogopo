@@ -1108,7 +1108,11 @@ struct Runtime::Impl {
 
     static int cSoundSetVolume(lua_State* state) {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
-        if (sound) sound->volume = static_cast<float>(std::clamp(luaL_checknumber(state, 2), 0.0, 1.0));
+        if (sound) {
+            sound->volume = static_cast<float>(std::clamp<lua_Number>(
+                luaL_checknumber(state, 2), static_cast<lua_Number>(0),
+                static_cast<lua_Number>(1)));
+        }
         return 0;
     }
 
