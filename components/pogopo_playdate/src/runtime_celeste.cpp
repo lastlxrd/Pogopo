@@ -333,8 +333,22 @@ struct Runtime::Impl {
                 setError(entry->name, archive_error);
                 return false;
             }
+            if (!normalizePlaydateLuaBytecode(bytecode, bytecode_size,
+                                              archive_error,
+                                              sizeof(archive_error))) {
+                setError(entry->name, archive_error);
+                heap_caps_free(bytecode);
+                return false;
+            }
             loaded_modules[slot] = true;
+            const int64_t started = esp_timer_get_time();
+            ESP_LOGI(TAG, "PDZ exec begin: %s (%u bytes)", entry->name,
+                     static_cast<unsigned>(bytecode_size));
             const bool ok = loadBytecode(entry->name, bytecode, bytecode_size);
+            const uint32_t elapsed_ms = static_cast<uint32_t>(
+                std::max<int64_t>(0, esp_timer_get_time() - started) / 1000);
+            ESP_LOGI(TAG, "PDZ exec %s: %s in %lu ms", ok ? "ready" : "failed",
+                     entry->name, static_cast<unsigned long>(elapsed_ms));
             heap_caps_free(bytecode);
             if (!ok) loaded_modules[slot] = false;
             return ok;

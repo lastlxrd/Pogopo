@@ -31,13 +31,23 @@ walks records sequentially:
 3. For a compressed record, read a little-endian 32-bit unpacked length and
    inflate the remaining block with zlib.
 4. Type 1 is Lua bytecode; types 2 and 3 are image/image-table records.
-5. `import "Scripts/Game"` looks up that exact record and passes the unpacked
-   bytes to `luaL_loadbufferx(..., "b")`.
+5. `import "Scripts/Game"` looks up that exact record and recursively rewrites
+   Playdate's opcode numbering to stock Lua 5.4 numbering.
+6. The normalized bytes are passed to `luaL_loadbufferx(..., "b")`.
 
 The Celeste bytecode has the normal Lua 5.4 signature and 4-byte instruction,
-integer and number fields. That matches the firmware's `LUA_32BITS` build.
-Malformed lengths, overlong names, missing `main`, path traversal and records
-outside the file are rejected before Lua sees any bytes.
+integer and number fields. That matches the firmware's `LUA_32BITS` build, but
+the header does not describe the opcode table. Playdate uses a tweaked Lua
+5.4.3 runtime and retains the Lua 5.4-beta opcode order for compatibility. Its
+`LOADFALSE`, `LFALSESKIP`, and `LOADTRUE` opcodes are appended after
+`EXTRAARG`, shifting most other opcode numbers down by two. Passing that chunk
+directly to stock Lua loads successfully but executes the wrong instructions.
+The mapping is documented by the community reverse-engineering project:
+<https://github.com/cranksters/playdate-reverse-engineering/blob/main/formats/luac.md>.
+
+Malformed lengths, overlong names, missing `main`, unknown beta opcodes,
+unsupported constant tags, path traversal and records outside the file are
+rejected before Lua executes the chunk.
 
 ## How PDI and PDT become pixels
 

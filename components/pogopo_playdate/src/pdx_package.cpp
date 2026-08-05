@@ -115,6 +115,179 @@ void readPdxInfo(const char* root, PackageInfo& info) {
     std::fclose(file);
 }
 
+class PlaydateBytecodeNormalizer {
+public:
+    PlaydateBytecodeNormalizer(uint8_t* data, size_t size,
+                               char* error, size_t error_capacity)
+        : data_(data), size_(size), error_(error),
+          error_capacity_(error_capacity) {}
+
+    bool run() {
+        if (!data_ || size_ < 24U) return fail("truncated Lua bytecode header");
+        if (std::memcmp(data_, "\x1bLua", 4) != 0 || data_[4] != 0x54U ||
+            data_[5] != 0U) {
+            return fail("unsupported Lua bytecode header");
+        }
+        static constexpr uint8_t kLuacData[6] = {
+            0x19U, 0x93U, 0x0dU, 0x0aU, 0x1aU, 0x0aU,
+        };
+        if (std::memcmp(data_ + 6U, kLuacData, sizeof(kLuacData)) != 0 ||
+            data_[12] != 4U || data_[13] != 4U || data_[14] != 4U) {
+            return fail("PDZ Lua chunk is not 32-bit Lua 5.4");
+        }
+        // LUAC_INT=0x5678 and LUAC_NUM=370.5 also verify byte order and
+        // the float representation before the stock loader sees the chunk.
+        static constexpr uint8_t kIntegerMarker[4] = {0x78U, 0x56U, 0x00U, 0x00U};
+        static constexpr uint8_t kNumberMarker[4] = {0x00U, 0x40U, 0xb9U, 0x43U};
+        if (std::memcmp(data_ + 15U, kIntegerMarker, 4U) != 0 ||
+            std::memcmp(data_ + 19U, kNumberMarker, 4U) != 0) {
+            return fail("PDZ Lua byte order or number format is incompatible");
+        }
+        position_ = 23U;
+        if (!skip(1U) || !patchPrototype(0U)) return false;
+        if (position_ != size_) return fail("unexpected trailing Lua bytecode data");
+        return true;
+    }
+
+private:
+    static constexpr size_t kMaximumPrototypeDepth = 64U;
+
+    bool fail(const char* message) {
+        setError(error_, error_capacity_, message);
+        return false;
+    }
+
+    bool skip(size_t count) {
+        if (count > size_ - position_) return fail("truncated Lua bytecode");
+        position_ += count;
+        return true;
+    }
+
+    bool readByte(uint8_t& value) {
+        if (position_ >= size_) return fail("truncated Lua bytecode");
+        value = data_[position_++];
+        return true;
+    }
+
+    bool readVariable(size_t& value) {
+        value = 0U;
+        for (size_t bytes = 0; bytes < 10U; ++bytes) {
+            uint8_t current = 0;
+            if (!readByte(current)) return false;
+            if (value > (SIZE_MAX >> 7U)) return fail("oversized Lua bytecode integer");
+            value = (value << 7U) | static_cast<size_t>(current & 0x7fU);
+            if ((current & 0x80U) != 0U) return true;
+        }
+        return fail("invalid Lua bytecode integer");
+    }
+
+    bool skipString() {
+        size_t encoded_size = 0;
+        if (!readVariable(encoded_size)) return false;
+        if (encoded_size == 0U) return true;
+        return skip(encoded_size - 1U);
+    }
+
+    bool skipConstants() {
+        size_t count = 0;
+        if (!readVariable(count)) return false;
+        for (size_t index = 0; index < count; ++index) {
+            uint8_t tag = 0;
+            if (!readByte(tag)) return false;
+            switch (tag) {
+                case 0U:   // nil
+                case 1U:   // false
+                case 17U:  // true
+                    break;
+                case 3U:   // float
+                case 19U:  // integer
+                    if (!skip(4U)) return false;
+                    break;
+                case 4U:   // short string
+                case 20U:  // long string
+                    if (!skipString()) return false;
+                    break;
+                default:
+                    return fail("unsupported Playdate Lua constant type");
+            }
+        }
+        return true;
+    }
+
+    bool patchCode() {
+        size_t count = 0;
+        if (!readVariable(count)) return false;
+        if (count > (size_ - position_) / 4U) return fail("truncated Lua instruction array");
+        for (size_t index = 0; index < count; ++index) {
+            uint8_t* instruction = data_ + position_ + index * 4U;
+            const uint8_t playdate_opcode = instruction[0] & 0x7fU;
+            uint8_t lua_opcode = 0;
+            if (playdate_opcode <= 4U) {
+                lua_opcode = playdate_opcode;
+            } else if (playdate_opcode >= 6U && playdate_opcode <= 80U) {
+                lua_opcode = static_cast<uint8_t>(playdate_opcode + 2U);
+            } else if (playdate_opcode >= 81U && playdate_opcode <= 83U) {
+                lua_opcode = static_cast<uint8_t>(playdate_opcode - 76U);
+            } else {
+                // Opcode 5 was retained only as an unknown beta instruction.
+                // Executing it as stock OP_LOADFALSE would silently corrupt
+                // control flow, so reject such an old/unsupported package.
+                return fail("unsupported Playdate Lua beta opcode");
+            }
+            instruction[0] = static_cast<uint8_t>(
+                (instruction[0] & 0x80U) | lua_opcode);
+        }
+        position_ += count * 4U;
+        return true;
+    }
+
+    bool patchPrototype(size_t depth) {
+        if (depth > kMaximumPrototypeDepth) return fail("Lua prototype nesting is too deep");
+        size_t ignored = 0;
+        if (!skipString() || !readVariable(ignored) || !readVariable(ignored) ||
+            !skip(3U) || !patchCode() || !skipConstants()) {
+            return false;
+        }
+
+        size_t count = 0;
+        if (!readVariable(count) || count > (size_ - position_) / 3U ||
+            !skip(count * 3U)) {
+            return false;
+        }
+        if (!readVariable(count)) return false;
+        for (size_t index = 0; index < count; ++index) {
+            if (!patchPrototype(depth + 1U)) return false;
+        }
+
+        // Debug data: per-instruction signed line deltas, absolute line pairs,
+        // local-variable ranges, and upvalue names.
+        if (!readVariable(count) || count > size_ - position_ || !skip(count)) {
+            return false;
+        }
+        if (!readVariable(count)) return false;
+        for (size_t index = 0; index < count; ++index) {
+            if (!readVariable(ignored) || !readVariable(ignored)) return false;
+        }
+        if (!readVariable(count)) return false;
+        for (size_t index = 0; index < count; ++index) {
+            if (!skipString() || !readVariable(ignored) || !readVariable(ignored)) {
+                return false;
+            }
+        }
+        if (!readVariable(count)) return false;
+        for (size_t index = 0; index < count; ++index) {
+            if (!skipString()) return false;
+        }
+        return true;
+    }
+
+    uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+    size_t position_ = 0;
+    char* error_ = nullptr;
+    size_t error_capacity_ = 0;
+};
+
 } // namespace
 
 bool pdxJoinPath(char* out, size_t capacity, const char* root,
@@ -126,6 +299,12 @@ bool pdxJoinPath(char* out, size_t capacity, const char* root,
                                     slash ? "/" : "", relative,
                                     extension ? extension : "");
     return count > 0 && static_cast<size_t>(count) < capacity;
+}
+
+bool normalizePlaydateLuaBytecode(uint8_t* data, size_t size,
+                                  char* error, size_t error_capacity) {
+    PlaydateBytecodeNormalizer normalizer(data, size, error, error_capacity);
+    return normalizer.run();
 }
 
 esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity) {

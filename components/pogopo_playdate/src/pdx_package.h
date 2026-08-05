@@ -42,4 +42,10 @@ private:
 bool pdxJoinPath(char* out, size_t capacity, const char* root,
                  const char* relative, const char* extension = nullptr);
 
+// Playdate keeps the Lua 5.4-beta opcode order for package compatibility.
+// Rewrites every instruction in a mutable 32-bit Playdate Lua chunk to the
+// stock Lua 5.4 opcode order used by the ESP-IDF component.
+bool normalizePlaydateLuaBytecode(uint8_t* data, size_t size,
+                                  char* error, size_t error_capacity);
+
 } // namespace pogopo::playdate
