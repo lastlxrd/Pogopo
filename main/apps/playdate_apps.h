@@ -9,8 +9,11 @@ namespace pogopo::demo {
 
 class PogoDateApp final : public Application {
 public:
-    const char* id() const override { return "pogodate"; }
-    const char* title() const override { return "PogoDate"; }
+    PogoDateApp(playdate::Game game, const char* app_id,
+                const char* app_title, const char* game_title);
+
+    const char* id() const override { return app_id_; }
+    const char* title() const override { return app_title_; }
 
     void onEnter(AppContext& context) override;
     void onExit(AppContext& context) override;
@@ -24,6 +27,10 @@ private:
     void drawLoading(AppContext& context);
 
     playdate::Runtime runtime_{};
+    playdate::Game game_ = playdate::Game::PDSnake;
+    const char* app_id_ = "pogodate";
+    const char* app_title_ = "PogoDate";
+    const char* game_title_ = "PDSNAKE 1.2";
     esp_err_t start_error_ = ESP_ERR_INVALID_STATE;
     input::ButtonMask queued_pressed_ = 0;
     uint32_t lcd_accumulator_ms_ = 0;

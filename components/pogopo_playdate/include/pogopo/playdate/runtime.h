@@ -10,6 +10,11 @@
 
 namespace pogopo::playdate {
 
+enum class Game : uint8_t {
+    PDSnake,
+    Celeste,
+};
+
 struct Stats {
     uint32_t lua_frames = 0;
     uint32_t last_update_us = 0;
@@ -29,7 +34,8 @@ public:
     Runtime& operator=(const Runtime&) = delete;
 
     esp_err_t start(gfx::Canvas& canvas, audio::Audio& audio,
-                    storage::Storage& storage);
+                    storage::Storage& storage,
+                    Game game = Game::PDSnake);
     void stop();
 
     void setInput(uint8_t held_mask, uint8_t pressed_mask);

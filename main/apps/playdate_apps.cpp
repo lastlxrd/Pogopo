@@ -12,6 +12,11 @@ constexpr char TAG[] = "pogodate_app";
 constexpr uint32_t LCD_FRAME_MS = 33;
 }
 
+PogoDateApp::PogoDateApp(playdate::Game game, const char* app_id,
+                         const char* app_title, const char* game_title)
+    : game_(game), app_id_(app_id), app_title_(app_title),
+      game_title_(game_title) {}
+
 void PogoDateApp::drawLoading(AppContext& context) {
     auto& canvas = context.gfx.canvas();
     context.gfx.reset_clip();
@@ -20,11 +25,13 @@ void PogoDateApp::drawLoading(AppContext& context) {
     canvas.draw_rect(24, 49, 352, 139, context.theme.border);
     canvas.draw_text(43, 70, "PLAYDATE LUA COMPATIBILITY TEST",
                      gfx::font5x7(), context.theme.foreground);
-    canvas.draw_text(43, 99, "GAME: PDSNAKE 1.2",
+    char game_line[80]{};
+    std::snprintf(game_line, sizeof(game_line), "GAME: %s", game_title_);
+    canvas.draw_text(43, 99, game_line,
                      gfx::font5x7(), context.theme.foreground, 2);
     canvas.draw_text(43, 134, "LUA 5.4 + NATIVE POGOPO API",
                      gfx::font5x7(), context.theme.foreground);
-    canvas.draw_text(43, 157, "400 x 240 / 1-BIT / NO SCALING",
+    canvas.draw_text(43, 157, "400 x 240 / 1-BIT NATIVE",
                      gfx::font5x7(), context.theme.foreground);
     gui::draw_footer(canvas, context.theme, "PLEASE WAIT", "SOURCE LUA");
     context.gfx.presentFull();
@@ -43,10 +50,11 @@ void PogoDateApp::onEnter(AppContext& context) {
     context.audio.stopRealtime();
     drawLoading(context);
     start_error_ = runtime_.start(context.gfx.canvas(), context.audio,
-                                  context.storage);
+                                  context.storage, game_);
     if (start_error_ == ESP_OK) {
         context.haptics.play(haptics::Effect::Confirm);
-        ESP_LOGI(TAG, "PDSnake started from original Lua sources");
+        ESP_LOGI(TAG, "%s started from original Playdate Lua sources",
+                 game_title_);
     } else {
         context.haptics.play(haptics::Effect::Alert);
         context.uiSound(audio::Effect::Error);
@@ -116,10 +124,10 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
             lcd_frames_ - previous_lcd_frames_;
         ESP_LOGI(
             TAG,
-            "PERF PD lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
+            "PERF PD %s lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
             "luaheap=%lu peak=%lu gc=%lu err=%lu RAM=%lu/%lu PSRAM=%lu "
             "i2cerr=%lu",
-            static_cast<unsigned long>(lua_delta),
+            game_title_, static_cast<unsigned long>(lua_delta),
             static_cast<unsigned long>(lcd_delta),
             static_cast<unsigned long>(stats.requested_fps),
             static_cast<unsigned long>(stats.last_update_us),
@@ -152,7 +160,10 @@ void PogoDateApp::draw(AppContext& context, const gfx::Rect&) {
     canvas.clear_clip(context.theme.background);
     gui::draw_header(canvas, context.theme, "POGODATE LITE", "LUA ERROR");
     canvas.draw_rect(22, 47, 356, 150, context.theme.border);
-    canvas.draw_text(39, 67, "PDSNAKE COULD NOT CONTINUE",
+    char failure[96]{};
+    std::snprintf(failure, sizeof(failure), "%s COULD NOT CONTINUE",
+                  game_title_);
+    canvas.draw_text(39, 67, failure,
                      gfx::font5x7(), context.theme.foreground, 2);
     char status[96]{};
     std::snprintf(status, sizeof(status), "%s", runtime_.error());
