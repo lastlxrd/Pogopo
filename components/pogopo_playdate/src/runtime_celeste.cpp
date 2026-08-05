@@ -1599,18 +1599,80 @@ struct Runtime::Impl {
         return 1;
     }
 
+    static uint8_t checkButtonMask(lua_State* state, int index) {
+        if (lua_type(state, index) == LUA_TNUMBER) {
+            // Preserve the documented Playdate bit-mask API.  Combined masks
+            // are valid, so numeric values must not be interpreted as PICO-8
+            // button indices.
+            return static_cast<uint8_t>(luaL_checkinteger(state, index));
+        }
+
+        if (lua_type(state, index) != LUA_TSTRING) {
+            luaL_typeerror(state, index, "button mask or name");
+            return 0;
+        }
+
+        const char* name = lua_tostring(state, index);
+        char normalized[32]{};
+        size_t length = 0;
+        for (const char* cursor = name; *cursor && length + 1 < sizeof(normalized);
+             ++cursor) {
+            char value = *cursor;
+            if (value >= 'A' && value <= 'Z') value = static_cast<char>(value + ('a' - 'A'));
+            if ((value >= 'a' && value <= 'z') || (value >= '0' && value <= '9')) {
+                normalized[length++] = value;
+            }
+        }
+
+        const char* token = normalized;
+        if (!std::strncmp(token, "playdate", 8)) token += 8;
+        if (!std::strncmp(token, "kbutton", 7)) token += 7;
+        else if (!std::strncmp(token, "button", 6)) token += 6;
+        if (!std::strncmp(token, "dpad", 4)) token += 4;
+
+        if (!std::strcmp(token, "left")) return 0x04;
+        if (!std::strcmp(token, "right")) return 0x08;
+        if (!std::strcmp(token, "up") || !std::strcmp(token, "top")) return 0x01;
+        if (!std::strcmp(token, "down")) return 0x02;
+        if (!std::strcmp(token, "a")) return 0x20;
+        if (!std::strcmp(token, "b")) return 0x10;
+
+        luaL_argerror(state, index,
+                      "unknown button name (expected left/right/up/down/a/b)");
+        return 0;
+    }
+
     static int cButtonJustPressed(lua_State* state) {
         Impl* runtime = self(state);
-        const uint8_t button = static_cast<uint8_t>(luaL_checkinteger(state, 1));
+        const uint8_t button = checkButtonMask(state, 1);
         lua_pushboolean(state, (runtime->pressed_buttons & button) != 0);
         return 1;
     }
 
     static int cButtonIsPressed(lua_State* state) {
         Impl* runtime = self(state);
-        const uint8_t button = static_cast<uint8_t>(luaL_checkinteger(state, 1));
+        const uint8_t button = checkButtonMask(state, 1);
         lua_pushboolean(state, (runtime->held_buttons & button) != 0);
         return 1;
+    }
+
+    static int cButtonJustReleased(lua_State* state) {
+        Impl* runtime = self(state);
+        const uint8_t button = checkButtonMask(state, 1);
+        const uint8_t released = static_cast<uint8_t>(
+            runtime->previous_held_buttons & ~runtime->held_buttons);
+        lua_pushboolean(state, (released & button) != 0);
+        return 1;
+    }
+
+    static int cGetButtonState(lua_State* state) {
+        Impl* runtime = self(state);
+        const uint8_t released = static_cast<uint8_t>(
+            runtime->previous_held_buttons & ~runtime->held_buttons);
+        lua_pushinteger(state, runtime->held_buttons);
+        lua_pushinteger(state, runtime->pressed_buttons);
+        lua_pushinteger(state, released);
+        return 3;
     }
 
     static int cGetSecondsSinceEpoch(lua_State* state) {
@@ -2633,6 +2695,7 @@ struct Runtime::Impl {
         setFunction(playdate,"getCurrentTimeMilliseconds",cGetCurrentTime);
         setFunction(playdate,"getFPS",cGetRefreshRate);
         setFunction(playdate,"buttonJustPressed",cButtonJustPressed);setFunction(playdate,"buttonIsPressed",cButtonIsPressed);
+        setFunction(playdate,"buttonJustReleased",cButtonJustReleased);setFunction(playdate,"getButtonState",cGetButtonState);
         setFunction(playdate,"getSystemMenu",cGetSystemMenu);setFunction(playdate,"setMenuImage",cSetMenuImage);
         setFunction(playdate,"drawFPS",cDrawFps);setFunction(playdate,"getSecondsSinceEpoch",cGetSecondsSinceEpoch);
         setFunction(playdate,"getTime",cGetTime);setFunction(playdate,"epochFromTime",cEpochFromTime);
