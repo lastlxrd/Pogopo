@@ -199,14 +199,15 @@ void handle_power_event(const pogopo::power::Event& event) {
     vTaskDelay(pdMS_TO_TICKS(120));
     g_audio.stopAll();
 
-    // A Memory LCD keeps its pixels without power. Clear both the software
-    // framebuffer and the physical panel before BATFET is disabled so the
-    // previous POWER OFF card cannot reappear during the next boot.
-    g_gfx.display().clear(pogopo::gfx::WHITE);
-    const esp_err_t lcd_clear_error = g_gfx.display().clear_lcd_hw();
-    if (lcd_clear_error != ESP_OK) {
-        ESP_LOGW(TAG, "LCD pre-shutdown clear failed: %s",
-                 esp_err_to_name(lcd_clear_error));
+    // A Memory LCD keeps its last image without pixel-refresh power. Replace
+    // the POWER OFF card with a real full-screen black frame before BATFET is
+    // disabled. Do not use clear_lcd_hw() here: the panel's hardware CLEAR
+    // command is defined by Sharp as all-white.
+    g_gfx.display().clear(pogopo::gfx::BLACK);
+    const esp_err_t lcd_black_error = g_gfx.display().refresh_full();
+    if (lcd_black_error != ESP_OK) {
+        ESP_LOGW(TAG, "LCD pre-shutdown black frame failed: %s",
+                 esp_err_to_name(lcd_black_error));
     }
 
     const esp_err_t err = g_power.enterShipMode();
@@ -382,7 +383,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP9.6.1 launcher ready after startup");
+    ESP_LOGI(TAG, "STEP9.6.2 launcher ready after startup");
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -426,7 +427,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6.1 STARTUP LINK FIX");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6.2 BLACK POWER-OFF SCREEN");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -457,5 +458,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.6.1 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP9.6.2 system tasks started: startup animation pending");
 }
