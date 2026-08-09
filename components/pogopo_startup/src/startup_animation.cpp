@@ -5,9 +5,9 @@
 #include "pogopo/gfx/graphics.h"
 
 extern const uint8_t startup_frames_start[]
-    asm("_binary_assets_startup_frames_bin_start");
+    asm("_binary_startup_frames_bin_start");
 extern const uint8_t startup_frames_end[]
-    asm("_binary_assets_startup_frames_bin_end");
+    asm("_binary_startup_frames_bin_end");
 
 namespace pogopo::startup {
 

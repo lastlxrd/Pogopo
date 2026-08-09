@@ -382,7 +382,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP9.6 launcher ready after startup");
+    ESP_LOGI(TAG, "STEP9.6.1 launcher ready after startup");
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -426,7 +426,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6 SHARPBIT STARTUP ANIMATION");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6.1 STARTUP LINK FIX");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -457,5 +457,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.6 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP9.6.1 system tasks started: startup animation pending");
 }
