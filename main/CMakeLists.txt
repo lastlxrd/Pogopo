@@ -21,9 +21,9 @@ idf_component_register(
         pogopo_gameboy
         pogopo_gui
         pogopo_app
+        pogopo_startup
         esp_timer
         esp_system
         spi_flash
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-

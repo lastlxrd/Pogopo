@@ -309,6 +309,17 @@ void SharpDisplay::clear(Color color) {
     unlock();
 }
 
+esp_err_t SharpDisplay::load_framebuffer(const uint8_t* data, size_t size) {
+    if (!initialized_ || !fb_) return ESP_ERR_INVALID_STATE;
+    if (!data || size != FRAMEBUFFER_SIZE) return ESP_ERR_INVALID_SIZE;
+
+    lock();
+    std::memcpy(fb_, data, FRAMEBUFFER_SIZE);
+    std::fill(std::begin(dirty_), std::end(dirty_), true);
+    unlock();
+    return ESP_OK;
+}
+
 void SharpDisplay::draw_pixel(int x, int y, Color color) {
     lock();
     set_pixel_unlocked(x, y, color);

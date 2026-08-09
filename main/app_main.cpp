@@ -17,6 +17,7 @@
 #include "pogopo_power.h"
 #include "pogopo_settings.h"
 #include "pogopo_gameboy.h"
+#include "pogopo_startup.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -231,6 +232,134 @@ esp_err_t start_input() {
     return g_input.begin(config);
 }
 
+void discard_startup_input() {
+    pogopo::input::Event event;
+    while (g_input.nextEvent(event, 0)) {}
+    g_input.consumePressedMask();
+    g_input.consumeReleasedMask();
+    g_input.consumeRepeatMask();
+    g_input.consumeLongPressMask();
+}
+
+bool wait_startup_frame(TickType_t& next_frame,
+                        bool allow_dismiss,
+                        bool& input_armed,
+                        bool& power_armed,
+                        const char*& dismissed_by) {
+    next_frame += pdMS_TO_TICKS(pogopo::StartupAnimation::FRAME_PERIOD_MS);
+
+    while (true) {
+        pogopo::input::Event input_event;
+        while (g_input.nextEvent(input_event, 0)) {
+            if (!allow_dismiss) continue;
+
+            if (!input_armed) {
+                if (g_input.heldMask() == 0) input_armed = true;
+                continue;
+            }
+            if (input_event.type == pogopo::input::EventType::Pressed) {
+                dismissed_by = pogopo::input::button_name(input_event.button);
+                return true;
+            }
+        }
+
+        if (allow_dismiss && !input_armed && g_input.heldMask() == 0) {
+            input_armed = true;
+        }
+
+        pogopo::power::Event power_event;
+        while (g_power.nextEvent(power_event, 0)) {
+            if (power_event.type == pogopo::power::EventType::ShortPress) {
+                if (allow_dismiss && power_armed) {
+                    dismissed_by = "POWER";
+                    return true;
+                }
+                continue;
+            }
+
+            handle_power_event(power_event);
+            // USB-blocked handling can wait for release and draw its own card.
+            // Restart the animation deadline instead of racing through frames.
+            next_frame = xTaskGetTickCount() +
+                         pdMS_TO_TICKS(pogopo::StartupAnimation::FRAME_PERIOD_MS);
+        }
+
+        if (allow_dismiss && !power_armed && !g_power.buttonDown()) {
+            power_armed = true;
+        }
+
+        const TickType_t now = xTaskGetTickCount();
+        const int32_t ticks_left = static_cast<int32_t>(next_frame - now);
+        if (ticks_left <= 0) {
+            // Never burst through several frames to catch up after a delayed
+            // LCD transfer or a blocking power/USB notification.
+            next_frame = now;
+            return false;
+        }
+
+        const TickType_t poll_ticks = pdMS_TO_TICKS(4);
+        vTaskDelay(std::min<TickType_t>(static_cast<TickType_t>(ticks_left),
+                                       std::max<TickType_t>(poll_ticks, 1)));
+    }
+}
+
+void play_startup_animation() {
+    const pogopo::StartupAnimation animation;
+    if (!animation.valid()) {
+        ESP_LOGE(TAG, "Startup asset size mismatch: %u bytes, expected %u",
+                 static_cast<unsigned>(animation.embeddedSize()),
+                 static_cast<unsigned>(pogopo::StartupAnimation::FRAME_COUNT *
+                                       pogopo::StartupAnimation::FRAME_SIZE));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Startup animation: %u frames at 10 FPS, loop=%u..%u",
+             static_cast<unsigned>(pogopo::StartupAnimation::FRAME_COUNT),
+             static_cast<unsigned>(pogopo::StartupAnimation::LOOP_START + 1),
+             static_cast<unsigned>(pogopo::StartupAnimation::FRAME_COUNT));
+
+    TickType_t next_frame = xTaskGetTickCount();
+    bool input_armed = false;
+    bool power_armed = false;
+    const char* dismissed_by = nullptr;
+
+    // Play the non-looping intro once. Inputs during this part are deliberately
+    // drained so an old boot press cannot skip the final waiting animation.
+    for (size_t frame = 0; frame < pogopo::StartupAnimation::LOOP_START; ++frame) {
+        const esp_err_t error = animation.show(g_gfx, frame);
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "Startup frame %u failed: %s",
+                     static_cast<unsigned>(frame + 1), esp_err_to_name(error));
+            return;
+        }
+        wait_startup_frame(next_frame, false, input_armed, power_armed, dismissed_by);
+    }
+
+    discard_startup_input();
+    input_armed = g_input.heldMask() == 0;
+    power_armed = !g_power.buttonDown();
+
+    // Frames 107..111 form the idle tail and repeat until a fresh button press.
+    size_t frame = pogopo::StartupAnimation::LOOP_START;
+    while (true) {
+        const esp_err_t error = animation.show(g_gfx, frame);
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "Startup loop frame %u failed: %s",
+                     static_cast<unsigned>(frame + 1), esp_err_to_name(error));
+            return;
+        }
+        if (wait_startup_frame(next_frame, true, input_armed, power_armed, dismissed_by)) {
+            discard_startup_input();
+            ESP_LOGI(TAG, "Startup dismissed by %s", dismissed_by ? dismissed_by : "BUTTON");
+            return;
+        }
+        ++frame;
+        if (frame >= pogopo::StartupAnimation::FRAME_COUNT) {
+            frame = pogopo::StartupAnimation::LOOP_START;
+        }
+    }
+}
+
 void os_task(void*) {
     int64_t last_us = esp_timer_get_time();
     TickType_t wake = xTaskGetTickCount();
@@ -248,9 +377,12 @@ void os_task(void*) {
     g_app_manager.registerApp(g_power_app);
     g_app_manager.registerApp(g_settings_app);
     g_app_manager.registerApp(g_about_app);
+
+    play_startup_animation();
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
+    ESP_LOGI(TAG, "STEP9.6 launcher ready after startup");
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -294,7 +426,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.5.1 POWER MENU / UI POLISH");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6 SHARPBIT STARTUP ANIMATION");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -325,5 +457,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.5.1 ready: stable GB, quick menu, clean LCD shutdown");
+    ESP_LOGI(TAG, "STEP9.6 system tasks started: startup animation pending");
 }

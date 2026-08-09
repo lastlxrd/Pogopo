@@ -1,6 +1,6 @@
 # Pogopo
 
-*Pogopo and PogopoOS are still in the early stages of development.*
+*Both Pogopo and PogopoOS are still in the early stages of development.*
 
 [@lastlxrd](https://github.com/lastlxrd) 2026
 
