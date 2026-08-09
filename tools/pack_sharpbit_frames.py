@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("generated_dir", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--prefix", default="pogopo_scenee")
-    parser.add_argument("--frames", type=int, default=111)
+    parser.add_argument("--frames", type=int, default=122)
     parser.add_argument("--width", type=int, default=400)
     parser.add_argument("--height", type=int, default=240)
     args = parser.parse_args()

@@ -17,7 +17,7 @@ public:
     static constexpr int HEIGHT = 240;
     static constexpr int STRIDE = WIDTH / 8;
     static constexpr size_t FRAME_SIZE = STRIDE * HEIGHT;
-    static constexpr size_t FRAME_COUNT = 111;
+    static constexpr size_t FRAME_COUNT = 122;
     static constexpr size_t LOOP_FRAME_COUNT = 5;
     static constexpr size_t LOOP_START = FRAME_COUNT - LOOP_FRAME_COUNT;
     static constexpr uint32_t FRAME_PERIOD_MS = 100;
