@@ -17,9 +17,12 @@ public:
     static constexpr int HEIGHT = 240;
     static constexpr int STRIDE = WIDTH / 8;
     static constexpr size_t FRAME_SIZE = STRIDE * HEIGHT;
-    static constexpr size_t FRAME_COUNT = 122;
-    static constexpr size_t LOOP_FRAME_COUNT = 5;
-    static constexpr size_t LOOP_START = FRAME_COUNT - LOOP_FRAME_COUNT;
+    static constexpr size_t FRAME_COUNT = 25;
+    // Human frames 12..15 are the interactive idle loop. After a fresh button
+    // press, playback resumes at human frame 16 and runs through frame 25.
+    static constexpr size_t LOOP_START = 11;
+    static constexpr size_t LOOP_END = 15; // Exclusive, so the last loop frame is 15.
+    static constexpr size_t RESUME_START = LOOP_END;
     static constexpr uint32_t FRAME_PERIOD_MS = 100;
 
     bool valid() const;

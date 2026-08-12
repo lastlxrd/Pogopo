@@ -313,9 +313,11 @@ void play_startup_animation() {
         return;
     }
 
-    ESP_LOGI(TAG, "Startup animation: %u frames at 10 FPS, loop=%u..%u",
+    ESP_LOGI(TAG, "Startup animation: %u frames at 10 FPS, loop=%u..%u, outro=%u..%u",
              static_cast<unsigned>(pogopo::StartupAnimation::FRAME_COUNT),
              static_cast<unsigned>(pogopo::StartupAnimation::LOOP_START + 1),
+             static_cast<unsigned>(pogopo::StartupAnimation::LOOP_END),
+             static_cast<unsigned>(pogopo::StartupAnimation::RESUME_START + 1),
              static_cast<unsigned>(pogopo::StartupAnimation::FRAME_COUNT));
 
     TickType_t next_frame = xTaskGetTickCount();
@@ -323,8 +325,8 @@ void play_startup_animation() {
     bool power_armed = false;
     const char* dismissed_by = nullptr;
 
-    // Play the non-looping intro once. Inputs during this part are deliberately
-    // drained so an old boot press cannot skip the final waiting animation.
+    // Play frames 1..11 once. Inputs during this part are deliberately drained
+    // so an old boot press cannot skip the interactive waiting animation.
     for (size_t frame = 0; frame < pogopo::StartupAnimation::LOOP_START; ++frame) {
         const esp_err_t error = animation.show(g_gfx, frame);
         if (error != ESP_OK) {
@@ -339,7 +341,8 @@ void play_startup_animation() {
     input_armed = g_input.heldMask() == 0;
     power_armed = !g_power.buttonDown();
 
-    // Frames 118..122 form the idle tail and repeat until a fresh button press.
+    // Frames 12..15 form the interactive idle loop. A fresh press exits only
+    // this loop; the remaining outro still has to finish before the launcher.
     size_t frame = pogopo::StartupAnimation::LOOP_START;
     while (true) {
         const esp_err_t error = animation.show(g_gfx, frame);
@@ -350,14 +353,35 @@ void play_startup_animation() {
         }
         if (wait_startup_frame(next_frame, true, input_armed, power_armed, dismissed_by)) {
             discard_startup_input();
-            ESP_LOGI(TAG, "Startup dismissed by %s", dismissed_by ? dismissed_by : "BUTTON");
-            return;
+            ESP_LOGI(TAG, "Startup continued by %s",
+                     dismissed_by ? dismissed_by : "BUTTON");
+            break;
         }
         ++frame;
-        if (frame >= pogopo::StartupAnimation::FRAME_COUNT) {
+        if (frame >= pogopo::StartupAnimation::LOOP_END) {
             frame = pogopo::StartupAnimation::LOOP_START;
         }
     }
+
+    // Start a fresh deadline so an early press in a loop frame cannot shorten
+    // frame 16. Frames 16..25 then play exactly once before the menu appears.
+    next_frame = xTaskGetTickCount();
+    for (frame = pogopo::StartupAnimation::RESUME_START;
+         frame < pogopo::StartupAnimation::FRAME_COUNT;
+         ++frame) {
+        const esp_err_t error = animation.show(g_gfx, frame);
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "Startup outro frame %u failed: %s",
+                     static_cast<unsigned>(frame + 1), esp_err_to_name(error));
+            return;
+        }
+        wait_startup_frame(next_frame, false, input_armed, power_armed, dismissed_by);
+    }
+
+    // Do not leak the continue press or any presses made during the outro into
+    // the launcher that is about to become active.
+    discard_startup_input();
+    ESP_LOGI(TAG, "Startup outro complete");
 }
 
 void os_task(void*) {
@@ -382,7 +406,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP9.6.3 launcher ready after startup");
+    ESP_LOGI(TAG, "STEP12.4 launcher ready after startup");
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -426,7 +450,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP9.6.3 NEW STARTUP + WHITE SHUTDOWN");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP12.4 INTERACTIVE STARTUP");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -457,5 +481,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP9.6.3 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP12.4 system tasks started: startup animation pending");
 }

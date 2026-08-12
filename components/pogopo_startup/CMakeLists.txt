@@ -10,9 +10,9 @@ idf_component_register(
 )
 
 file(SIZE "${CMAKE_CURRENT_LIST_DIR}/startup_frames.bin" STARTUP_FRAMES_SIZE)
-if(NOT STARTUP_FRAMES_SIZE EQUAL 1464000)
+if(NOT STARTUP_FRAMES_SIZE EQUAL 300000)
     message(FATAL_ERROR
-        "pogopo startup_frames.bin is ${STARTUP_FRAMES_SIZE} bytes; expected 1464000")
+        "pogopo startup_frames.bin is ${STARTUP_FRAMES_SIZE} bytes; expected 300000")
 endif()
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

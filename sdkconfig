@@ -960,11 +960,17 @@ CONFIG_ESPTOOLPY_MONITOR_BAUD=115200
 #
 # Partition Table
 #
+# default:
 # CONFIG_PARTITION_TABLE_SINGLE_APP is not set
+# default:
 # CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE is not set
+# default:
 # CONFIG_PARTITION_TABLE_TWO_OTA is not set
+# default:
 # CONFIG_PARTITION_TABLE_TWO_OTA_LARGE is not set
+# default:
 CONFIG_PARTITION_TABLE_CUSTOM=y
+# default:
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # default:
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"

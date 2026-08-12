@@ -1,15 +1,14 @@
 # Startup animation asset
 
-`../startup_frames.bin` contains 122 full-screen 400 x 240 monochrome frames.
+`../startup_frames.bin` contains 25 full-screen 400 x 240 monochrome frames.
 Each frame is 12,000 bytes in the Sharp display's native LSB-first, white=1
 framebuffer format.
 
-It was packed from SharpBit assets named `pogopo_scenee1` through
-`pogopo_scenee122` with:
+It was packed from the monolithic SharpBit export `pogopointro.c` with:
 
 ```powershell
-python tools\pack_sharpbit_frames.py `
-  path\to\output\generated `
+python tools\pack_sharpbit_animation.py `
+  path\to\pogopointro.c `
   components\pogopo_startup\startup_frames.bin
 ```
 
