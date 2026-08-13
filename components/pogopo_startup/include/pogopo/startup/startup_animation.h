@@ -37,8 +37,10 @@ public:
     static constexpr int STRIDE = StartupAnimation::STRIDE;
     static constexpr size_t FRAME_SIZE = StartupAnimation::FRAME_SIZE;
     static constexpr size_t FRAME_DATA_SIZE = FRAME_SIZE * 2;
-    static constexpr size_t FRAME_COUNT = 25;
-    static constexpr size_t SLOW_LAST_FRAME = 12; // Human frame 13.
+    // Source frame 1 was an unwanted full-white flash. Packed frame 1 is the
+    // supplied Aseprite frame 2; packed frame 12 is supplied frame 13.
+    static constexpr size_t FRAME_COUNT = 24;
+    static constexpr size_t SLOW_LAST_FRAME = 11; // Source human frame 13.
     static constexpr uint32_t SLOW_FRAME_PERIOD_MS = 100; // 10 FPS.
     static constexpr uint32_t FAST_FRAME_PERIOD_MS = 67;  // About 15 FPS.
 

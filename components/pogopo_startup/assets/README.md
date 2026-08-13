@@ -4,7 +4,8 @@
 Every frame is 12,000 bytes in the Sharp display's native LSB-first, white=1
 framebuffer format.
 
-`../outro_frames.bin` contains 25 transparent overlays. Each 24,000-byte frame
+`../outro_frames.bin` contains 24 transparent overlays. Source frame 1 is
+omitted because it is a full-white frame. Each 24,000-byte frame
 stores a 12,000-byte color plane followed by a 12,000-byte opacity mask. This
 preserves the live menu/game image wherever the Aseprite frame is transparent.
 
@@ -17,7 +18,8 @@ python tools\pack_sharpbit_gif.py `
 
 python tools\pack_aseprite_overlay.py `
   path\to\pogopoOUTRO.aseprite `
-  components\pogopo_startup\outro_frames.bin
+  components\pogopo_startup\outro_frames.bin `
+  --start-frame 2 --frames 24
 ```
 
 The binary intentionally lives at the component root. This keeps the generated

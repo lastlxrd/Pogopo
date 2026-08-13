@@ -206,6 +206,12 @@ def main() -> int:
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--frames", type=int, default=25)
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=1,
+        help="First human-numbered Aseprite frame to pack (default: 1)",
+    )
     parser.add_argument("--width", type=int, default=400)
     parser.add_argument("--height", type=int, default=240)
     args = parser.parse_args()
@@ -218,14 +224,20 @@ def main() -> int:
         raise RuntimeError(
             f"Animation is {width}x{height}; expected {args.width}x{args.height}"
         )
-    if len(frames) != args.frames:
+    if args.start_frame <= 0:
+        raise RuntimeError("Start frame must be 1 or greater")
+    start_index = args.start_frame - 1
+    end_index = start_index + args.frames
+    if end_index > len(frames):
         raise RuntimeError(
-            f"Animation has {len(frames)} frames; expected {args.frames}"
+            f"Animation has {len(frames)} frames; cannot pack "
+            f"{args.frames} frames starting at {args.start_frame}"
         )
+    selected_frames = frames[start_index:end_index]
 
     packed = bytearray()
     opaque_counts: list[int] = []
-    for cels in frames:
+    for cels in selected_frames:
         colors, alphas = composite_frame(width, height, layers, cels)
         packed.extend(pack_plane(colors, width, height))
         packed.extend(pack_plane(alphas, width, height))
@@ -234,7 +246,8 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(packed)
     print(
-        f"Packed {len(frames)} Aseprite overlay frames, "
+        f"Packed {len(selected_frames)} Aseprite overlay frames "
+        f"(source {args.start_frame}..{end_index}), "
         f"{width // 8 * height * 2} bytes each, {len(packed)} bytes total"
     )
     print("Opaque pixels per frame:", ", ".join(map(str, opaque_counts)))
