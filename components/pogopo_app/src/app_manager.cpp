@@ -96,6 +96,7 @@ bool AppManager::launch(size_t index) { return index < count_ ? switchTo(apps_[i
 bool AppManager::home() { return switchTo(home_); }
 
 void AppManager::toggleSystemMenu() {
+    if (power_overlay_open_) return;
     if (system_menu_open_) {
         if (!system_menu_closing_) {
             haptics_.play(haptics::Effect::Click);
@@ -107,7 +108,28 @@ void AppManager::toggleSystemMenu() {
     }
 }
 
+void AppManager::beginPowerOverlay() {
+    if (power_overlay_open_) return;
+    // A long Power hold owns the whole display. If the quick panel was open,
+    // restore its captured underlay first so Outro never bakes the panel into
+    // the frame that will be restored after a cancelled shutdown.
+    const bool already_suspended = system_menu_open_;
+    if (system_menu_open_) closeSystemMenu(false, false);
+    power_overlay_open_ = true;
+    if (active_ && !already_suspended) active_->onSuspend(context_);
+    full_redraw_ = false;
+    dirty_ = {};
+}
+
+void AppManager::endPowerOverlay() {
+    if (!power_overlay_open_) return;
+    power_overlay_open_ = false;
+    if (active_) active_->onResume(context_);
+    invalidate();
+}
+
 void AppManager::processInput() {
+    if (power_overlay_open_) return;
     input::Event event;
     while (input_.nextEvent(event, 0)) {
         if (system_menu_open_) {
@@ -124,6 +146,7 @@ void AppManager::processInput() {
 }
 
 void AppManager::update(uint32_t dt_ms) {
+    if (power_overlay_open_) return;
     if (!system_menu_open_) {
         if (active_) active_->update(context_, dt_ms);
         return;
@@ -174,6 +197,7 @@ void AppManager::invalidate(const gfx::Rect& region) {
 }
 
 esp_err_t AppManager::render() {
+    if (power_overlay_open_) return ESP_OK;
     if (!active_ || !redrawPending()) return ESP_OK;
     const gfx::Rect region = full_redraw_ ? gfx::Rect{0, 0, gfx_.width(), gfx_.height()} : dirty_;
     if (region.empty()) return ESP_OK;
@@ -354,10 +378,6 @@ void AppManager::drawSystemMenu() {
     if (x >= gfx_.width()) return;
 
     canvas.fill_rect(x, 0, kSystemMenuWidth, gfx_.height(), gfx::WHITE);
-    for (int y = 1; y < gfx_.height(); y += 4) {
-        canvas.draw_hline(x, y, kSystemMenuWidth, gfx::BLACK);
-    }
-    canvas.draw_vline(x, 0, gfx_.height(), gfx::BLACK);
 
     const int quick_count = active_
         ? static_cast<int>(std::min<size_t>(active_->quickActionCount(), 2U)) : 0;
@@ -407,7 +427,6 @@ void AppManager::drawSystemMenu() {
 
     const int footer_y = 207;
     canvas.fill_rect(x + 4, footer_y, kSystemMenuWidth - 8, 31, gfx::WHITE);
-    canvas.draw_hline(x + 6, footer_y, kSystemMenuWidth - 12, gfx::BLACK);
     menu::PogoFont::drawText(canvas, x + 10, footer_y + 5,
                              active_ ? active_->title() : "pogopo",
                              menu::FontFace::Italic14);

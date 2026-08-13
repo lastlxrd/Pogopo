@@ -24,6 +24,8 @@ public:
     bool launch(size_t index);
     bool home();
     void toggleSystemMenu();
+    void beginPowerOverlay();
+    void endPowerOverlay();
 
     void processInput();
     void update(uint32_t dt_ms);
@@ -40,6 +42,7 @@ public:
     Context& context() { return context_; }
 
     bool systemMenuOpen() const { return system_menu_open_; }
+    bool powerOverlayOpen() const { return power_overlay_open_; }
     uint32_t renderedFrames() const { return rendered_frames_; }
 
 private:
@@ -76,6 +79,7 @@ private:
     bool full_redraw_ = true;
     gfx::Rect dirty_{};
     bool system_menu_open_ = false;
+    bool power_overlay_open_ = false;
     bool system_menu_closing_ = false;
     bool system_menu_resume_on_close_ = true;
     bool system_menu_underlay_valid_ = false;

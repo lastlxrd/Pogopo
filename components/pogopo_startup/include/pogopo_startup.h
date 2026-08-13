@@ -4,4 +4,5 @@
 
 namespace pogopo {
 using StartupAnimation = startup::StartupAnimation;
+using OutroAnimation = startup::OutroAnimation;
 }
