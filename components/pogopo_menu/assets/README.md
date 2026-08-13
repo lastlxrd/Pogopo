@@ -1,6 +1,6 @@
 # Menu assets
 
-`../menu_assets.bin` contains the four supplied 1-bit menu animations and four
+`../menu_assets.bin` contains the four supplied 1-bit menu animations and six
 bitmap-font faces generated from `pogofont-Regular.otf` and
 `pogofont-RegularItalic.otf`.
 

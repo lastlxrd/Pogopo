@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "pogopo/gfx/gfx.h"
@@ -49,6 +50,11 @@ public:
     virtual const char* title() const = 0;
     // Emulators may reserve MENU as a game button (for example GB Select).
     virtual bool capturesMenuButton() const { return false; }
+    // App-owned actions are placed at the top of the Power quick menu. The
+    // manager supplies Resume and the system actions around them.
+    virtual size_t quickActionCount() const { return 0; }
+    virtual const char* quickActionLabel(size_t /*index*/) const { return ""; }
+    virtual bool runQuickAction(Context&, size_t /*index*/) { return false; }
 
     virtual void onEnter(Context&) {}
     virtual void onExit(Context&) {}

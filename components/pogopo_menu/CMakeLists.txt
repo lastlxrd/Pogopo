@@ -8,9 +8,9 @@ idf_component_register(
 )
 
 file(SIZE "${CMAKE_CURRENT_LIST_DIR}/menu_assets.bin" POGOPO_MENU_ASSETS_SIZE)
-if(NOT POGOPO_MENU_ASSETS_SIZE EQUAL 484465)
+if(NOT POGOPO_MENU_ASSETS_SIZE EQUAL 745556)
     message(FATAL_ERROR
-        "pogopo menu_assets.bin is ${POGOPO_MENU_ASSETS_SIZE} bytes; expected 484465")
+        "pogopo menu_assets.bin is ${POGOPO_MENU_ASSETS_SIZE} bytes; expected 745556")
 endif()
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

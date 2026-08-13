@@ -13,6 +13,6 @@ idf_component_register(
         pogopo_imu
         pogopo_power
         pogopo_settings
+        pogopo_menu
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-

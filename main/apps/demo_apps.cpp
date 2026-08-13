@@ -21,10 +21,11 @@ constexpr HomeItem kHomeItems[] = {
 };
 
 constexpr int kHomeItemCount = static_cast<int>(sizeof(kHomeItems) / sizeof(kHomeItems[0]));
-constexpr int kHomeRowY = 31;
-constexpr int kHomeRowStep = 34;
+constexpr int kHomeRowY = 22;
+constexpr int kHomeRowStep = 52;
 constexpr uint32_t kEnterDurationMs = 420;
 constexpr uint32_t kSwitchDurationMs = 280;
+constexpr uint32_t kGameBoyPlaydateDurationMs = 360;
 constexpr uint32_t kOpenDurationMs = 260;
 
 float clamp01(float value) {
@@ -44,6 +45,10 @@ float ease_out_cubic(float value) {
 int interpolate(int from, int to, float progress) {
     return static_cast<int>(std::lround(
         static_cast<float>(from) + static_cast<float>(to - from) * progress));
+}
+
+bool gameboy_playdate_pair(int first, int second) {
+    return (first == 1 && second == 2) || (first == 2 && second == 1);
 }
 
 void fill_pill(gfx::Canvas& canvas, int x, int y, int width, int height,
@@ -173,9 +178,12 @@ void LauncherApp::update(AppContext& context, uint32_t dt_ms) {
         phase_elapsed_ms_ = kEnterDurationMs;
         last_art_key_ = UINT16_MAX;
         context.invalidate();
-    } else if (phase_ == Phase::Switching && phase_elapsed_ms_ >= kSwitchDurationMs) {
+    } else if (phase_ == Phase::Switching && phase_elapsed_ms_ >=
+               (gameboy_playdate_pair(previous_, selected_)
+                    ? kGameBoyPlaydateDurationMs : kSwitchDurationMs)) {
         phase_ = Phase::Idle;
-        phase_elapsed_ms_ = kSwitchDurationMs;
+        phase_elapsed_ms_ = gameboy_playdate_pair(previous_, selected_)
+            ? kGameBoyPlaydateDurationMs : kSwitchDurationMs;
         previous_ = selected_;
         last_art_key_ = UINT16_MAX;
         context.invalidate();
@@ -267,17 +275,41 @@ void LauncherApp::drawGameBoyRoll(AppContext& context, float progress,
     const menu::Art art = menu::Art::GameBoyFull;
     const auto info = menu::Assets::info(art);
     const size_t frame = menu::Assets::frameAtTime(art, art_elapsed_ms_);
-    const int destination_height = 232;
-    const int destination_width = static_cast<int>(
-        static_cast<int64_t>(info.width) * destination_height / info.height);
-    // The full console sweeps quickly through the viewport. Halfway through
-    // it is fully visible, while the console's own four-frame GIF keeps moving.
-    const int y = entering
-        ? interpolate(244, -destination_height - 4, smooth_step(progress))
-        : interpolate(-destination_height - 4, 244, smooth_step(progress));
-    context.gfx.canvas().draw_bitmap_scaled(
-        255 - destination_width / 2, y, destination_width, destination_height,
-        menu::Assets::frame(art, frame));
+    constexpr float reveal_end = 0.48f;
+    const int top_aligned = info.source_y;
+    const int bottom_aligned = context.gfx.height() - info.height;
+    const int fully_above = -info.height - 4;
+
+    // The supplied 251x419 console remains at its native size. The transition
+    // first exposes its lower half, then moves that last half out quickly before
+    // Playdate arrives. Entering Game Boy evaluates the exact reverse path.
+    const auto leaving_y = [&](float value) {
+        if (value <= reveal_end) {
+            return interpolate(top_aligned, bottom_aligned,
+                               smooth_step(value / reveal_end));
+        }
+        return interpolate(bottom_aligned, fully_above,
+                           smooth_step((value - reveal_end) / (1.0f - reveal_end)));
+    };
+
+    if (entering) {
+        const float playdate_exit_end = 1.0f - reveal_end;
+        if (progress < playdate_exit_end) {
+            drawArt(context, 2,
+                    interpolate(0, context.gfx.height(),
+                                smooth_step(progress / playdate_exit_end)),
+                    art_elapsed_ms_);
+        }
+    } else if (progress > reveal_end) {
+        drawArt(context, 2,
+                interpolate(context.gfx.height(), 0,
+                            smooth_step((progress - reveal_end) / (1.0f - reveal_end))),
+                art_elapsed_ms_);
+    }
+
+    const int y = entering ? leaving_y(1.0f - progress) : leaving_y(progress);
+    context.gfx.canvas().draw_bitmap(
+        386 - info.width, y, menu::Assets::frame(art, frame));
 }
 
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
@@ -293,13 +325,15 @@ void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     }
 
     float switch_progress = 1.0f;
-    int pill_y = kHomeRowY + selected_ * kHomeRowStep + 3;
+    int pill_y = kHomeRowY + selected_ * kHomeRowStep + 2;
     const char* pill_label = kHomeItems[selected_].label;
     if (phase_ == Phase::Switching) {
+        const uint32_t duration = gameboy_playdate_pair(previous_, selected_)
+            ? kGameBoyPlaydateDurationMs : kSwitchDurationMs;
         switch_progress = smooth_step(
-            static_cast<float>(phase_elapsed_ms_) / kSwitchDurationMs);
-        pill_y = interpolate(kHomeRowY + previous_ * kHomeRowStep + 3,
-                             kHomeRowY + selected_ * kHomeRowStep + 3,
+            static_cast<float>(phase_elapsed_ms_) / duration);
+        pill_y = interpolate(kHomeRowY + previous_ * kHomeRowStep + 2,
+                             kHomeRowY + selected_ * kHomeRowStep + 2,
                              switch_progress);
         pill_label = switch_progress < 0.5f
             ? kHomeItems[previous_].label : kHomeItems[selected_].label;
@@ -310,12 +344,15 @@ void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     if (phase_ == Phase::Entering) {
         drawArt(context, selected_, interpolate(240, 0, phase_progress), art_elapsed_ms_);
     } else if (phase_ == Phase::Switching) {
-        const int old_offset = interpolate(0, -direction_ * 240, switch_progress);
-        const int new_offset = interpolate(direction_ * 240, 0, switch_progress);
-        drawArt(context, previous_, old_offset, art_elapsed_ms_);
-        drawArt(context, selected_, new_offset, art_elapsed_ms_);
-        if (previous_ == 1 || selected_ == 1) {
-            drawGameBoyRoll(context, switch_progress, selected_ == 1);
+        if (gameboy_playdate_pair(previous_, selected_)) {
+            const float raw_progress = clamp01(
+                static_cast<float>(phase_elapsed_ms_) / kGameBoyPlaydateDurationMs);
+            drawGameBoyRoll(context, raw_progress, selected_ == 1);
+        } else {
+            const int old_offset = interpolate(0, -direction_ * 240, switch_progress);
+            const int new_offset = interpolate(direction_ * 240, 0, switch_progress);
+            drawArt(context, previous_, old_offset, art_elapsed_ms_);
+            drawArt(context, selected_, new_offset, art_elapsed_ms_);
         }
     } else {
         drawArt(context, selected_, 0, art_elapsed_ms_);
@@ -323,13 +360,13 @@ void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
 
     for (int item = 0; item < kHomeItemCount; ++item) {
         menu::PogoFont::drawText(canvas, menu_x, kHomeRowY + item * kHomeRowStep,
-                                 kHomeItems[item].label, menu::FontFace::Regular22);
+                                 kHomeItems[item].label, menu::FontFace::Regular24);
     }
 
-    const int pill_width = menu::PogoFont::textWidth(menu::FontFace::Italic22, pill_label) + 13;
-    fill_pill(canvas, menu_x - 2, pill_y, pill_width, 29, gfx::BLACK);
-    menu::PogoFont::drawText(canvas, menu_x + 4, pill_y - 3, pill_label,
-                             menu::FontFace::Italic22, gfx::WHITE);
+    const int pill_width = menu::PogoFont::textWidth(menu::FontFace::Italic24, pill_label) + 17;
+    fill_pill(canvas, menu_x - 2, pill_y, pill_width, 34, gfx::BLACK);
+    menu::PogoFont::drawText(canvas, menu_x + 5, pill_y - 3, pill_label,
+                             menu::FontFace::Italic24, gfx::WHITE);
     draw_battery(canvas, context.power.state(), art_elapsed_ms_);
 
     if (phase_ == Phase::Opening) {
@@ -859,56 +896,12 @@ constexpr SettingsHubItem kSettingsHubItems[] = {
 constexpr int kSettingsHubCount = static_cast<int>(
     sizeof(kSettingsHubItems) / sizeof(kSettingsHubItems[0]));
 
-void settings_value(AppContext& context, int item, char* output, size_t size) {
-    const power::State power_state = context.power.state();
-    switch (item) {
-        case 0:
-            std::snprintf(output, size, "%u%%  %s", context.settings.volume(),
-                          context.settings.audioEnabled() ? "sound on" : "muted");
-            break;
-        case 1:
-            std::snprintf(output, size, "%s", context.input.ok() ? "tca9555 ok" : "input error");
-            break;
-        case 2:
-            std::snprintf(output, size, "%s  %lu hz", context.audio.ok() ? "i2s ok" : "audio error",
-                          static_cast<unsigned long>(context.audio.sampleRate()));
-            break;
-        case 3:
-            std::snprintf(output, size, "%s", context.haptics.ok() ? "motor ok" : "motor error");
-            break;
-        case 4:
-            std::snprintf(output, size, "%s", context.imu.ok() ? "bmi270 ok" : "imu error");
-            break;
-        case 5: {
-            const uint64_t mib = context.storage.mounted()
-                ? context.storage.capacityBytes() / (1024ULL * 1024ULL) : 0;
-            std::snprintf(output, size, context.storage.mounted() ? "%llu mib" : "not mounted",
-                          static_cast<unsigned long long>(mib));
-            break;
-        }
-        case 6:
-            if (power_state.battery_valid) {
-                std::snprintf(output, size, "%u%%  %umv%s",
-                              power_state.battery_percent, power_state.battery_mv,
-                              power_state.usb_present ? " usb" : "");
-            } else {
-                std::snprintf(output, size, "%s", power_state.usb_present ? "usb  battery wait" : "battery wait");
-            }
-            break;
-        case 7:
-            std::snprintf(output, size, "%s  400x240", context.gfx.ok() ? "sharp ok" : "lcd error");
-            break;
-        default:
-            std::snprintf(output, size, "step13.0");
-            break;
-    }
-}
-
 } // namespace
 
 void SettingsApp::onEnter(AppContext& context) {
     enter_elapsed_ms_ = 0;
     status_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
     context.invalidate();
 }
 
@@ -938,10 +931,18 @@ void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
 }
 
 void SettingsApp::update(AppContext& context, uint32_t dt_ms) {
+    const uint32_t previous_enter = enter_elapsed_ms_;
     enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 340U);
     status_elapsed_ms_ += dt_ms;
-    if (enter_elapsed_ms_ < 340U || status_elapsed_ms_ >= 500U) {
-        if (status_elapsed_ms_ >= 500U) status_elapsed_ms_ %= 500U;
+    redraw_elapsed_ms_ += dt_ms;
+    if (previous_enter < 340U && enter_elapsed_ms_ == 340U) {
+        redraw_elapsed_ms_ = 0;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ < 340U && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ >= 340U && redraw_elapsed_ms_ >= 240U) {
+        redraw_elapsed_ms_ %= 240U;
         context.invalidate();
     }
 }
@@ -953,29 +954,24 @@ void SettingsApp::draw(AppContext& context, const gfx::Rect&) {
     const int content_x = interpolate(400, 0, progress);
 
     menu::PogoFont::drawText(canvas, 12 + content_x, -1, "settings",
-                             menu::FontFace::Italic22);
+                             menu::FontFace::Italic24);
     draw_battery(canvas, context.power.state(), status_elapsed_ms_, 366, 8);
 
-    constexpr int visible_rows = 8;
-    int first = std::clamp(selected_ - 3, 0, kSettingsHubCount - visible_rows);
+    constexpr int visible_rows = 5;
+    int first = std::clamp(selected_ - 2, 0, kSettingsHubCount - visible_rows);
     for (int visible = 0; visible < visible_rows; ++visible) {
         const int item = first + visible;
-        const int y = 37 + visible * 24;
+        const int y = 38 + visible * 35;
         const bool selected = item == selected_;
-        char value[64]{};
-        settings_value(context, item, value, sizeof(value));
 
-        if (selected) fill_pill(canvas, 9 + content_x, y + 1, 382, 22, gfx::BLACK);
+        if (selected) fill_pill(canvas, 9 + content_x, y, 382, 31, gfx::BLACK);
         const gfx::Color color = selected ? gfx::WHITE : gfx::BLACK;
         const menu::FontFace face = selected
-            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
-        menu::PogoFont::drawText(canvas, 16 + content_x, y, kSettingsHubItems[item].label,
-                                 face, color);
-        const int value_width = menu::PogoFont::textWidth(face, value);
-        menu::PogoFont::drawText(canvas, 383 - value_width + content_x, y, value,
+            ? menu::FontFace::Italic22 : menu::FontFace::Regular22;
+        menu::PogoFont::drawText(canvas, 17 + content_x, y - 1, kSettingsHubItems[item].label,
                                  face, color);
     }
-    menu::PogoFont::drawText(canvas, 13 + content_x, 224, "A open    B back",
+    menu::PogoFont::drawText(canvas, 13 + content_x, 222, "A open    B back",
                              menu::FontFace::Regular14);
 }
 
@@ -1282,7 +1278,7 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
     menu::PogoFont::drawText(canvas, 12, -1, "about pogopo", menu::FontFace::Italic22);
     draw_battery(canvas, context.power.state(), 0, 366, 8);
     canvas.draw_rect(12, 40, 376, 164, gfx::BLACK);
-    menu::PogoFont::drawText(canvas, 28, 50, "pogopoOS 2.0  /  STEP13.0",
+    menu::PogoFont::drawText(canvas, 28, 50, "pogopoOS 2.0  /  STEP13.1",
                              menu::FontFace::Italic14);
     menu::PogoFont::drawText(canvas, 28, 78,
         "ESP32-S3  16 MB flash  8 MB PSRAM\n"

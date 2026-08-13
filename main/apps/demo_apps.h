@@ -162,6 +162,7 @@ private:
     int selected_ = 0;
     uint32_t enter_elapsed_ms_ = 0;
     uint32_t status_elapsed_ms_ = 0;
+    uint32_t redraw_elapsed_ms_ = 0;
 };
 
 class PreferencesApp final : public Application {

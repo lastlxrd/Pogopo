@@ -39,6 +39,25 @@ void GameBoyApp::prepare(const char* path, const char* display_name,
     scale_ = scale;
 }
 
+const char* GameBoyApp::quickActionLabel(size_t index) const {
+    if (index == 0) return "save game";
+    if (index == 1) {
+        return scale_ == gameboy::ScaleMode::FitHeight ? "scale: fit" : "scale: 1x";
+    }
+    return "";
+}
+
+bool GameBoyApp::runQuickAction(AppContext&, size_t index) {
+    if (index == 0) return emulator_.flushSave() == ESP_OK;
+    if (index == 1) {
+        scale_ = scale_ == gameboy::ScaleMode::FitHeight
+            ? gameboy::ScaleMode::OneX : gameboy::ScaleMode::FitHeight;
+        force_draw_ = true;
+        return true;
+    }
+    return false;
+}
+
 void GameBoyApp::drawLoading(AppContext& context) {
     auto& canvas = context.gfx.canvas();
     context.gfx.reset_clip();
@@ -277,11 +296,14 @@ void GameBoyBrowserApp::onEvent(AppContext& context, const input::Event& event) 
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        // The custom 382 px focus pill extends well beyond gui::List::bounds().
+        // Repaint every browser row so the old black fill is cleared in the
+        // same Sharp refresh instead of visibly trailing the new selection.
+        context.invalidate({0, 32, 400, 178});
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        context.invalidate({0, 32, 400, 178});
     } else if (event.type == input::EventType::Pressed &&
                (event.button == input::Button::Left || event.button == input::Button::Right)) {
         scale_ = scale_ == gameboy::ScaleMode::FitHeight
@@ -307,10 +329,17 @@ void GameBoyBrowserApp::onEvent(AppContext& context, const input::Event& event) 
 }
 
 void GameBoyBrowserApp::update(AppContext& context, uint32_t dt_ms) {
+    const uint32_t previous_enter = enter_elapsed_ms_;
     enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 330U);
     redraw_elapsed_ms_ += dt_ms;
-    if (enter_elapsed_ms_ < 330U || redraw_elapsed_ms_ >= 500U) {
-        if (redraw_elapsed_ms_ >= 500U) redraw_elapsed_ms_ %= 500U;
+    if (previous_enter < 330U && enter_elapsed_ms_ == 330U) {
+        redraw_elapsed_ms_ = 0;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ < 330U && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ >= 330U && redraw_elapsed_ms_ >= 500U) {
+        redraw_elapsed_ms_ %= 500U;
         context.invalidate();
     }
 }

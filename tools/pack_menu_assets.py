@@ -249,6 +249,8 @@ def main() -> int:
         ("Italic14", "pogofont-RegularItalic.otf", 14),
         ("Regular22", "pogofont-Regular.otf", 22),
         ("Italic22", "pogofont-RegularItalic.otf", 22),
+        ("Regular24", "pogofont-Regular.otf", 24),
+        ("Italic24", "pogofont-RegularItalic.otf", 24),
     ]
     fonts = [
         append_font(blob, name, args.docs / filename, size)

@@ -11,6 +11,8 @@ enum class FontFace : uint8_t {
     Italic14,
     Regular22,
     Italic22,
+    Regular24,
+    Italic24,
 };
 
 class PogoFont {
