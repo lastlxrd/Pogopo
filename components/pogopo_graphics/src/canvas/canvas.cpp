@@ -164,6 +164,31 @@ void Canvas::draw_bitmap(int x, int y, const Bitmap& bitmap,
     display_.unlock();
 }
 
+void Canvas::draw_bitmap_scaled(int x, int y, int width, int height,
+                                const Bitmap& bitmap, Color foreground,
+                                bool transparent_background, Color background) {
+    if (!bitmap.valid() || width <= 0 || height <= 0) return;
+    display_.lock();
+    for (int destination_y = 0; destination_y < height; ++destination_y) {
+        const int py = y + destination_y;
+        if (py < clip_.y || py >= clip_.bottom()) continue;
+        const int source_y = static_cast<int>(
+            (static_cast<int64_t>(destination_y) * bitmap.height) / height);
+        for (int destination_x = 0; destination_x < width; ++destination_x) {
+            const int px = x + destination_x;
+            if (!inside_clip(px, py)) continue;
+            const int source_x = static_cast<int>(
+                (static_cast<int64_t>(destination_x) * bitmap.width) / width);
+            if (bitmap.pixel(source_x, source_y)) {
+                display_.set_pixel_unlocked(px, py, foreground);
+            } else if (!transparent_background) {
+                display_.set_pixel_unlocked(px, py, background);
+            }
+        }
+    }
+    display_.unlock();
+}
+
 void Canvas::draw_sprite(const Sprite& sprite) {
     if (!sprite.visible) return;
     draw_bitmap(sprite.x, sprite.y, sprite.bitmap, sprite.foreground,

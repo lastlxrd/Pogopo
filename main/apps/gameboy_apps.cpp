@@ -1,6 +1,7 @@
 #include "apps/gameboy_apps.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -252,6 +253,8 @@ void GameBoyBrowserApp::rescan(AppContext& context) {
 void GameBoyBrowserApp::onEnter(AppContext& context) {
     list_.setRowHeight(29);
     rescan(context);
+    enter_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
     context.invalidate();
 }
 
@@ -303,13 +306,75 @@ void GameBoyBrowserApp::onEvent(AppContext& context, const input::Event& event) 
     }
 }
 
+void GameBoyBrowserApp::update(AppContext& context, uint32_t dt_ms) {
+    enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 330U);
+    redraw_elapsed_ms_ += dt_ms;
+    if (enter_elapsed_ms_ < 330U || redraw_elapsed_ms_ >= 500U) {
+        if (redraw_elapsed_ms_ >= 500U) redraw_elapsed_ms_ %= 500U;
+        context.invalidate();
+    }
+}
+
 void GameBoyBrowserApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
-    canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "GAME BOY", gameboy::scale_mode_name(scale_));
-    list_.draw(canvas, context.theme);
-    canvas.draw_text(22, 198, status_, gfx::font5x7(), context.theme.foreground);
-    gui::draw_footer(canvas, context.theme, "A PLAY  B BACK", "L/R SCALE  START SCAN");
+    canvas.clear_clip(gfx::WHITE);
+    const float raw_progress = std::clamp<float>(
+        static_cast<float>(enter_elapsed_ms_) / 330.0f, 0.0f, 1.0f);
+    const float progress = 1.0f - std::pow(1.0f - raw_progress, 3.0f);
+    const int content_x = static_cast<int>(std::lround((1.0f - progress) * 400.0f));
+
+    menu::PogoFont::drawText(canvas, 12 + content_x, -1, "gameboy",
+                             menu::FontFace::Italic22);
+    const power::State power = context.power.state();
+    canvas.draw_rect(366, 8, 23, 10, gfx::BLACK);
+    canvas.fill_rect(389, 11, 2, 4, gfx::BLACK);
+    const int battery_level = power.battery_valid
+        ? std::clamp<int>((power.battery_percent + 24) / 25, 0, 4) : 0;
+    for (int segment = 0; segment < battery_level; ++segment) {
+        canvas.fill_rect(368 + segment * 5, 10, 4, 6, gfx::BLACK);
+    }
+
+    const size_t count = file_count_ ? file_count_ : 1;
+    const int selected = static_cast<int>(list_.selected());
+    constexpr int visible_rows = 7;
+    const int first = std::clamp(selected - 3, 0,
+        std::max(0, static_cast<int>(count) - visible_rows));
+    for (int visible = 0; visible < visible_rows && first + visible < static_cast<int>(count); ++visible) {
+        const int item_index = first + visible;
+        const int y = 35 + visible * 25;
+        const bool focus = item_index == selected;
+        const auto& item = items_[item_index];
+        if (focus) {
+            canvas.fill_rect(9 + content_x, y + 1, 382, 22, gfx::BLACK);
+            canvas.fill_circle(20 + content_x, y + 12, 11, gfx::BLACK);
+            canvas.fill_circle(379 + content_x, y + 12, 11, gfx::BLACK);
+        }
+
+        char label[64]{};
+        std::snprintf(label, sizeof(label), "%s", item.label ? item.label : "");
+        const menu::FontFace face = focus
+            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
+        while (label[0] && menu::PogoFont::textWidth(face, label) > 280) {
+            const size_t length = std::strlen(label);
+            if (length <= 3) break;
+            label[length - 1] = '\0';
+        }
+        menu::PogoFont::drawText(canvas, 16 + content_x, y, label, face,
+                                 focus ? gfx::WHITE : gfx::BLACK);
+
+        if (file_count_ && item_index < static_cast<int>(file_count_)) {
+            const char* subtitle = subtitles_[item_index].data();
+            const int width = menu::PogoFont::textWidth(face, subtitle);
+            menu::PogoFont::drawText(canvas, 383 - width + content_x, y, subtitle,
+                                     face, focus ? gfx::WHITE : gfx::BLACK);
+        }
+    }
+
+    menu::PogoFont::drawText(canvas, 13 + content_x, 205, status_,
+                             menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 13 + content_x, 220,
+                             "A play  B back  L/R scale  START rescan",
+                             menu::FontFace::Regular14);
 }
 
 } // namespace pogopo::demo

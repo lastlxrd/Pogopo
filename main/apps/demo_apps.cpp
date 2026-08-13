@@ -8,18 +8,67 @@
 namespace pogopo::demo {
 
 namespace {
-constexpr gui::ListItem kLauncherItems[] = {
-    {"Game Boy", "Peanut-GB emulator + SD ROMs", "gb_browser", true},
-    {"Graphics demo", "Sprites + partial redraw", "graphics", true},
-    {"Input monitor", "Buttons and event state", "input", true},
-    {"Audio lab", "I2S mixer + generated sounds", "audio", true},
-    {"WAV player", "Streaming PCM from SD", "wav", true},
-    {"Motion lab", "BMI270 accel + gyro", "motion", true},
-    {"Power status", "Battery, USB and shutdown", "power", true},
-    {"Haptics lab", "Play vibration patterns", "haptics", true},
-    {"Settings", "Persistent NVS options", "settings", true},
-    {"About Pogopo", "Framework information", "about", true},
+struct HomeItem {
+    const char* label;
+    const char* target;
 };
+
+constexpr HomeItem kHomeItems[] = {
+    {"pogopo", "pogopo_library"},
+    {"gameboy", "gb_browser"},
+    {"playdate", "playdate_library"},
+    {"settings", "settings"},
+};
+
+constexpr int kHomeItemCount = static_cast<int>(sizeof(kHomeItems) / sizeof(kHomeItems[0]));
+constexpr int kHomeRowY = 31;
+constexpr int kHomeRowStep = 34;
+constexpr uint32_t kEnterDurationMs = 420;
+constexpr uint32_t kSwitchDurationMs = 280;
+constexpr uint32_t kOpenDurationMs = 260;
+
+float clamp01(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float smooth_step(float value) {
+    value = clamp01(value);
+    return value * value * (3.0f - 2.0f * value);
+}
+
+float ease_out_cubic(float value) {
+    value = 1.0f - clamp01(value);
+    return 1.0f - value * value * value;
+}
+
+int interpolate(int from, int to, float progress) {
+    return static_cast<int>(std::lround(
+        static_cast<float>(from) + static_cast<float>(to - from) * progress));
+}
+
+void fill_pill(gfx::Canvas& canvas, int x, int y, int width, int height,
+               gfx::Color color) {
+    if (width <= 0 || height <= 0) return;
+    const int radius = std::min(height / 2, width / 2);
+    canvas.fill_rect(x + radius, y, width - radius * 2, height, color);
+    canvas.fill_circle(x + radius, y + height / 2, radius, color);
+    canvas.fill_circle(x + width - radius - 1, y + height / 2, radius, color);
+}
+
+void draw_battery(gfx::Canvas& canvas, const power::State& state,
+                  uint32_t elapsed_ms, int x = 7, int y = 7) {
+    canvas.draw_rect(x, y, 23, 10, gfx::BLACK);
+    canvas.fill_rect(x + 23, y + 3, 2, 4, gfx::BLACK);
+    int level = state.battery_valid
+        ? std::clamp<int>((static_cast<int>(state.battery_percent) + 24) / 25, 0, 4)
+        : 0;
+    if (state.charging) {
+        level = 1 + static_cast<int>((elapsed_ms / 240U) % 4U);
+    }
+    for (int segment = 0; segment < level; ++segment) {
+        canvas.fill_rect(x + 2 + segment * 5, y + 2, 4, 6, gfx::BLACK);
+    }
+}
 
 constexpr gui::ListItem kHapticItems[] = {
     {"Tick", "Small cursor feedback", "tick", true},
@@ -71,41 +120,289 @@ void draw_button(gfx::Canvas& canvas, const gui::Theme& theme,
 }
 } // namespace
 
-LauncherApp::LauncherApp() {
-    list_.setItems(kLauncherItems, sizeof(kLauncherItems) / sizeof(kLauncherItems[0]));
-    list_.setRowHeight(32);
-}
+LauncherApp::LauncherApp() = default;
 
 void LauncherApp::onEnter(AppContext& context) {
+    previous_ = selected_;
+    phase_ = Phase::Entering;
+    phase_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
+    last_art_key_ = UINT16_MAX;
+    last_battery_key_ = 0xFF;
+    launch_target_ = nullptr;
     context.invalidate();
 }
 
 void LauncherApp::onEvent(AppContext& context, const input::Event& event) {
-    if (!nav_event(event)) return;
-    if (event.button == input::Button::Top && list_.move(-1)) {
-        context.haptics.play(haptics::Effect::Tick);
-        context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
-    } else if (event.button == input::Button::Down && list_.move(1)) {
-        context.haptics.play(haptics::Effect::Tick);
-        context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
-    } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
-        const gui::ListItem* item = list_.selectedItem();
-        if (item && item->id) {
-            context.haptics.play(haptics::Effect::Confirm);
-            context.uiSound(audio::Effect::Confirm);
-            context.launch(item->id);
+    if (phase_ != Phase::Idle || !nav_event(event)) return;
+    if (event.button == input::Button::Top) {
+        startSwitch(context, -1);
+    } else if (event.button == input::Button::Down) {
+        startSwitch(context, 1);
+    } else if (event.type == input::EventType::Pressed &&
+               event.button == input::Button::A) {
+        launch_target_ = kHomeItems[selected_].target;
+        phase_ = Phase::Opening;
+        phase_elapsed_ms_ = 0;
+        redraw_elapsed_ms_ = 0;
+        context.haptics.play(haptics::Effect::Confirm);
+        context.uiSound(audio::Effect::Confirm);
+        context.invalidate();
+    }
+}
+
+void LauncherApp::startSwitch(AppContext& context, int direction) {
+    previous_ = selected_;
+    direction_ = direction < 0 ? -1 : 1;
+    selected_ = (selected_ + direction_ + kHomeItemCount) % kHomeItemCount;
+    phase_ = Phase::Switching;
+    phase_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
+    context.haptics.play(haptics::Effect::Tick);
+    context.uiSound(audio::Effect::Tick);
+    context.invalidate();
+}
+
+void LauncherApp::update(AppContext& context, uint32_t dt_ms) {
+    art_elapsed_ms_ += dt_ms;
+    redraw_elapsed_ms_ += dt_ms;
+    if (phase_ != Phase::Idle) phase_elapsed_ms_ += dt_ms;
+
+    if (phase_ == Phase::Entering && phase_elapsed_ms_ >= kEnterDurationMs) {
+        phase_ = Phase::Idle;
+        phase_elapsed_ms_ = kEnterDurationMs;
+        last_art_key_ = UINT16_MAX;
+        context.invalidate();
+    } else if (phase_ == Phase::Switching && phase_elapsed_ms_ >= kSwitchDurationMs) {
+        phase_ = Phase::Idle;
+        phase_elapsed_ms_ = kSwitchDurationMs;
+        previous_ = selected_;
+        last_art_key_ = UINT16_MAX;
+        context.invalidate();
+    } else if (phase_ == Phase::Opening && phase_elapsed_ms_ >= kOpenDurationMs) {
+        const char* target = launch_target_;
+        launch_target_ = nullptr;
+        if (target) context.launch(target);
+        return;
+    }
+
+    if (phase_ != Phase::Idle && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+        return;
+    }
+
+    if (phase_ == Phase::Idle) {
+        uint16_t art_key = 0;
+        if (selected_ == 3) {
+            art_key = static_cast<uint16_t>((art_elapsed_ms_ / 70U) & 0xFFFFU);
+        } else {
+            const menu::Art art = selected_ == 0 ? menu::Art::Pogopo
+                                 : selected_ == 1 ? menu::Art::GameBoy
+                                                  : menu::Art::Playdate;
+            art_key = static_cast<uint16_t>(menu::Assets::frameAtTime(art, art_elapsed_ms_));
+        }
+
+        const power::State battery = context.power.state();
+        uint8_t battery_key = battery.battery_valid
+            ? static_cast<uint8_t>(std::clamp<int>((battery.battery_percent + 24) / 25, 0, 4))
+            : 0;
+        if (battery.charging) {
+            battery_key = static_cast<uint8_t>(0x10U | ((art_elapsed_ms_ / 240U) & 0x03U));
+        }
+        if (art_key != last_art_key_ || battery_key != last_battery_key_) {
+            last_art_key_ = art_key;
+            last_battery_key_ = battery_key;
+            context.invalidate();
         }
     }
 }
 
+void LauncherApp::drawSettingsArt(AppContext& context, int y_offset,
+                                  uint32_t elapsed_ms) {
+    auto& canvas = context.gfx.canvas();
+    const int x = 162;
+    const int y = 28 + y_offset;
+    canvas.draw_rect(x, y, 222, 183, gfx::BLACK);
+    menu::PogoFont::drawText(canvas, x + 13, y + 5, "system status",
+                             menu::FontFace::Italic14);
+    canvas.draw_hline(x + 10, y + 30, 202, gfx::BLACK);
+
+    const char* labels[] = {"display", "audio", "storage", "motion"};
+    const bool states[] = {
+        context.gfx.ok(), context.audio.ok(), context.storage.mounted(), context.imu.ok(),
+    };
+    for (int row = 0; row < 4; ++row) {
+        const int row_y = y + 43 + row * 28;
+        menu::PogoFont::drawText(canvas, x + 13, row_y, labels[row],
+                                 menu::FontFace::Regular14);
+        canvas.draw_rect(x + 151, row_y + 5, 50, 9, gfx::BLACK);
+        const int sweep = static_cast<int>((elapsed_ms / 70U + row * 7U) % 45U);
+        const int amount = states[row] ? 44 : std::max(4, sweep / 3);
+        canvas.fill_rect(x + 154, row_y + 8, amount, 3, gfx::BLACK);
+    }
+    const int pulse = 4 + static_cast<int>((elapsed_ms / 90U) % 12U);
+    canvas.draw_circle(x + 190, y + 164, pulse, gfx::BLACK);
+    canvas.fill_circle(x + 190, y + 164, 2, gfx::BLACK);
+}
+
+void LauncherApp::drawArt(AppContext& context, int item, int y_offset,
+                          uint32_t elapsed_ms) {
+    if (item == 3) {
+        drawSettingsArt(context, y_offset, elapsed_ms);
+        return;
+    }
+
+    const menu::Art art = item == 0 ? menu::Art::Pogopo
+                         : item == 1 ? menu::Art::GameBoy
+                                     : menu::Art::Playdate;
+    const auto info = menu::Assets::info(art);
+    const size_t frame = menu::Assets::frameAtTime(art, elapsed_ms);
+    context.gfx.canvas().draw_bitmap(
+        info.source_x, info.source_y + y_offset, menu::Assets::frame(art, frame));
+}
+
+void LauncherApp::drawGameBoyRoll(AppContext& context, float progress,
+                                  bool entering) {
+    const menu::Art art = menu::Art::GameBoyFull;
+    const auto info = menu::Assets::info(art);
+    const size_t frame = menu::Assets::frameAtTime(art, art_elapsed_ms_);
+    const int destination_height = 232;
+    const int destination_width = static_cast<int>(
+        static_cast<int64_t>(info.width) * destination_height / info.height);
+    // The full console sweeps quickly through the viewport. Halfway through
+    // it is fully visible, while the console's own four-frame GIF keeps moving.
+    const int y = entering
+        ? interpolate(244, -destination_height - 4, smooth_step(progress))
+        : interpolate(-destination_height - 4, 244, smooth_step(progress));
+    context.gfx.canvas().draw_bitmap_scaled(
+        255 - destination_width / 2, y, destination_width, destination_height,
+        menu::Assets::frame(art, frame));
+}
+
 void LauncherApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
-    canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "POGOPO OS 2.0", "STEP9");
-    list_.draw(canvas, context.theme);
-    gui::draw_footer(canvas, context.theme, "UP/DOWN MOVE   A OPEN", "MENU SYSTEM");
+    canvas.clear_clip(gfx::WHITE);
+
+    float phase_progress = 1.0f;
+    int menu_x = 5;
+    if (phase_ == Phase::Entering) {
+        phase_progress = ease_out_cubic(
+            static_cast<float>(phase_elapsed_ms_) / kEnterDurationMs);
+        menu_x = interpolate(-140, 5, phase_progress);
+    }
+
+    float switch_progress = 1.0f;
+    int pill_y = kHomeRowY + selected_ * kHomeRowStep + 3;
+    const char* pill_label = kHomeItems[selected_].label;
+    if (phase_ == Phase::Switching) {
+        switch_progress = smooth_step(
+            static_cast<float>(phase_elapsed_ms_) / kSwitchDurationMs);
+        pill_y = interpolate(kHomeRowY + previous_ * kHomeRowStep + 3,
+                             kHomeRowY + selected_ * kHomeRowStep + 3,
+                             switch_progress);
+        pill_label = switch_progress < 0.5f
+            ? kHomeItems[previous_].label : kHomeItems[selected_].label;
+    }
+
+    // Art is the moving background layer. Text, focus pill and battery are
+    // drawn afterwards so their pixels always stay crisp in the foreground.
+    if (phase_ == Phase::Entering) {
+        drawArt(context, selected_, interpolate(240, 0, phase_progress), art_elapsed_ms_);
+    } else if (phase_ == Phase::Switching) {
+        const int old_offset = interpolate(0, -direction_ * 240, switch_progress);
+        const int new_offset = interpolate(direction_ * 240, 0, switch_progress);
+        drawArt(context, previous_, old_offset, art_elapsed_ms_);
+        drawArt(context, selected_, new_offset, art_elapsed_ms_);
+        if (previous_ == 1 || selected_ == 1) {
+            drawGameBoyRoll(context, switch_progress, selected_ == 1);
+        }
+    } else {
+        drawArt(context, selected_, 0, art_elapsed_ms_);
+    }
+
+    for (int item = 0; item < kHomeItemCount; ++item) {
+        menu::PogoFont::drawText(canvas, menu_x, kHomeRowY + item * kHomeRowStep,
+                                 kHomeItems[item].label, menu::FontFace::Regular22);
+    }
+
+    const int pill_width = menu::PogoFont::textWidth(menu::FontFace::Italic22, pill_label) + 13;
+    fill_pill(canvas, menu_x - 2, pill_y, pill_width, 29, gfx::BLACK);
+    menu::PogoFont::drawText(canvas, menu_x + 4, pill_y - 3, pill_label,
+                             menu::FontFace::Italic22, gfx::WHITE);
+    draw_battery(canvas, context.power.state(), art_elapsed_ms_);
+
+    if (phase_ == Phase::Opening) {
+        const float open_progress = smooth_step(
+            static_cast<float>(phase_elapsed_ms_) / kOpenDurationMs);
+        const int wipe_x = interpolate(400, -1, open_progress);
+        canvas.fill_rect(wipe_x, 0, 400 - wipe_x, 240, gfx::WHITE);
+        if (wipe_x >= 0 && wipe_x < 400) canvas.draw_vline(wipe_x, 0, 240, gfx::BLACK);
+    }
+}
+
+void EmptyLibraryApp::onEnter(AppContext& context) {
+    elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
+    enter_elapsed_ms_ = 0;
+    last_frame_ = static_cast<size_t>(-1);
+    context.invalidate();
+}
+
+void EmptyLibraryApp::onEvent(AppContext& context, const input::Event& event) {
+    if (event.type != input::EventType::Pressed) return;
+    if (event.button == input::Button::B) {
+        context.haptics.play(haptics::Effect::Click);
+        context.uiSound(audio::Effect::Back);
+        context.home();
+    } else if (event.button == input::Button::A) {
+        context.haptics.play(haptics::Effect::Alert);
+        context.uiSound(audio::Effect::Error);
+    }
+}
+
+void EmptyLibraryApp::update(AppContext& context, uint32_t dt_ms) {
+    elapsed_ms_ += dt_ms;
+    enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 320U);
+    redraw_elapsed_ms_ += dt_ms;
+    if (enter_elapsed_ms_ < 320U && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+        return;
+    }
+    const size_t frame = menu::Assets::frameAtTime(art_, elapsed_ms_);
+    if (frame != last_frame_) {
+        last_frame_ = frame;
+        context.invalidate();
+    } else if (redraw_elapsed_ms_ >= 500U) {
+        redraw_elapsed_ms_ %= 500U;
+        context.invalidate();
+    }
+}
+
+void EmptyLibraryApp::draw(AppContext& context, const gfx::Rect&) {
+    auto& canvas = context.gfx.canvas();
+    canvas.clear_clip(gfx::WHITE);
+    const float progress = ease_out_cubic(static_cast<float>(enter_elapsed_ms_) / 320.0f);
+    const int content_x = interpolate(400, 0, progress);
+    draw_battery(canvas, context.power.state(), elapsed_ms_);
+
+    menu::PogoFont::drawText(canvas, 14 + content_x, 31, platform_name_,
+                             menu::FontFace::Italic22);
+    canvas.draw_hline(14 + content_x, 67, 114, gfx::BLACK);
+    menu::PogoFont::drawText(canvas, 14 + content_x, 80, "no games yet",
+                             menu::FontFace::Regular14);
+    menu::PogoFont::drawText(canvas, 14 + content_x, 103, "folder:",
+                             menu::FontFace::Regular14);
+    menu::PogoFont::drawText(canvas, 14 + content_x, 122, folder_,
+                             menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 14 + content_x, 196, "B  back",
+                             menu::FontFace::Regular14);
+
+    const auto info = menu::Assets::info(art_);
+    const size_t frame = menu::Assets::frameAtTime(art_, elapsed_ms_);
+    canvas.draw_bitmap(info.source_x + content_x, info.source_y,
+                       menu::Assets::frame(art_, frame));
 }
 
 void GraphicsDemoApp::onEnter(AppContext& context) {
@@ -123,7 +420,7 @@ void GraphicsDemoApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
     } else if (event.button == input::Button::A) {
         paused_ = !paused_;
         context.haptics.play(paused_ ? haptics::Effect::DoubleClick : haptics::Effect::Confirm);
@@ -191,7 +488,7 @@ void InputMonitorApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
     }
 }
 
@@ -253,7 +550,7 @@ void HapticsLabApp::onEvent(AppContext& context, const input::Event& event) {
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         const size_t selected = list_.selected();
         static constexpr haptics::Effect effects[] = {
@@ -318,7 +615,7 @@ void AudioLabApp::onEvent(AppContext& context, const input::Event& event) {
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
         context.haptics.play(haptics::Effect::Confirm);
         context.audio.play(audio::Effect::Startup);
@@ -457,7 +754,7 @@ void WavPlayerApp::onEvent(AppContext& context, const input::Event& event) {
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home(); // Music intentionally keeps playing in the background.
+        context.launch("settings"); // Music intentionally keeps playing in the background.
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         startSelected(context);
         context.invalidate({18, 158, 364, 59});
@@ -540,20 +837,162 @@ void WavPlayerApp::draw(AppContext& context, const gfx::Rect&) {
     gui::draw_footer(canvas, context.theme, "A PLAY  START PAUSE  B BACK", "L/R SEEK 5S");
 }
 
-void SettingsApp::applyRuntime(AppContext& context) {
+namespace {
+
+struct SettingsHubItem {
+    const char* label;
+    const char* target;
+};
+
+constexpr SettingsHubItem kSettingsHubItems[] = {
+    {"preferences", "preferences"},
+    {"controls test", "input"},
+    {"audio test", "audio"},
+    {"haptics test", "haptics"},
+    {"motion & imu", "motion"},
+    {"sd card & wav", "wav"},
+    {"battery & usb", "power"},
+    {"display test", "graphics"},
+    {"about pogopo", "about"},
+};
+
+constexpr int kSettingsHubCount = static_cast<int>(
+    sizeof(kSettingsHubItems) / sizeof(kSettingsHubItems[0]));
+
+void settings_value(AppContext& context, int item, char* output, size_t size) {
+    const power::State power_state = context.power.state();
+    switch (item) {
+        case 0:
+            std::snprintf(output, size, "%u%%  %s", context.settings.volume(),
+                          context.settings.audioEnabled() ? "sound on" : "muted");
+            break;
+        case 1:
+            std::snprintf(output, size, "%s", context.input.ok() ? "tca9555 ok" : "input error");
+            break;
+        case 2:
+            std::snprintf(output, size, "%s  %lu hz", context.audio.ok() ? "i2s ok" : "audio error",
+                          static_cast<unsigned long>(context.audio.sampleRate()));
+            break;
+        case 3:
+            std::snprintf(output, size, "%s", context.haptics.ok() ? "motor ok" : "motor error");
+            break;
+        case 4:
+            std::snprintf(output, size, "%s", context.imu.ok() ? "bmi270 ok" : "imu error");
+            break;
+        case 5: {
+            const uint64_t mib = context.storage.mounted()
+                ? context.storage.capacityBytes() / (1024ULL * 1024ULL) : 0;
+            std::snprintf(output, size, context.storage.mounted() ? "%llu mib" : "not mounted",
+                          static_cast<unsigned long long>(mib));
+            break;
+        }
+        case 6:
+            if (power_state.battery_valid) {
+                std::snprintf(output, size, "%u%%  %umv%s",
+                              power_state.battery_percent, power_state.battery_mv,
+                              power_state.usb_present ? " usb" : "");
+            } else {
+                std::snprintf(output, size, "%s", power_state.usb_present ? "usb  battery wait" : "battery wait");
+            }
+            break;
+        case 7:
+            std::snprintf(output, size, "%s  400x240", context.gfx.ok() ? "sharp ok" : "lcd error");
+            break;
+        default:
+            std::snprintf(output, size, "step13.0");
+            break;
+    }
+}
+
+} // namespace
+
+void SettingsApp::onEnter(AppContext& context) {
+    enter_elapsed_ms_ = 0;
+    status_elapsed_ms_ = 0;
+    context.invalidate();
+}
+
+void SettingsApp::onExit(AppContext&) {}
+
+void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
+    if (!nav_event(event)) return;
+    if (event.button == input::Button::Top) {
+        selected_ = (selected_ + kSettingsHubCount - 1) % kSettingsHubCount;
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
+        context.invalidate();
+    } else if (event.button == input::Button::Down) {
+        selected_ = (selected_ + 1) % kSettingsHubCount;
+        context.haptics.play(haptics::Effect::Tick);
+        context.uiSound(audio::Effect::Tick);
+        context.invalidate();
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
+        context.haptics.play(haptics::Effect::Click);
+        context.uiSound(audio::Effect::Back);
+        context.home();
+    } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
+        context.haptics.play(haptics::Effect::Confirm);
+        context.uiSound(audio::Effect::Confirm);
+        context.launch(kSettingsHubItems[selected_].target);
+    }
+}
+
+void SettingsApp::update(AppContext& context, uint32_t dt_ms) {
+    enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 340U);
+    status_elapsed_ms_ += dt_ms;
+    if (enter_elapsed_ms_ < 340U || status_elapsed_ms_ >= 500U) {
+        if (status_elapsed_ms_ >= 500U) status_elapsed_ms_ %= 500U;
+        context.invalidate();
+    }
+}
+
+void SettingsApp::draw(AppContext& context, const gfx::Rect&) {
+    auto& canvas = context.gfx.canvas();
+    canvas.clear_clip(gfx::WHITE);
+    const float progress = ease_out_cubic(static_cast<float>(enter_elapsed_ms_) / 340.0f);
+    const int content_x = interpolate(400, 0, progress);
+
+    menu::PogoFont::drawText(canvas, 12 + content_x, -1, "settings",
+                             menu::FontFace::Italic22);
+    draw_battery(canvas, context.power.state(), status_elapsed_ms_, 366, 8);
+
+    constexpr int visible_rows = 8;
+    int first = std::clamp(selected_ - 3, 0, kSettingsHubCount - visible_rows);
+    for (int visible = 0; visible < visible_rows; ++visible) {
+        const int item = first + visible;
+        const int y = 37 + visible * 24;
+        const bool selected = item == selected_;
+        char value[64]{};
+        settings_value(context, item, value, sizeof(value));
+
+        if (selected) fill_pill(canvas, 9 + content_x, y + 1, 382, 22, gfx::BLACK);
+        const gfx::Color color = selected ? gfx::WHITE : gfx::BLACK;
+        const menu::FontFace face = selected
+            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
+        menu::PogoFont::drawText(canvas, 16 + content_x, y, kSettingsHubItems[item].label,
+                                 face, color);
+        const int value_width = menu::PogoFont::textWidth(face, value);
+        menu::PogoFont::drawText(canvas, 383 - value_width + content_x, y, value,
+                                 face, color);
+    }
+    menu::PogoFont::drawText(canvas, 13 + content_x, 224, "A open    B back",
+                             menu::FontFace::Regular14);
+}
+
+void PreferencesApp::applyRuntime(AppContext& context) {
     context.audio.setMasterVolume(context.settings.volume());
     context.audio.setEnabled(context.settings.audioEnabled());
     context.haptics.setEnabled(context.settings.hapticsEnabled());
 }
 
-void SettingsApp::markChanged(AppContext& context) {
+void PreferencesApp::markChanged(AppContext& context) {
     applyRuntime(context);
     save_delay_ms_ = 800;
     std::snprintf(status_, sizeof(status_), "CHANGED - AUTO SAVE");
     context.invalidate();
 }
 
-void SettingsApp::onEnter(AppContext& context) {
+void PreferencesApp::onEnter(AppContext& context) {
     selected_ = 0;
     save_delay_ms_ = 0;
     applyRuntime(context);
@@ -561,14 +1000,14 @@ void SettingsApp::onEnter(AppContext& context) {
     context.invalidate();
 }
 
-void SettingsApp::onExit(AppContext& context) {
+void PreferencesApp::onExit(AppContext& context) {
     if (context.settings.dirty()) {
         const esp_err_t err = context.settings.save();
         std::snprintf(status_, sizeof(status_), err == ESP_OK ? "SAVED" : "SAVE ERROR");
     }
 }
 
-void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
+void PreferencesApp::onEvent(AppContext& context, const input::Event& event) {
     if (!nav_event(event)) return;
 
     if (event.button == input::Button::Top) {
@@ -589,7 +1028,7 @@ void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
         if (context.settings.dirty()) context.settings.save();
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
         return;
     }
     if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
@@ -638,7 +1077,7 @@ void SettingsApp::onEvent(AppContext& context, const input::Event& event) {
     context.uiSound(audio::Effect::Click);
 }
 
-void SettingsApp::update(AppContext& context, uint32_t dt_ms) {
+void PreferencesApp::update(AppContext& context, uint32_t dt_ms) {
     if (save_delay_ms_ == 0 || !context.settings.dirty()) return;
     if (dt_ms >= save_delay_ms_) {
         save_delay_ms_ = 0;
@@ -650,12 +1089,13 @@ void SettingsApp::update(AppContext& context, uint32_t dt_ms) {
     }
 }
 
-void SettingsApp::draw(AppContext& context, const gfx::Rect&) {
+void PreferencesApp::draw(AppContext& context, const gfx::Rect&) {
     auto& c = context.gfx.canvas();
-    c.clear_clip(context.theme.background);
-    gui::draw_header(c, context.theme, "SYSTEM SETTINGS", context.settings.dirty() ? "UNSAVED" : "NVS");
+    c.clear_clip(gfx::WHITE);
+    menu::PogoFont::drawText(c, 12, -1, "preferences", menu::FontFace::Italic22);
+    draw_battery(c, context.power.state(), save_delay_ms_, 366, 8);
 
-    const char* labels[] = {"MASTER VOLUME", "AUDIO OUTPUT", "UI SOUNDS", "HAPTICS", "MOTION SENS."};
+    const char* labels[] = {"master volume", "audio output", "ui sounds", "haptics", "motion sensitivity"};
     char values[5][20]{};
     std::snprintf(values[0], sizeof(values[0]), "%u%%", static_cast<unsigned>(context.settings.volume()));
     std::snprintf(values[1], sizeof(values[1]), "%s", context.settings.audioEnabled() ? "ON" : "OFF");
@@ -664,19 +1104,20 @@ void SettingsApp::draw(AppContext& context, const gfx::Rect&) {
     std::snprintf(values[4], sizeof(values[4]), "%s", settings::motion_sensitivity_name(context.settings.motionSensitivity()));
 
     for (int i = 0; i < 5; ++i) {
-        const int y = 43 + i * 28;
+        const int y = 41 + i * 31;
         const bool focus = i == selected_;
-        const gfx::Color bg = focus ? context.theme.focus_background : context.theme.background;
-        const gfx::Color fg = focus ? context.theme.focus_foreground : context.theme.foreground;
-        c.fill_rect(20, y, 360, 25, bg);
-        c.draw_rect(20, y, 360, 25, context.theme.border);
-        c.draw_text(30, y + 9, labels[i], gfx::font5x7(), fg, 1, true, bg);
-        const int value_x = 366 - static_cast<int>(std::strlen(values[i])) * 6;
-        c.draw_text(value_x, y + 9, values[i], gfx::font5x7(), fg, 1, true, bg);
+        if (focus) fill_pill(c, 9, y + 1, 382, 26, gfx::BLACK);
+        const gfx::Color color = focus ? gfx::WHITE : gfx::BLACK;
+        const menu::FontFace face = focus
+            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
+        menu::PogoFont::drawText(c, 17, y, labels[i], face, color);
+        const int value_x = 381 - menu::PogoFont::textWidth(face, values[i]);
+        menu::PogoFont::drawText(c, value_x, y, values[i], face, color);
     }
 
-    c.draw_text(23, 190, status_, gfx::font5x7(), context.theme.foreground);
-    gui::draw_footer(c, context.theme, "L/R OR A CHANGE  B BACK", "START DEFAULTS");
+    menu::PogoFont::drawText(c, 14, 200, status_, menu::FontFace::Italic14);
+    menu::PogoFont::drawText(c, 14, 220, "L/R or A change   B back   START defaults",
+                             menu::FontFace::Regular14);
 }
 
 void MotionLabApp::onEnter(AppContext& context) {
@@ -692,7 +1133,7 @@ void MotionLabApp::onEnter(AppContext& context) {
 void MotionLabApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type != input::EventType::Pressed) return;
     if (event.button == input::Button::B) {
-        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.home();
+        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.launch("settings");
     } else if (event.button == input::Button::A) {
         latest_ = context.imu.sample();
         zero_roll_ = latest_.roll;
@@ -796,7 +1237,7 @@ void PowerStatusApp::onEnter(AppContext& context) {
 }
 void PowerStatusApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
-        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.home();
+        context.haptics.play(haptics::Effect::Click); context.uiSound(audio::Effect::Back); context.launch("settings");
     }
 }
 void PowerStatusApp::update(AppContext& context, uint32_t) {
@@ -831,24 +1272,28 @@ void AboutApp::onEvent(AppContext& context, const input::Event& event) {
     if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
         context.uiSound(audio::Effect::Back);
-        context.home();
+        context.launch("settings");
     }
 }
 
 void AboutApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
-    canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "ABOUT POGOPO", "ESP-IDF");
-
-    gui::Panel panel({18, 42, 364, 165});
-    panel.draw(canvas, context.theme);
-    canvas.draw_text(35, 56, "pogopoOS 2.0", gfx::font5x7(), context.theme.foreground, 2);
-    gui::draw_wrapped_text(canvas, {35, 88, 330, 92},
-        "Native ESP-IDF platform with graphics, GUI, input, haptics, mixed I2S audio, streaming SD WAV, persistent NVS settings, BMI270 motion and BQ24295 power management.",
-        context.theme, 1, 3);
-    canvas.draw_text(35, 183, "Sharp 400x240 / ESP32-S3 / STEP8", gfx::font5x7(), context.theme.foreground);
-    draw_back_footer(context);
+    canvas.clear_clip(gfx::WHITE);
+    menu::PogoFont::drawText(canvas, 12, -1, "about pogopo", menu::FontFace::Italic22);
+    draw_battery(canvas, context.power.state(), 0, 366, 8);
+    canvas.draw_rect(12, 40, 376, 164, gfx::BLACK);
+    menu::PogoFont::drawText(canvas, 28, 50, "pogopoOS 2.0  /  STEP13.0",
+                             menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 28, 78,
+        "ESP32-S3  16 MB flash  8 MB PSRAM\n"
+        "Sharp Memory LCD  400 x 240\n"
+        "Peanut-GB  /  32768 Hz I2S\n"
+        "BMI270  TCA9555  BQ24295  SDMMC",
+        menu::FontFace::Regular14);
+    menu::PogoFont::drawText(canvas, 28, 172,
+        "animated ui revision 1", menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 14, 220, "B back",
+                             menu::FontFace::Regular14);
 }
 
 } // namespace pogopo::demo
-

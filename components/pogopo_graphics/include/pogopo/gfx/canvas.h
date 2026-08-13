@@ -34,6 +34,11 @@ public:
                      Color foreground = BLACK,
                      bool transparent_background = true,
                      Color background = WHITE);
+    void draw_bitmap_scaled(int x, int y, int width, int height,
+                            const Bitmap& bitmap,
+                            Color foreground = BLACK,
+                            bool transparent_background = true,
+                            Color background = WHITE);
     void draw_sprite(const Sprite& sprite);
     // Draw a 2-bit indexed image (0=white, 3=black) using nearest-neighbour
     // scaling and an optional 2x2 ordered dither for the two middle shades.

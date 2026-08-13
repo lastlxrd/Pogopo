@@ -6,6 +6,7 @@
 
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
+#include "pogopo_menu.h"
 
 namespace pogopo::demo {
 
@@ -16,10 +17,48 @@ public:
     const char* title() const override { return "Launcher"; }
     void onEnter(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
 
 private:
-    gui::List list_{{20, 43, 360, 164}};
+    enum class Phase : uint8_t { Entering, Idle, Switching, Opening };
+    void startSwitch(AppContext& context, int direction);
+    void drawArt(AppContext& context, int item, int y_offset, uint32_t elapsed_ms);
+    void drawSettingsArt(AppContext& context, int y_offset, uint32_t elapsed_ms);
+    void drawGameBoyRoll(AppContext& context, float progress, bool entering);
+
+    int selected_ = 0;
+    int previous_ = 0;
+    int direction_ = 1;
+    Phase phase_ = Phase::Entering;
+    uint32_t phase_elapsed_ms_ = 0;
+    uint32_t art_elapsed_ms_ = 0;
+    uint32_t redraw_elapsed_ms_ = 0;
+    uint16_t last_art_key_ = UINT16_MAX;
+    uint8_t last_battery_key_ = 0xFF;
+    const char* launch_target_ = nullptr;
+};
+
+class EmptyLibraryApp final : public Application {
+public:
+    EmptyLibraryApp(const char* app_id, const char* platform_name,
+                    const char* folder, menu::Art art)
+        : app_id_(app_id), platform_name_(platform_name), folder_(folder), art_(art) {}
+    const char* id() const override { return app_id_; }
+    const char* title() const override { return platform_name_; }
+    void onEnter(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
+    const char* app_id_;
+    const char* platform_name_;
+    const char* folder_;
+    menu::Art art_;
+    uint32_t elapsed_ms_ = 0;
+    uint32_t redraw_elapsed_ms_ = 0;
+    uint32_t enter_elapsed_ms_ = 0;
+    size_t last_frame_ = static_cast<size_t>(-1);
 };
 
 class GraphicsDemoApp final : public Application {
@@ -120,6 +159,21 @@ public:
     void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
 private:
+    int selected_ = 0;
+    uint32_t enter_elapsed_ms_ = 0;
+    uint32_t status_elapsed_ms_ = 0;
+};
+
+class PreferencesApp final : public Application {
+public:
+    const char* id() const override { return "preferences"; }
+    const char* title() const override { return "Preferences"; }
+    void onEnter(AppContext& context) override;
+    void onExit(AppContext& context) override;
+    void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
+    void draw(AppContext& context, const gfx::Rect& dirty_region) override;
+private:
     void applyRuntime(AppContext& context);
     void markChanged(AppContext& context);
     int selected_ = 0;
@@ -168,4 +222,3 @@ public:
 };
 
 } // namespace pogopo::demo
-

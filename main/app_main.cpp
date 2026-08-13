@@ -43,6 +43,10 @@ static pogopo::GameBoy g_gameboy;
 static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_storage, g_imu, g_power, g_settings);
 
 static pogopo::demo::LauncherApp g_launcher_app;
+static pogopo::demo::EmptyLibraryApp g_pogopo_library_app(
+    "pogopo_library", "pogopo", "/pogopo/games", pogopo::menu::Art::Pogopo);
+static pogopo::demo::EmptyLibraryApp g_playdate_library_app(
+    "playdate_library", "playdate", "/playdate", pogopo::menu::Art::Playdate);
 static pogopo::demo::GraphicsDemoApp g_graphics_app;
 static pogopo::demo::InputMonitorApp g_input_app;
 static pogopo::demo::HapticsLabApp g_haptics_app;
@@ -51,6 +55,7 @@ static pogopo::demo::WavPlayerApp g_wav_app;
 static pogopo::demo::MotionLabApp g_motion_app;
 static pogopo::demo::PowerStatusApp g_power_app;
 static pogopo::demo::SettingsApp g_settings_app;
+static pogopo::demo::PreferencesApp g_preferences_app;
 static pogopo::demo::AboutApp g_about_app;
 static pogopo::demo::GameBoyApp g_gameboy_app(g_gameboy);
 static pogopo::demo::GameBoyBrowserApp g_gameboy_browser_app(g_gameboy_app);
@@ -390,6 +395,8 @@ void os_task(void*) {
     uint32_t settings_dirty_ms = 0;
 
     g_app_manager.registerApp(g_launcher_app, true);
+    g_app_manager.registerApp(g_pogopo_library_app);
+    g_app_manager.registerApp(g_playdate_library_app);
     g_app_manager.registerApp(g_gameboy_browser_app);
     g_app_manager.registerApp(g_gameboy_app);
     g_app_manager.registerApp(g_graphics_app);
@@ -400,13 +407,28 @@ void os_task(void*) {
     g_app_manager.registerApp(g_motion_app);
     g_app_manager.registerApp(g_power_app);
     g_app_manager.registerApp(g_settings_app);
+    g_app_manager.registerApp(g_preferences_app);
     g_app_manager.registerApp(g_about_app);
+
+    if (!pogopo::menu::Assets::valid()) {
+        ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
+                 static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
+    } else {
+        ESP_LOGI(TAG, "STEP13.0 menu assets ready: %u bytes",
+                 static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
+    }
 
     play_startup_animation();
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP12.4 launcher ready after startup");
+    ESP_LOGI(TAG, "STEP13.0 animated launcher ready after startup");
+
+    // The startup can wait in its 12..15 loop indefinitely. Reset both OS
+    // clocks so the first menu frame begins at animation time zero instead of
+    // consuming the 100 ms dt clamp before it is ever drawn.
+    last_us = esp_timer_get_time();
+    wake = xTaskGetTickCount();
 
     while (true) {
         const int64_t now_us = esp_timer_get_time();
@@ -450,7 +472,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP12.4 INTERACTIVE STARTUP");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.0 ANIMATED MENU");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -481,5 +503,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP12.4 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.0 system tasks started: startup animation pending");
 }
