@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="High-level Pogopo hardware and software architecture.">
+    <title>Architecture · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="architecture" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">System</p>
+        <h1>Architecture</h1>
+        <p class="lead">PogopoOS separates board-specific communication from reusable services and application behavior. The goal is a small set of understandable layers, not documentation for every source file.</p>
+        <hr class="page-rule">
+
+        <h2>Logical layers</h2>
+        <div class="architecture-stack" role="img" aria-label="Applications use PogopoOS services, which use drivers connected to hardware">
+          <div class="architecture-layer"><strong>Applications / Games / Emulators</strong><span>Launcher, settings, diagnostics, libraries, Game Boy</span></div>
+          <div class="architecture-layer"><strong>PogopoOS</strong><span>App manager, lifecycle, quick menu, startup and shutdown flows</span></div>
+          <div class="architecture-layer"><strong>Services</strong><span>Graphics, input, audio, storage, motion, haptics, power, settings</span></div>
+          <div class="architecture-layer"><strong>Drivers</strong><span>SPI display, I²C devices, I²S output, SDMMC, ADC, GPIO</span></div>
+          <div class="architecture-layer"><strong>Hardware</strong><span>ESP32-S3, Sharp LCD, TCA9555, BMI270, MAX98357A, microSD, BQ24295</span></div>
+        </div>
+        <div class="diagram-placeholder"><strong>Architecture illustration placeholder</strong>TODO: add the final exported diagram while keeping these verified layer boundaries.</div>
+
+        <h2>Hardware and drivers</h2>
+        <p>Board pin mappings live in one board definition, while each component owns its peripheral protocol. The display driver controls SPI and VCOM, storage owns SDMMC mounting, audio owns I²S, and I²C services communicate with the input expander, IMU, and charger.</p>
+
+        <h2>Services</h2>
+        <p>Services expose device behavior instead of raw buses. For example, an app asks the input service for button state, draws through the graphics API, and submits audio without directly configuring the TCA9555, Sharp LCD, or MAX98357A.</p>
+
+        <h2>PogopoOS layer</h2>
+        <p>The OS layer initializes services, registers applications, controls which app owns input, and manages overlays such as the quick menu and shutdown animation. It also coordinates save flushing and display clearing during power-off.</p>
+
+        <h2>Applications and runtimes</h2>
+        <p>Applications receive shared service references from the app manager. The Game Boy runtime adds emulator-specific CPU, audio, ROM-cache, and framebuffer work, but it still enters and exits through the same application lifecycle as system screens.</p>
+
+        <h2>Task and core organization</h2>
+        <p>FreeRTOS work is separated by latency and ownership. The current Game Boy path runs emulation and input on Core 1. Core 0 handles fixed-clock I²S output, decoupled APU generation, motion and power services, VCOM maintenance, and the lower-priority PogopoOS UI/display loop.</p>
+        <p>This split is a performance decision for the current firmware, not a permanent ABI. Changes are validated with serial timing, underrun, heap, cache, and I²C diagnostics.</p>
+
+        <h2>Typical data flow</h2>
+        <dl class="fact-list">
+          <div class="fact-row"><dt>Input</dt><dd>TCA9555 → input service → app manager → active application</dd></div>
+          <div class="fact-row"><dt>Graphics</dt><dd>Application canvas → 1-bit framebuffer → dirty/full SPI transfer → Sharp LCD</dd></div>
+          <div class="fact-row"><dt>Game Boy audio</dt><dd>MiniGB APU → internal ring buffer → fixed-rate I²S task → MAX98357A</dd></div>
+          <div class="fact-row"><dt>Shutdown</dt><dd>Power hold → overlay → save flush → physical LCD clear → BQ24295 ship mode</dd></div>
+        </dl>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Pogopo engineering case studies with measured problems, investigations, solutions, and results.">
+    <title>Engineering · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="engineering" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">Project</p>
+        <h1>Engineering</h1>
+        <p class="lead">This page focuses on the work behind the features: observed failure modes, the evidence used to isolate them, the implemented change, and the result that can be supported by the repository history.</p>
+        <hr class="page-rule">
+
+        <section class="case-study">
+          <h2>Display performance</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>The ESP-IDF Sharp driver was configured for 2 MHz. A worst-case 400 × 240 transfer took about 49 ms on the wire, making a 30 FPS Game Boy presentation path impossible.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Driver timing was compared with the stable Arduino firmware on the same board. Serial performance logs separated emulator rate, LCD rate, and frame time instead of treating them as one FPS value.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>The display bus was restored to 14 MHz. Dirty-row transfers stayed enabled; framebuffer scans and DMA staging were kept in internal memory where possible; full-screen output received a direct fast path.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>Worst-case transfer time fell to roughly 7 ms on the wire. The STEP9.5 baseline records approximately 29.9 visible LCD updates per second during full-speed Game Boy emulation.</dd></div>
+          </dl>
+        </section>
+
+        <section class="case-study">
+          <h2>Game Boy emulator optimization</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>Large ROMs executing from PSRAM could advance too slowly. One measured regression reported <code>emu=39</code>, <code>lcd=31</code>, and frame time around 26 ms; automatic frame skipping could make a slow game look even slower.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Once-per-second diagnostics tracked emulated frames, presented frames, ROM location, cache hits and misses, cache-fill time, audio state, heap state, and I²C errors. The data showed that LCD rate and Game Boy CPU rate were different bottlenecks.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>CPU, timers, interrupts, joypad, and APU writes now run for every 59.7 Hz Game Boy frame while expensive LCD scanline drawing is skipped on alternate frames. Larger PSRAM ROMs use an adaptive internal 16 KiB-page cache with bank 0 pinned and LRU replacement.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>The documented performance baseline is full-rate 59.7 Hz Game Boy emulation with approximately 29.9 Hz LCD presentation, including ROMs that do not fit entirely in internal memory.</dd></div>
+          </dl>
+        </section>
+
+        <section class="case-study">
+          <h2>Memory, PSRAM, and internal RAM</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>ROM data benefits from the 8 MB PSRAM, but latency-sensitive framebuffers, DMA buffers, task stacks, and cache pages compete for limited internal memory. A single 256 KiB early arena request could fail completely and leave <code>arena=0</code>.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Heap diagnostics recorded total free internal RAM, largest contiguous block, PSRAM location, and cache-page availability. The three original 160 × 144 shade buffers also accounted for 69,120 bytes.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>Four Game Boy shades are packed at 2 bits per pixel, reducing one frame from 23,040 to 5,760 bytes and three buffers to 17,280 bytes. The firmware reserves the largest 16 KiB-aligned internal arena up to 128 KiB while leaving 128 KiB of headroom.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>The packed framebuffers save 51,840 bytes. ROMs that fit use the arena directly; larger ROMs keep bulk data in PSRAM and reuse the arena as a two-to-eight-page bank cache.</dd></div>
+          </dl>
+          <p class="todo-note">TODO: add separate IRAM/instruction-cache measurements. The current repository evidence documents data-memory placement and instruction-cache pressure, not a complete IRAM benchmark.</p>
+        </section>
+
+        <section class="case-study">
+          <h2>Audio buffering</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>Generating one APU packet inside each video frame made slow rendering starve audio. An adaptive playback rate could conceal a draining buffer, but it also changed pitch.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>The implementation was compared with the stable Arduino path, and underrun/overflow counters were added to the performance line. The stable design used a dedicated high-priority Core 0 producer paced by blocking I²S output.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>MiniGB APU and MAX98357A stay locked to 32,768 Hz. A priority-7 Core 0 APU task feeds an internal ring buffer; the priority-8 I²S writer consumes at the hardware clock. Underruns fade out and back in without stretching playback.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>Audio timing is decoupled from the visible frame rate and the runtime no longer changes playback speed to hide missed deadlines. The fixed-rate path is retained in the current baseline.</dd></div>
+          </dl>
+        </section>
+
+        <section class="case-study">
+          <h2>FreeRTOS task and core organization</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>Emulation, I²S, display work, input, motion, and system UI have different latency requirements. Running them without clear ownership risks audio underruns, input lag, and watchdog starvation.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Serial diagnostics and acceptance tests tracked frame deadlines, audio counters, task watchdog faults, and I²C errors. The emulator also yields a real RTOS tick periodically when continuously late.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>Core 1 owns the priority-6 emulator and priority-7 input path. Core 0 owns priority-8 I²S, priority-7 APU generation, BMI270/power/VCOM services, and the lower-priority PogopoOS UI/display loop.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>The task split used by the 59.7 Hz emulator / ~29.9 Hz LCD baseline is now explicit in configuration rather than implicit in the main loop.</dd></div>
+          </dl>
+          <p class="todo-note">TODO: publish captured runtime traces and worst-case task latency measurements.</p>
+        </section>
+
+        <section class="case-study">
+          <h2>Hardware debugging</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>Custom-board bring-up needs to distinguish wiring, bus, device-ID, and software-state failures across several peripherals.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Firmware probes the TCA9555 at <code>0x20</code>, BMI270 at <code>0x68</code>, and BQ24295 at <code>0x6B</code>, then reads identity, configuration, status, and fault registers.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>Startup and system-status diagnostics report device health, button-port state, charger status/fault registers, internal RAM, and PSRAM. Dedicated on-device apps exercise controls, audio, haptics, motion, power, and display behavior.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>Board failures can be narrowed to a named peripheral and register set instead of appearing only as a broken UI feature.</dd></div>
+          </dl>
+          <p class="todo-note">TODO: add oscilloscope captures, failed-board examples, and the corresponding root causes.</p>
+        </section>
+
+        <section class="case-study">
+          <h2>Storage and peripheral reliability</h2>
+          <dl class="case-flow">
+            <div class="case-step"><dt>Problem</dt><dd>Removable storage, I²C controls, and power-off can fail at inconvenient times: a mount can fail, a file path can exceed fixed buffers, an I²C read can time out, or a save can be interrupted.</dd></div>
+            <div class="case-step"><dt>Investigation</dt><dd>Drivers expose explicit error returns and counters. Storage checks mount, extension, path length, file format, and allocation limits; input tracks I²C read errors; shutdown checks USB and save state.</dd></div>
+            <div class="case-step"><dt>Solution</dt><dd>SD mounting never formats on failure, file paths are bounds-checked, TCA9555 reads use a 10 ms timeout with released-state fallback, gameplay save writes are deferred, and pending saves flush on app exit or shutdown.</dd></div>
+            <div class="case-step"><dt>Result</dt><dd>The current code has defined failure behavior for these cases instead of silently formatting storage, holding a direction, or writing saves in the emulator’s critical path.</dd></div>
+          </dl>
+          <p class="todo-note">TODO: publish long-duration SD, save-cycle, I²C fault-injection, and power-interruption test results.</p>
+        </section>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

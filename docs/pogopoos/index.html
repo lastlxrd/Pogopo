@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="PogopoOS software stack, services, applications, games, and emulator architecture.">
+    <title>pogopoOS · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="pogopoos" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">System</p>
+        <h1>pogopoOS</h1>
+        <p class="lead">PogopoOS is the embedded C++ firmware that turns the custom board into a handheld platform. It owns hardware services, the 1-bit interface, applications, power behavior, and emulator integration.</p>
+        <hr class="page-rule">
+
+        <h2>Software architecture diagram</h2>
+        <div class="diagram-placeholder"><strong>PogopoOS diagram placeholder</strong>TODO: replace this area with a verified task and component diagram.</div>
+
+        <h2>ESP-IDF</h2>
+        <p>The current firmware targets ESP-IDF 6.0.2. It uses ESP-IDF drivers for SPI, I²C, I²S, SDMMC, ADC, timers, heap capabilities, non-volatile settings, and FreeRTOS task scheduling.</p>
+
+        <h2>Application and launcher architecture</h2>
+        <p>A shared <code>AppManager</code> coordinates applications and provides access to graphics, input, haptics, audio, storage, motion, power, and settings services. The launcher selects Pogopo, Game Boy, Playdate, or settings libraries and opens the matching app.</p>
+        <p>The launcher, settings screens, diagnostics, file browser, and Game Boy wrapper use the same application boundary. This keeps device ownership centralized instead of letting each screen initialize hardware independently.</p>
+
+        <h2>Graphics</h2>
+        <p>The graphics component provides a canvas, bitmap and sprite drawing, text rendering, clipping, widgets, and a single Sharp LCD presentation path. The 1-bit design is intentional: system screens and game output share the same monochrome visual constraints.</p>
+
+        <h2>Display</h2>
+        <p>The Sharp LS027B7DH01 driver keeps a 12 KB 1-bit framebuffer in internal RAM when possible. It supports dirty-row updates and a 14 MHz full-screen fast path, uses DMA staging memory, and maintains the panel’s VCOM requirement in a dedicated task.</p>
+
+        <h2>Input</h2>
+        <p>The input service polls the TCA9555 for the eight front controls and reports pressed, held, and released state to applications. I²C failures use a released-sample fail-safe. The dedicated Power button is handled separately so a short press opens the quick menu while a hold starts shutdown.</p>
+
+        <h2>Audio</h2>
+        <p>The audio service owns the MAX98357A I²S output, system tones, WAV playback, and the emulator’s real-time stream. The Game Boy path remains fixed at 32,768 Hz; buffer underruns are surfaced in diagnostics instead of changing playback speed and pitch.</p>
+
+        <h2>Storage</h2>
+        <p>microSD is mounted as a FAT filesystem over four-bit SDMMC. The storage component lists files, loads WAV data, and provides the file paths used by the Game Boy browser and other content-driven apps.</p>
+
+        <h2>Motion</h2>
+        <p>The BMI270 service reads accelerometer and gyroscope data over I²C. Current firmware includes a motion/IMU diagnostic app; wider gameplay use remains application work.</p>
+
+        <h2>Haptics</h2>
+        <p>The haptics component drives the board’s vibration output and gives system screens and applications a shared way to request tactile feedback.</p>
+
+        <h2>Settings</h2>
+        <p>Persistent preferences include volume and UI feedback behavior. The settings area also exposes controls, audio, haptics, motion, system status, and About screens for on-device validation.</p>
+
+        <h2>Power management</h2>
+        <p>The power service reads charger state and battery voltage, distinguishes short and held Power presses, and prevents the boot-time button release from becoming a false quick-menu event. Shutdown saves state, blocks ship mode while USB is present, clears the physical LCD, and then requests BQ24295 ship mode.</p>
+        <p>The 25-frame shutdown overlay begins after a short hold delay. Releasing Power before completion reverses the animation and restores the suspended application.</p>
+
+        <h2>Games and applications</h2>
+        <p>The current tree includes the launcher, libraries, settings, hardware diagnostics, graphics/input/audio/haptics/motion tests, a WAV player, and the Game Boy browser/application. Pogopo and Playdate library screens are present as places for future content; their presence does not imply general Playdate compatibility.</p>
+
+        <h2>Emulators</h2>
+        <p><span class="status">Working</span>The Game Boy runtime integrates Peanut-GB for CPU/PPU emulation and MiniGB APU for audio. ROMs are read from <code>/gameboy/*.gb</code>. The current performance path targets every 59.7 Hz emulated frame while presenting approximately every second LCD frame.</p>
+        <p><span class="status experimental">Experimental</span>Other runtimes have been explored separately, but they are not listed as production capabilities until their performance and compatibility are verified.</p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

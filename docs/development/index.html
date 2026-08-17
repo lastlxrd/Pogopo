@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Current Pogopo development status, build setup, app workflow, and planned engineering work.">
+    <title>Development · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="development" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">Project</p>
+        <h1>Development</h1>
+        <p class="lead">A concise view of what works today, what remains experimental, what is planned, and how the current firmware is built.</p>
+        <hr class="page-rule">
+
+        <h2>Working</h2>
+        <ul>
+          <li><span class="status">Working</span>ESP32-S3 board bring-up and diagnostics for the TCA9555, BMI270, BQ24295, Sharp display, SDMMC, I²S audio, and memory state.</li>
+          <li><span class="status">Working</span>PogopoOS launcher, app manager, 1-bit graphics, settings, quick menu, startup/outro animation, and controlled shutdown.</li>
+          <li><span class="status">Working</span>Controls, motion, haptics, audio, storage, battery status, persistent preferences, and on-device test apps.</li>
+          <li><span class="status">Working</span>Classic Game Boy runtime with fixed-rate audio, SD-card ROM browser, ordered dithering, save handling, and the documented 59.7 Hz / ~29.9 Hz performance split.</li>
+        </ul>
+
+        <h2>Experimental</h2>
+        <ul>
+          <li><span class="status experimental">Experimental</span>The right-side mechanical/electrical module interface and its future PogopoOS discovery model.</li>
+          <li><span class="status experimental">Experimental</span>Playdate-style and other runtime research. A launcher entry or library placeholder does not mean general compatibility.</li>
+          <li><span class="status experimental">Experimental</span>Native package format, public game template, and a larger Pogopo software library.</li>
+          <li><span class="status experimental">Experimental</span>Formal long-duration reliability, power, thermal, storage, and task-latency characterization.</li>
+        </ul>
+
+        <h2>Planned</h2>
+        <ul>
+          <li><span class="status planned">Planned</span>Freeze and publish the verified module connector, limits, protocol, and mechanical envelope.</li>
+          <li><span class="status planned">Planned</span>Add hardware block diagrams, software/task diagrams, PCB details, enclosure specifications, and measured power data.</li>
+          <li><span class="status planned">Planned</span>Add final console, PCB, close-up, and on-device gameplay media to the Gallery.</li>
+          <li><span class="status planned">Planned</span>Publish a project license and clarify the public release scope for hardware and firmware sources.</li>
+        </ul>
+
+        <h2>Build and flash</h2>
+        <p>The current documented environment is ESP-IDF 6.0.2 targeting <code>esp32s3</code>. Run the commands from the repository root and replace <code>COM7</code> with the console’s serial port.</p>
+        <div class="code-block">
+          <div class="code-label">ESP-IDF terminal</div>
+          <pre><code>idf.py set-target esp32s3
+idf.py build
+idf.py -p COM7 flash monitor</code></pre>
+        </div>
+
+        <h2>SD card layout</h2>
+        <p>The card is mounted as a FAT filesystem over four-bit SDMMC. Game Boy ROMs use the <code>.gb</code> extension under <code>/gameboy</code>.</p>
+        <div class="code-block">
+          <div class="code-label">Current content layout</div>
+          <pre><code>/gameboy/
+  Tetris.gb
+  Kirby's Dream Land.gb
+/pogopo/
+/playdate/</code></pre>
+        </div>
+        <p><code>/pogopo</code> and <code>/playdate</code> are library locations/placeholders; no stable public package format is claimed yet.</p>
+
+        <h2>Application workflow</h2>
+        <p>New native screens implement the shared application interface, are registered with the app manager, and use existing services for drawing, input, audio, haptics, storage, motion, power, and settings. Hardware testing must cover entry/exit, quick-menu suspend/resume, return navigation, and real Sharp LCD timing.</p>
+
+        <h2>Project layout</h2>
+        <p>The repository is a normal ESP-IDF project. Reusable system services live under <code>components/</code>; board pins, app registration, startup, and built-in apps are connected from <code>main/</code>. Generated 1-bit assets are committed with the firmware code that consumes them.</p>
+
+        <h2>Development history</h2>
+        <p>The repository README records the sequence of launcher, power, quick-menu, Game Boy, display, audio, and memory changes. It remains a useful implementation history, but the pages in this site describe the current architecture and verified baseline.</p>
+        <p><a class="text-link" href="https://github.com/lastlxrd/pogopoOS#readme">Read the repository history on GitHub ↗</a></p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

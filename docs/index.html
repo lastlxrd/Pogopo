@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Technical documentation and engineering portfolio for the pogopo modular handheld platform.">
+    <title>Overview · pogopo</title>
+    <link rel="icon" href="assets/jabaLOGO.png" type="image/png">
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="assets/styles.css">
+  </head>
+  <body data-page="home" data-root="./">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <a class="brand" data-home-link>
+          <img class="brand-logo" data-logo alt="pogopo frog logo">
+          <span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span>
+        </a>
+        <span class="header-spacer"></span>
+        <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <span>Search docs</span><kbd class="key-hint">/</kbd>
+        </button>
+        <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg>
+        </a>
+      </div>
+    </header>
+
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation">
+        <nav id="site-nav"></nav>
+        <p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p>
+      </aside>
+
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">Technical overview</p>
+        <h1>pogopo</h1>
+        <p class="lead">pogopo is a compact handheld game console and modular pocket platform with a custom PogopoOS firmware, a monochrome Sharp Memory LCD, and a deliberately recognizable 1-bit interface.</p>
+        <div class="tag-row" aria-label="Project tags">
+          <span class="tag">ESP32-S3</span><span class="tag">400 × 240 Memory LCD</span><span class="tag">ESP-IDF / C++</span><span class="tag">Custom PCB</span>
+        </div>
+        <div class="hero-media" aria-label="Device photograph placeholder">
+          <img src="assets/jabaLOGO.png" alt="" aria-hidden="true">
+          <div class="hero-media-copy"><strong>Device photograph</strong><span>TODO: add the final console photo when available.</span></div>
+        </div>
+
+        <h2>What is pogopo?</h2>
+        <p>The project is not only a handheld for games. It is intended as a small platform that can change with the user: a game console today and a compact tool for hardware or software experiments later. The right side is reserved for a mechanical and electrical expansion area where interchangeable modules can connect.</p>
+        <p>I designed the device around a custom PCB and implemented the current ESP-IDF firmware stack, device drivers, launcher, system services, 1-bit UI, power flow, diagnostics, and emulator integration described in these pages.</p>
+
+        <h2>Current capabilities</h2>
+        <ul>
+          <li>Animated 1-bit launcher, settings, library screens, startup sequence, and a Power-button quick menu.</li>
+          <li>Physical controls, audio, haptics, motion sensing, battery status, and microSD storage.</li>
+          <li>Game Boy emulation using Peanut-GB and MiniGB APU, with a full-rate 59.7 Hz emulation clock and approximately 29.9 Hz LCD presentation.</li>
+          <li>Reusable PogopoOS components for graphics, input, audio, storage, motion, power, settings, and applications.</li>
+          <li>A work-in-progress modular expansion concept on the right side of the enclosure.</li>
+        </ul>
+
+        <h2>At a glance</h2>
+        <dl class="fact-list">
+          <div class="fact-row"><dt>Compute</dt><dd>Dual-core ESP32-S3, 16 MB flash, 8 MB PSRAM</dd></div>
+          <div class="fact-row"><dt>Display</dt><dd>Sharp LS027B7DH01, 400 × 240 pixels, 1-bit Memory LCD over SPI</dd></div>
+          <div class="fact-row"><dt>Firmware</dt><dd>ESP-IDF 6.0.2 and C++ components running on FreeRTOS</dd></div>
+          <div class="fact-row"><dt>Peripherals</dt><dd>BMI270 IMU, MAX98357A I²S audio, TCA9555 controls, vibration motor, microSD over four-bit SDMMC</dd></div>
+          <div class="fact-row"><dt>Software</dt><dd>Launcher, app framework, system services, native demos, and Game Boy runtime</dd></div>
+          <div class="fact-row"><dt>Project state</dt><dd>Working hardware and firmware with selected runtime and modularity work still experimental</dd></div>
+        </dl>
+
+        <h2>PogopoOS</h2>
+        <p>PogopoOS is a purpose-built embedded firmware stack rather than a Linux distribution. It starts hardware services, owns the Sharp LCD framebuffer, routes input and power events, and runs applications through a shared app manager. Time-sensitive emulator and audio work is separated across the ESP32-S3 cores with pinned FreeRTOS tasks.</p>
+        <p><a class="text-link" href="pogopoos/">Read the PogopoOS overview →</a></p>
+
+        <h2>Modularity</h2>
+        <p>The planned right-side expansion area combines mechanical attachment with an electrical connection. The goal is to support user-swappable hardware without turning the main console into a one-purpose device. Connector choice, electrical limits, module discovery, and the first verified modules are still work in progress and are documented as such.</p>
+        <p><a class="text-link" href="modularity/">Read about the expansion concept →</a></p>
+
+        <h2>Project links</h2>
+        <div class="link-row">
+          <a href="https://github.com/lastlxrd/pogopoOS">GitHub source ↗</a>
+          <a href="gallery/">UI and animation demo →</a>
+          <a href="hardware/">Hardware documentation →</a>
+          <a href="engineering/">Engineering case studies →</a>
+        </div>
+
+        <div class="callout">
+          <p class="callout-title">Documentation policy</p>
+          <p>Measured behavior is stated as a result. Unverified hardware details, final module specifications, and missing photographs stay marked as TODO or work in progress instead of being inferred.</p>
+        </div>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+
+      <aside class="right-sidebar" aria-label="On this page">
+        <h2 class="toc-heading">On this page</h2>
+        <ol class="toc-list" id="page-toc"></ol>
+      </aside>
+    </div>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

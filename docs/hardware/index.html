@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Pogopo hardware architecture, interfaces, component choices, custom PCB, and enclosure status.">
+    <title>Hardware · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="hardware" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">System</p>
+        <h1>Hardware</h1>
+        <p class="lead">pogopo is built around a custom ESP32-S3 PCB with a 400 × 240 monochrome display, physical controls, audio, storage, motion sensing, haptics, and battery management.</p>
+        <hr class="page-rule">
+
+        <h2>Hardware summary</h2>
+        <table class="spec-table">
+          <tbody>
+            <tr><th>MCU and memory</th><td>Dual-core ESP32-S3, 16 MB flash, 8 MB Octal PSRAM</td></tr>
+            <tr><th>Display</th><td>Sharp LS027B7DH01, 400 × 240, 1-bit Memory LCD</td></tr>
+            <tr><th>Storage</th><td>microSD over four-bit SDMMC</td></tr>
+            <tr><th>Input</th><td>D-pad, A, B, Start, Menu via TCA9555; Power on a dedicated GPIO</td></tr>
+            <tr><th>Motion</th><td>BMI270 six-axis IMU</td></tr>
+            <tr><th>Audio</th><td>MAX98357A digital I²S amplifier</td></tr>
+            <tr><th>Power</th><td>BQ24295 charger/power-path controller with gated battery ADC measurement</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Block diagram</h2>
+        <div class="diagram-placeholder"><strong>Hardware block diagram placeholder</strong>TODO: replace this area with the verified PCB-level power and signal diagram.</div>
+
+        <h2>Core components</h2>
+
+        <section class="component-section">
+          <h3>ESP32-S3</h3>
+          <p>The MCU runs PogopoOS, device services, UI rendering, application code, and the Game Boy runtime. The current board exposes 16 MB of flash and 8 MB of PSRAM.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>System control, graphics, application runtime, emulation, and peripheral coordination.</dd></div>
+            <div><dt>Interface</dt><dd>Native GPIO, SPI, I²C, I²S, SDMMC, ADC, and FreeRTOS tasks on two cores.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It combines two cores, embedded peripherals, external-memory support, and the ESP-IDF software stack in one MCU.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>Sharp LS027B7DH01 Memory LCD</h3>
+          <p>The 400 × 240 panel defines pogopo’s crisp 1-bit visual language. PogopoOS keeps a 12 KB framebuffer, updates dirty rows, and uses a fast full-frame path when needed.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Displays the launcher, applications, games, diagnostics, and shutdown animation.</dd></div>
+            <div><dt>Interface</dt><dd>SPI2 at 14 MHz: SCK GPIO12, MOSI GPIO11, active-high CS GPIO14; VCOM is maintained by a dedicated task.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It provides a readable monochrome image and retains static pixels without continuous full-screen refresh.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>BMI270</h3>
+          <p>The six-axis IMU provides acceleration and angular-rate data for diagnostics and future motion-aware applications.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Reports device movement and orientation-related sensor data.</dd></div>
+            <div><dt>Interface</dt><dd>I²C at address <code>0x68</code>, SDA GPIO8, SCL GPIO9, interrupt GPIO18.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It adds compact motion input without consuming the primary control GPIOs.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>MAX98357A audio</h3>
+          <p>The digital amplifier receives PCM audio from the ESP32-S3. The Game Boy path runs at a fixed 32,768 Hz with 16-bit stereo I²S data.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Converts the firmware’s digital audio stream into amplified speaker output.</dd></div>
+            <div><dt>Interface</dt><dd>I²S: DATA GPIO38, BCLK GPIO39, LRCK GPIO40.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>A digital I²S path keeps sample timing under firmware control and avoids an external analog DAC stage.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>microSD storage</h3>
+          <p>The card holds ROMs, WAV files, and other user content mounted through ESP-IDF’s FAT VFS.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Provides removable storage and file-based content loading.</dd></div>
+            <div><dt>Interface</dt><dd>Four-bit SDMMC: D0–D3 GPIO5/4/16/15, CLK GPIO6, CMD GPIO7.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>The four-bit bus provides more transfer bandwidth than a basic SPI card connection.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>TCA9555 and controls</h3>
+          <p>The I/O expander reads the D-pad, A, B, Start, and Menu as one active-low port. The firmware uses a 10 ms I²C timeout and treats a failed sample as released to avoid stuck input.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Expands the MCU’s input capacity for eight front-panel controls.</dd></div>
+            <div><dt>Interface</dt><dd>I²C <code>0x20</code>, interrupt GPIO21. P8 Top, P9 Down, P10 Left, P11 Right, P12 B, P13 A, P14 Menu, P15 Start.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It reduces direct GPIO usage while allowing the full button state to be read together.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>Haptics</h3>
+          <p>A vibration motor provides short UI and gameplay feedback.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Adds tactile confirmation for interactions.</dd></div>
+            <div><dt>Interface</dt><dd>GPIO3 through the board’s vibration drive circuit.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It communicates feedback without requiring another visual or audio cue.</dd></div>
+          </dl>
+        </section>
+
+        <section class="component-section">
+          <h3>Battery and power management</h3>
+          <p>The BQ24295 is detected at I²C address <code>0x6B</code>. Firmware reads charge and fault status, samples the battery through a gated ADC path, distinguishes short and held Power presses, blocks ship mode while USB is present, and physically clears the LCD before shutdown.</p>
+          <dl class="component-meta">
+            <div><dt>What it does</dt><dd>Charging and power-path status, battery measurement, user power events, and final ship-mode shutdown.</dd></div>
+            <div><dt>Interface</dt><dd>I²C plus Power GPIO17, charger interrupt GPIO41, battery ADC GPIO1, measurement gate GPIO2.</dd></div>
+            <div><dt>Why it was chosen</dt><dd>It gives firmware visibility into charge state and a controlled low-power shutdown path.</dd></div>
+          </dl>
+        </section>
+
+        <h2>Custom PCB</h2>
+        <p>The custom board integrates the ESP32-S3, display connection, SDMMC bus, I²C peripherals, digital audio, controls, haptics, and power-management signals used by PogopoOS. Bring-up diagnostics probe the TCA9555, BMI270, and BQ24295 and print their register state to the serial monitor.</p>
+        <p class="todo-note">TODO: add PCB revision, layer stack, board dimensions, schematic excerpt, and validated power measurements when they are ready for publication.</p>
+
+        <h2>Enclosure</h2>
+        <p>The enclosure is designed as a compact handheld around the display, physical controls, custom PCB, and a right-side expansion area. Mechanical module retention and the final external connector arrangement remain work in progress.</p>
+        <p class="todo-note">TODO: add final enclosure material, manufacturing method, dimensions, assembly details, and photographs.</p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="The Pogopo right-side mechanical and electrical modular expansion concept.">
+    <title>Modularity · pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="modularity" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">System</p>
+        <h1>Modularity</h1>
+        <p class="lead">The right side of pogopo is intended as a mechanical and electrical expansion area for interchangeable hardware.</p>
+        <div class="tag-row"><span class="tag">Core concept</span><span class="tag">Work in progress</span></div>
+        <hr class="page-rule">
+
+        <h2>The idea</h2>
+        <p>pogopo is meant to remain useful beyond a fixed set of games. A module can extend the base handheld for a specific task, then be removed when it is no longer needed. The console keeps the display, controls, battery, storage, and PogopoOS runtime; the module adds task-specific hardware.</p>
+        <p>Possible categories include extra controls, sensors, wireless functions, storage, or experimental electronics. These are examples of the intended design space, not a list of completed products.</p>
+
+        <h2>Mechanical expansion</h2>
+        <p>The attachment area must locate a module consistently, resist normal handheld loads, and allow removal without damaging the console. It also has to fit the enclosure geometry and keep the device comfortable to hold.</p>
+        <p class="todo-note">Work in progress: final retention method, envelope, insertion cycle target, and module enclosure rules are not yet documented.</p>
+
+        <h2>Electrical expansion</h2>
+        <p>The electrical side needs a defined connector, power budget, voltage levels, signaling, and protection behavior. PogopoOS will also need a predictable way to detect a module and expose it to applications.</p>
+        <div class="callout">
+          <p class="callout-title">Not frozen yet</p>
+          <p>No connector pinout, bus allocation, current limit, hot-plug behavior, or module protocol is claimed here. Those details stay WIP until they are verified on hardware.</p>
+        </div>
+
+        <h2>Software model</h2>
+        <p>The intended software boundary is a device service that recognizes the attached hardware and presents a stable API to applications. Apps should not need to reproduce low-level bus handling for every module.</p>
+        <p class="todo-note">TODO: define discovery, driver registration, permissions, detach handling, and compatibility versioning after the electrical interface is selected.</p>
+
+        <h2>Design constraints</h2>
+        <dl class="fact-list">
+          <div class="fact-row"><dt>Base device first</dt><dd>The console should remain fully usable with no module attached.</dd></div>
+          <div class="fact-row"><dt>Clear ownership</dt><dd>PogopoOS should own detection and drivers; applications should consume higher-level services.</dd></div>
+          <div class="fact-row"><dt>Electrical safety</dt><dd>Power and signals need defined limits before modules can be considered compatible.</dd></div>
+          <div class="fact-row"><dt>Honest compatibility</dt><dd>A module is supported only after both mechanical fit and electrical/software behavior are tested.</dd></div>
+        </dl>
+
+        <h2>Current status</h2>
+        <p><span class="status experimental">Experimental</span>The modular expansion area is a central product direction, but the public interface specification and verified module list are not complete.</p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>
