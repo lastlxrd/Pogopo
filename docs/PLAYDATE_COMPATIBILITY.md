@@ -50,6 +50,8 @@ above.
 - buttons, just-pressed/released state and input-handler stack;
 - images, image tables, PFT fonts, draw modes, patterns, clipping, contexts,
   primitives, text and rotated/faded drawing;
+- Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
+  `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, visibility, image/center/scale/rotation/clip state,
   overlap collisions, group filters and tilemap wall sprites;
 - millisecond timers, frame timers and elapsed-time helpers;

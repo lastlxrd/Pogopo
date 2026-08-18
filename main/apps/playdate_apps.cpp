@@ -161,6 +161,7 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         std::max<int64_t>(1, perf_now_us - last_perf_us_));
     if (perf_elapsed_us >= 1000000U) {
         const playdate::Stats stats = runtime_.stats();
+        const gfx::Graphics::Stats lcd_stats = context.gfx.stats();
         const uint32_t lua_delta =
             stats.lua_frames - previous_lua_frames_;
         const uint32_t lcd_delta =
@@ -174,7 +175,7 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         ESP_LOGI(
             TAG,
             "PERF PD %s lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
-            "logic=%luus blit=%luus "
+            "logic=%luus blit=%luus rows=%u/240 tx=%luB/%luus "
             "luaheap=%lu peak=%lu gc=%lu err=%lu RAM=%lu/%lu PSRAM=%lu "
             "i2cerr=%lu",
             displayTitle(), static_cast<unsigned long>(lua_fps),
@@ -184,6 +185,9 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
             static_cast<unsigned long>(stats.max_update_us),
             static_cast<unsigned long>(stats.last_logic_us),
             static_cast<unsigned long>(stats.last_blit_us),
+            static_cast<unsigned>(lcd_stats.last_rows),
+            static_cast<unsigned long>(lcd_stats.last_bytes),
+            static_cast<unsigned long>(lcd_stats.last_refresh_us),
             static_cast<unsigned long>(stats.lua_bytes),
             static_cast<unsigned long>(stats.lua_peak_bytes),
             static_cast<unsigned long>(stats.lua_gc_bytes),

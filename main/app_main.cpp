@@ -316,7 +316,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.4 POGODATE PDX COMPAT + SMOOTH PACING");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.5.1 POGODATE COLOR + PARTIAL LCD PERF");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -347,5 +347,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.4 ready: stable GB + broader PDX API + paced Playdate logic");
+    ESP_LOGI(TAG, "STEP11.5.1 ready: Playdate colors + fast 1:1 pack + LCD row stats");
 }

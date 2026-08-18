@@ -48,6 +48,18 @@ enum Pixel : uint8_t {
     White = 1,
     Black = 2,
     Pattern = 3,
+    Xor = 4,
+};
+
+// Public Playdate LCDSolidColor values are part of the Lua ABI.  They are not
+// the same as Pixel above, whose zero is reserved for transparent image data.
+// Keep the boundary explicit so packages that use literal 0/1/2/3 values work
+// exactly like packages that read gfx.kColorBlack/White/Clear/XOR.
+enum PlaydateColor : lua_Integer {
+    PdColorBlack = 0,
+    PdColorWhite = 1,
+    PdColorClear = 2,
+    PdColorXor = 3,
 };
 
 enum DrawMode : int {
@@ -228,6 +240,7 @@ struct Runtime::Impl {
     size_t sound_cache_bytes = 0;
 
     Image screen{};
+    bool screen_in_internal_ram = false;
     Image* target = nullptr;
     Image* stencil = nullptr;
     PdFont* current_font = nullptr;
@@ -419,14 +432,17 @@ struct Runtime::Impl {
     }
 
     bool allocateImage(Image& image, int width, int height, uint8_t color,
-                       bool prefer_internal = false) {
+                       bool prefer_internal = false,
+                       bool* allocated_internal = nullptr) {
         if (width <= 0 || height <= 0 || width > 1024 || height > 1024 ||
             static_cast<size_t>(width) * height > 1024U * 1024U) return false;
         const size_t bytes = static_cast<size_t>(width) * height;
         uint8_t* pixels = nullptr;
+        if (allocated_internal) *allocated_internal = false;
         if (prefer_internal) {
             pixels = static_cast<uint8_t*>(heap_caps_realloc(
                 nullptr, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            if (pixels && allocated_internal) *allocated_internal = true;
         }
         if (!pixels) pixels = static_cast<uint8_t*>(heap_caps_realloc(
             nullptr, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -451,12 +467,22 @@ struct Runtime::Impl {
             return true;
         }
         Image replacement{};
+        const size_t bytes = static_cast<size_t>(width) * height;
+        // A native 400x240 frame is read and written several times per game
+        // update. Keep it in fast internal SRAM when a 64 KiB safety reserve
+        // remains; otherwise fall back to PSRAM exactly as before.
+        const size_t largest_internal = heap_caps_get_largest_free_block(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const bool prefer_internal = scale == 2 ||
+            largest_internal >= bytes + 64U * 1024U;
+        bool replacement_internal = false;
         if (!allocateImage(replacement, width, height, background_color,
-                           scale == 2)) {
+                           prefer_internal, &replacement_internal)) {
             return false;
         }
         releaseImage(screen);
         screen = replacement;
+        screen_in_internal_ram = replacement_internal;
         return true;
     }
 
@@ -545,6 +571,10 @@ struct Runtime::Impl {
                 destination_x - pattern_offset_x) & 7U;
             source = (draw_pattern[row] & (0x80U >> column)) != 0U
                 ? Black : White;
+        }
+        if (source == Xor) {
+            return targetPixel(destination_x, destination_y) == Black
+                ? White : Black;
         }
         if (draw_mode == FillWhite) return White;
         if (draw_mode == FillBlack) return Black;
@@ -822,6 +852,15 @@ struct Runtime::Impl {
 
     void fillTarget(uint8_t color) {
         if (!target || !target->pixels) return;
+        if (color == Xor) {
+            const size_t pixels = static_cast<size_t>(target->stride) * target->height;
+            for (size_t index = 0; index < pixels; ++index) {
+                uint8_t& value = target->pixels[index];
+                if (value == Black) value = White;
+                else if (value == White) value = Black;
+            }
+            return;
+        }
         if (target == &screen) {
             const uint8_t value = color == Clear ? background_color : color;
             std::memset(screen.pixels, value,
@@ -874,6 +913,21 @@ struct Runtime::Impl {
         return static_cast<uint32_t>(value[0]) |
             (static_cast<uint32_t>(value[1]) << 8U) |
             (static_cast<uint32_t>(value[2]) << 16U);
+    }
+
+    static uint8_t checkPlaydateColor(lua_State* state, int index,
+                                      uint8_t default_color) {
+        if (lua_isnoneornil(state, index)) return default_color;
+        switch (luaL_checkinteger(state, index)) {
+            case PdColorBlack: return Black;
+            case PdColorWhite: return White;
+            case PdColorClear: return Clear;
+            case PdColorXor: return Xor;
+            default:
+                luaL_argerror(state, index,
+                    "color must be kColorBlack, kColorWhite, kColorClear or kColorXOR");
+                return default_color;
+        }
     }
 
     bool resourcePath(char* output, size_t capacity, const char* requested,
@@ -1080,7 +1134,7 @@ struct Runtime::Impl {
         }
         const int width = static_cast<int>(luaL_checkinteger(state, 1));
         const int height = static_cast<int>(luaL_checkinteger(state, 2));
-        const uint8_t color = static_cast<uint8_t>(luaL_optinteger(state, 3, Clear));
+        const uint8_t color = checkPlaydateColor(state, 3, Clear);
         runtime->pushDynamicImage(width, height, color);
         return 1;
     }
@@ -1155,9 +1209,19 @@ struct Runtime::Impl {
 
     static int cImageClear(lua_State* state) {
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
-        const uint8_t color = static_cast<uint8_t>(luaL_optinteger(state, 2, Clear));
-        if (image && image->pixels) std::memset(image->pixels, color,
-            static_cast<size_t>(image->stride) * image->height);
+        const uint8_t color = checkPlaydateColor(state, 2, Clear);
+        if (image && image->pixels) {
+            const size_t pixels = static_cast<size_t>(image->stride) * image->height;
+            if (color == Xor) {
+                for (size_t index = 0; index < pixels; ++index) {
+                    uint8_t& value = image->pixels[index];
+                    if (value == Black) value = White;
+                    else if (value == White) value = Black;
+                }
+            } else {
+                std::memset(image->pixels, color, pixels);
+            }
+        }
         return 0;
     }
 
@@ -1315,13 +1379,14 @@ struct Runtime::Impl {
 
     static int cGraphicsClear(lua_State* state) {
         Impl* runtime = self(state);
-        const uint8_t color = static_cast<uint8_t>(luaL_optinteger(state, 1, White));
+        const uint8_t color = checkPlaydateColor(
+            state, 1, runtime->background_color);
         runtime->fillTarget(color);
         return 0;
     }
 
     static int cSetColor(lua_State* state) {
-        self(state)->draw_color = static_cast<uint8_t>(luaL_checkinteger(state, 1));
+        self(state)->draw_color = checkPlaydateColor(state, 1, Black);
         return 0;
     }
 
@@ -1939,7 +2004,13 @@ struct Runtime::Impl {
     }
 
     static int cSetBackgroundColor(lua_State* state) {
-        self(state)->background_color = static_cast<uint8_t>(luaL_checkinteger(state, 1));
+        Impl* runtime = self(state);
+        const uint8_t color = checkPlaydateColor(state, 1, White);
+        if (color != Black && color != White) {
+            return luaL_argerror(state, 1,
+                "background color must be kColorBlack or kColorWhite");
+        }
+        runtime->background_color = color;
         return 0;
     }
 
@@ -3391,7 +3462,10 @@ struct Runtime::Impl {
         lua_setfield(lua,playdate,"display");
 
         lua_newtable(lua);const int graphics=lua_gettop(lua);
-        setInteger(graphics,"kColorClear",Clear);setInteger(graphics,"kColorWhite",White);setInteger(graphics,"kColorBlack",Black);
+        setInteger(graphics,"kColorBlack",PdColorBlack);
+        setInteger(graphics,"kColorWhite",PdColorWhite);
+        setInteger(graphics,"kColorClear",PdColorClear);
+        setInteger(graphics,"kColorXOR",PdColorXor);
         setInteger(graphics,"kDrawModeCopy",Copy);setInteger(graphics,"kDrawModeFillWhite",FillWhite);
         setInteger(graphics,"kDrawModeFillBlack",FillBlack);setInteger(graphics,"kDrawModeInverted",Inverted);
         setInteger(graphics,"kDrawModeNXOR",Nxor);setInteger(graphics,"kImageUnflipped",Unflipped);
@@ -3517,11 +3591,12 @@ struct Runtime::Impl {
         // spikes on PSRAM-backed allocations.
         lua_gc(lua, LUA_GCINC, 110, 200, 8);
         is_running=true;
-        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50, audio cache=%lu",
+        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50, screen=%s, audio cache=%lu",
                  package_mode ? package_info.name :
                     (game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2"),
                  package_mode ? "SD main.pdz" : "source",
                  static_cast<unsigned long>(refresh_rate),
+                 screen_in_internal_ram ? "internal" : "PSRAM",
                  static_cast<unsigned long>(sound_cache_bytes));
         return ESP_OK;
     }
