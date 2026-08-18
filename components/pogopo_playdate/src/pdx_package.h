@@ -22,7 +22,8 @@ class PdzArchive {
 public:
     static constexpr size_t MAX_ENTRIES = 96;
 
-    esp_err_t open(const char* path, char* error, size_t error_capacity);
+    esp_err_t open(const char* path, char* error, size_t error_capacity,
+                   bool require_main = true);
     void close();
     const PdzEntry* findLua(const char* module) const;
     // Caller owns the returned heap_caps_malloc()-compatible buffer.
@@ -31,6 +32,9 @@ public:
 
     const char* path() const { return path_; }
     size_t count() const { return count_; }
+    const PdzEntry* entry(size_t index) const {
+        return index < count_ ? &entries_[index] : nullptr;
+    }
     size_t luaCount() const;
 
 private:

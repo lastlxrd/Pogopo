@@ -59,6 +59,7 @@ setmetatable(Sprite, {
 
 function Sprite:init(image)
 	self.image = image
+	self.tilemap = nil
 	self.x, self.y = 0, 0
 	self.centerX, self.centerY = 0.5, 0.5
 	self.width, self.height = 0, 0
@@ -66,8 +67,8 @@ function Sprite:init(image)
 	self.zIndex = 0
 	self.visible = true
 	self.added = false
-	self.updatesEnabled = true
-	self.collisionsEnabled = true
+	self._updatesEnabled = true
+	self._collisionsEnabled = true
 	self.imageDrawMode = gfx.kDrawModeCopy
 	self.flip = gfx.kImageUnflipped
 	self.xScale, self.yScale = 1, 1
@@ -75,6 +76,7 @@ function Sprite:init(image)
 	self.clipRect = nil
 	self.groups = {}
 	self.collidesWithGroups = {}
+	self.tag = 0
 	self._sequence = 0
 end
 
@@ -98,11 +100,19 @@ function Sprite:setImage(image, flip, xScale, yScale)
 	end
 end
 function Sprite:getImage() return self.image end
+function Sprite:setTilemap(tilemap)
+	self.tilemap = tilemap
+	if tilemap and tilemap.getPixelSize then
+		self.width, self.height = tilemap:getPixelSize()
+	end
+end
 function Sprite:setSize(width, height) self.width, self.height = width, height end
 function Sprite:getSize() return self.width, self.height end
 function Sprite:setCenter(x, y) self.centerX, self.centerY = x, y end
+function Sprite:getCenter() return self.centerX, self.centerY end
 function Sprite:moveTo(x, y) self.x, self.y = x, y end
 function Sprite:moveBy(x, y) self.x, self.y = self.x + x, self.y + y end
+function Sprite:getPosition() return self.x, self.y end
 function Sprite:setRotation(value) self.rotation = value or 0 end
 function Sprite:getRotation() return self.rotation end
 function Sprite:setClipRect(x, y, width, height)
@@ -121,13 +131,18 @@ function Sprite:setZIndex(value)
 		sprites_dirty = true
 	end
 end
+function Sprite:getZIndex() return self.zIndex end
 function Sprite:setVisible(value) self.visible = value == true end
 function Sprite:isVisible() return self.visible end
-function Sprite:setUpdatesEnabled(value) self.updatesEnabled = value == true end
+function Sprite:setUpdatesEnabled(value) self._updatesEnabled = value == true end
+function Sprite:updatesEnabled() return self._updatesEnabled end
 function Sprite:setImageDrawMode(value) self.imageDrawMode = value end
+function Sprite:setTag(value) self.tag = math.max(0, math.min(255, value or 0)) end
+function Sprite:getTag() return self.tag end
 function Sprite:setGroups(value) self.groups = value or {} end
 function Sprite:setCollidesWithGroups(value) self.collidesWithGroups = value or {} end
-function Sprite:setCollisionsEnabled(value) self.collisionsEnabled = value == true end
+function Sprite:setCollisionsEnabled(value) self._collisionsEnabled = value == true end
+function Sprite:collisionsEnabled() return self._collisionsEnabled end
 
 function Sprite:setCollideRect(x, y, width, height)
 	if type(x) == "table" then
@@ -190,28 +205,33 @@ function Sprite:update()
 		end
 		sprites = compacted
 		table.sort(sprites, function(a, b)
-			if a.zIndex == b.zIndex then return a._sequence < b._sequence end
-			return a.zIndex < b.zIndex
+			local az, bz = a.zIndex or 0, b.zIndex or 0
+			if az == bz then return (a._sequence or 0) < (b._sequence or 0) end
+			return az < bz
 		end)
 		sprites_dirty = false
 	end
 	for i=1,#sprites do
 		local item = sprites[i]
-		if item.added and item.updatesEnabled then
+		if item.added and item._updatesEnabled then
 			local update = item.update
 			if update and update ~= Sprite.update then update(item) end
 		end
 	end
 	for i=1,#sprites do
 		local item = sprites[i]
-		if item.added and item.visible and item.image then
+		if item.added and item.visible and (item.image or item.tilemap) then
 			local previous = gfx._getImageDrawMode()
 			gfx.setImageDrawMode(item.imageDrawMode)
 			if item.clipRect then
 				gfx.setClipRect(item.clipRect.x, item.clipRect.y,
 					item.clipRect.width, item.clipRect.height)
 			end
-			if item.rotation ~= 0 then
+			if item.tilemap then
+				local x = math.floor(item.x - item.width * item.centerX)
+				local y = math.floor(item.y - item.height * item.centerY)
+				item.tilemap:draw(x, y)
+			elseif item.rotation ~= 0 then
 				item.image:drawRotated(item.x, item.y, item.rotation,
 					item.xScale, item.yScale)
 			else
@@ -314,7 +334,7 @@ function Sprite:checkCollisions(goalX, goalY)
 	local candidates = Sprite.querySpritesInRect(sx, sy, sw, sh)
 	for i=1,#candidates do
 		local other = candidates[i]
-		if other ~= self and other.added and other.collisionsEnabled and
+		if other ~= self and other.added and other._collisionsEnabled and
 			groupsAllow(self, other) and
 			other.collideRect and self.collideRect then
 			local ox, oy, ow, oh = spriteBounds(other)
@@ -370,7 +390,7 @@ function Sprite.querySpritesInRect(x, y, width, height)
 			if cell then
 				for i=1,#cell do
 					local item = cell[i]
-					if item.added and item.collisionsEnabled and
+					if item.added and item._collisionsEnabled and
 						item._query_stamp ~= stamp then
 						local sx, sy, sw, sh = spriteBounds(item)
 						if overlaps(x,y,width,height,sx,sy,sw,sh) then
@@ -384,11 +404,49 @@ function Sprite.querySpritesInRect(x, y, width, height)
 	end
 	for i=1,#collision_sprites do
 		local item = collision_sprites[i]
-		if item.added and item.collisionsEnabled and item._query_stamp ~= stamp then
+		if item.added and item._collisionsEnabled and item._query_stamp ~= stamp then
 			local sx, sy, sw, sh = spriteBounds(item)
 			if overlaps(x,y,width,height,sx,sy,sw,sh) then
 				item._query_stamp = stamp
 				table.insert(result, item)
+			end
+		end
+	end
+	return result
+end
+
+function Sprite:overlappingSprites()
+	if not self.added or not self._collisionsEnabled or not self.collideRect then
+		return {}
+	end
+	local x, y, width, height = spriteBounds(self)
+	local candidates = Sprite.querySpritesInRect(x, y, width, height)
+	local result = {}
+	for i=1,#candidates do
+		local other = candidates[i]
+		if other ~= self and other.added and other._collisionsEnabled and
+			other.collideRect and groupsAllow(self, other) then
+			local ox, oy, ow, oh = spriteBounds(other)
+			if overlaps(x, y, width, height, ox, oy, ow, oh) then
+				result[#result + 1] = other
+			end
+		end
+	end
+	return result
+end
+
+function Sprite.allOverlappingSprites()
+	local result = {}
+	for i=1,#collision_sprites do
+		local left = collision_sprites[i]
+		if left.added and left._collisionsEnabled and left.collideRect then
+			local overlapping = left:overlappingSprites()
+			for j=1,#overlapping do
+				local right = overlapping[j]
+				if (left._sequence or 0) < (right._sequence or 0) then
+					result[#result + 1] = left
+					result[#result + 1] = right
+				end
 			end
 		end
 	end
@@ -426,16 +484,34 @@ function Sprite.addWallSprites(tilemap, emptyIDs, offsetX, offsetY)
 	return result
 end
 
-Sprite.kCollisionTypeOverlap = 1
+Sprite.kCollisionTypeSlide = "slide"
+Sprite.kCollisionTypeFreeze = "freeze"
+Sprite.kCollisionTypeOverlap = "overlap"
+Sprite.kCollisionTypeBounce = "bounce"
 gfx.sprite = Sprite
 
 local Tilemap = {}
 Tilemap.__index = Tilemap
-function Tilemap.new() return setmetatable({tiles={}, width=1, imagetable=nil}, Tilemap) end
-function Tilemap:setTiles(tiles, width) self.tiles, self.width = tiles, width end
+function Tilemap.new()
+	return setmetatable({tiles={}, width=1, height=0, imagetable=nil}, Tilemap)
+end
+function Tilemap:setTiles(tiles, width)
+	self.tiles, self.width = tiles, math.max(1, width or 1)
+	self.height = math.ceil(#tiles / self.width)
+end
 function Tilemap:setImageTable(value) self.imagetable = value end
+function Tilemap:getSize() return self.width, self.height end
+function Tilemap:getPixelSize()
+	local tile = self.imagetable and self.imagetable:getImage(1)
+	if not tile then return 0, 0 end
+	local width, height = tile:getSize()
+	return self.width * width, self.height * height
+end
 function Tilemap:draw(x, y)
 	if not self.imagetable then return end
+	local first = self.imagetable:getImage(1)
+	local tileWidth, tileHeight = 8, 8
+	if first then tileWidth, tileHeight = first:getSize() end
 	for index=1,#self.tiles do
 		local tile = self.tiles[index]
 		if tile and tile > 0 then
@@ -443,7 +519,8 @@ function Tilemap:draw(x, y)
 			if image then
 				local column = (index - 1) % self.width
 				local row = math.floor((index - 1) / self.width)
-				image:draw((x or 0) + column * 8, (y or 0) + row * 8)
+				image:draw((x or 0) + column * tileWidth,
+					(y or 0) + row * tileHeight)
 			end
 		end
 	end
@@ -564,6 +641,14 @@ function playdate.frameTimer.new(duration, callback)
 	}, FrameTimer)
 	frameTimers[#frameTimers + 1] = timer
 	return timer
+end
+
+function playdate.frameTimer.allTimers()
+	local active = {}
+	for i=1,#frameTimers do
+		if not frameTimers[i].removed then active[#active + 1] = frameTimers[i] end
+	end
+	return active
 end
 
 function playdate.frameTimer.updateTimers()

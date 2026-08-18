@@ -95,12 +95,16 @@ little-endian 24-bit sample rate and byte 15 identifies the sample format:
 - `4`: mono IMA ADPCM. The payload starts with a little-endian block size,
   followed by ordinary IMA blocks (predictor, step index, reserved byte,
   low-nibble-first samples);
-- `5`: stereo IMA ADPCM, not implemented by this step.
+- `5`: stereo IMA ADPCM. Each block starts with a four-byte predictor/index
+  header per channel, followed by alternating four-byte left/right nibble
+  groups. PogoDate decodes both channels in sample order and averages them to
+  mono.
 
-Pogopo's speaker path is mono, so stereo PCM is averaged to mono while reading
-the file in small chunks. This avoids holding both the original stereo stream
-and the complete converted stream in PSRAM. The decoded sample count is capped
-before allocation and malformed frame/block boundaries are rejected.
+Pogopo's speaker path is mono, so stereo PCM and IMA are averaged to mono while
+decoding. The decoded sample count is capped before allocation and malformed
+frame/block boundaries are rejected. Effects larger than 512 KiB decoded are
+not retained in the preload cache, preventing a cache clone from doubling their
+peak PSRAM use.
 
 Music is decoded once into PSRAM and loops in its own PCM mixer voice. Effects
 use the independent one-shot PCM voice.

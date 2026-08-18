@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
+#include <limits>
 #include <new>
 #include <string>
 #include <sys/stat.h>
@@ -145,6 +147,285 @@ struct ClipRect {
     }
 };
 
+// Parse JSON directly into Lua values.  Keeping the parser here avoids a
+// second object tree and its peak-memory cost, which matters for LDtk worlds on
+// an ESP32-S3.  It implements RFC 8259 values, including escaped Unicode and
+// surrogate pairs, and rejects excessive nesting and trailing input.
+class JsonToLua {
+public:
+    JsonToLua(lua_State* state, const char* bytes, size_t size)
+        : state_(state), begin_(bytes), cursor_(bytes), end_(bytes + size) {}
+
+    bool parse(std::string& error) {
+        skipWhitespace();
+        if (!parseValue(0U)) return failResult(error);
+        skipWhitespace();
+        if (cursor_ != end_) {
+            setError("unexpected trailing JSON data");
+            lua_pop(state_, 1);
+            return failResult(error);
+        }
+        return true;
+    }
+
+private:
+    lua_State* state_ = nullptr;
+    const char* begin_ = nullptr;
+    const char* cursor_ = nullptr;
+    const char* end_ = nullptr;
+    const char* message_ = nullptr;
+
+    bool failResult(std::string& error) const {
+        const size_t offset = static_cast<size_t>(cursor_ - begin_);
+        char text[128]{};
+        std::snprintf(text, sizeof(text), "%s at byte %u",
+                      message_ ? message_ : "invalid JSON",
+                      static_cast<unsigned>(offset));
+        error = text;
+        return false;
+    }
+
+    bool setError(const char* message) {
+        if (!message_) message_ = message;
+        return false;
+    }
+
+    void skipWhitespace() {
+        while (cursor_ < end_ && (*cursor_ == ' ' || *cursor_ == '\t' ||
+               *cursor_ == '\r' || *cursor_ == '\n')) ++cursor_;
+    }
+
+    bool take(char expected) {
+        if (cursor_ >= end_ || *cursor_ != expected) return false;
+        ++cursor_;
+        return true;
+    }
+
+    static void appendUtf8(std::string& output, uint32_t codepoint) {
+        if (codepoint <= 0x7fU) {
+            output.push_back(static_cast<char>(codepoint));
+        } else if (codepoint <= 0x7ffU) {
+            output.push_back(static_cast<char>(0xc0U | (codepoint >> 6U)));
+            output.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+        } else if (codepoint <= 0xffffU) {
+            output.push_back(static_cast<char>(0xe0U | (codepoint >> 12U)));
+            output.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU)));
+            output.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+        } else {
+            output.push_back(static_cast<char>(0xf0U | (codepoint >> 18U)));
+            output.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3fU)));
+            output.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU)));
+            output.push_back(static_cast<char>(0x80U | (codepoint & 0x3fU)));
+        }
+    }
+
+    static int hexDigit(char value) {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    }
+
+    bool readHex4(uint32_t& value) {
+        if (end_ - cursor_ < 4) return setError("truncated Unicode escape");
+        value = 0;
+        for (int index = 0; index < 4; ++index) {
+            const int digit = hexDigit(*cursor_++);
+            if (digit < 0) return setError("invalid Unicode escape");
+            value = (value << 4U) | static_cast<uint32_t>(digit);
+        }
+        return true;
+    }
+
+    bool parseString(std::string& output) {
+        if (!take('"')) return setError("expected JSON string");
+        output.clear();
+        while (cursor_ < end_) {
+            const unsigned char value = static_cast<unsigned char>(*cursor_++);
+            if (value == '"') return true;
+            if (value < 0x20U) return setError("control character in JSON string");
+            if (value != '\\') {
+                output.push_back(static_cast<char>(value));
+                continue;
+            }
+            if (cursor_ >= end_) return setError("truncated JSON escape");
+            const char escape = *cursor_++;
+            switch (escape) {
+                case '"': output.push_back('"'); break;
+                case '\\': output.push_back('\\'); break;
+                case '/': output.push_back('/'); break;
+                case 'b': output.push_back('\b'); break;
+                case 'f': output.push_back('\f'); break;
+                case 'n': output.push_back('\n'); break;
+                case 'r': output.push_back('\r'); break;
+                case 't': output.push_back('\t'); break;
+                case 'u': {
+                    uint32_t codepoint = 0;
+                    if (!readHex4(codepoint)) return false;
+                    if (codepoint >= 0xd800U && codepoint <= 0xdbffU) {
+                        if (end_ - cursor_ < 6 || cursor_[0] != '\\' ||
+                            cursor_[1] != 'u') {
+                            return setError("missing low Unicode surrogate");
+                        }
+                        cursor_ += 2;
+                        uint32_t low = 0;
+                        if (!readHex4(low) || low < 0xdc00U || low > 0xdfffU) {
+                            return setError("invalid low Unicode surrogate");
+                        }
+                        codepoint = 0x10000U + ((codepoint - 0xd800U) << 10U) +
+                                    (low - 0xdc00U);
+                    } else if (codepoint >= 0xdc00U && codepoint <= 0xdfffU) {
+                        return setError("unexpected low Unicode surrogate");
+                    }
+                    appendUtf8(output, codepoint);
+                    break;
+                }
+                default: return setError("invalid JSON escape");
+            }
+        }
+        return setError("unterminated JSON string");
+    }
+
+    bool parseLiteral(const char* literal, int type) {
+        const size_t length = std::strlen(literal);
+        if (static_cast<size_t>(end_ - cursor_) < length ||
+            std::memcmp(cursor_, literal, length) != 0) {
+            return setError("invalid JSON literal");
+        }
+        cursor_ += length;
+        if (type < 0) lua_pushnil(state_);
+        else lua_pushboolean(state_, type);
+        return true;
+    }
+
+    bool parseNumber() {
+        const char* start = cursor_;
+        if (cursor_ < end_ && *cursor_ == '-') ++cursor_;
+        if (cursor_ >= end_) return setError("truncated JSON number");
+        if (*cursor_ == '0') {
+            ++cursor_;
+        } else {
+            if (*cursor_ < '1' || *cursor_ > '9') return setError("invalid JSON number");
+            while (cursor_ < end_ && *cursor_ >= '0' && *cursor_ <= '9') ++cursor_;
+        }
+        bool integral = true;
+        if (cursor_ < end_ && *cursor_ == '.') {
+            integral = false;
+            ++cursor_;
+            if (cursor_ >= end_ || *cursor_ < '0' || *cursor_ > '9') {
+                return setError("invalid JSON fraction");
+            }
+            while (cursor_ < end_ && *cursor_ >= '0' && *cursor_ <= '9') ++cursor_;
+        }
+        if (cursor_ < end_ && (*cursor_ == 'e' || *cursor_ == 'E')) {
+            integral = false;
+            ++cursor_;
+            if (cursor_ < end_ && (*cursor_ == '+' || *cursor_ == '-')) ++cursor_;
+            if (cursor_ >= end_ || *cursor_ < '0' || *cursor_ > '9') {
+                return setError("invalid JSON exponent");
+            }
+            while (cursor_ < end_ && *cursor_ >= '0' && *cursor_ <= '9') ++cursor_;
+        }
+        const std::string text(start, static_cast<size_t>(cursor_ - start));
+        if (integral) {
+            char* parsed_end = nullptr;
+            const long long value = std::strtoll(text.c_str(), &parsed_end, 10);
+            if (parsed_end && *parsed_end == '\0' &&
+                value >= std::numeric_limits<lua_Integer>::min() &&
+                value <= std::numeric_limits<lua_Integer>::max()) {
+                lua_pushinteger(state_, static_cast<lua_Integer>(value));
+                return true;
+            }
+        }
+        char* parsed_end = nullptr;
+        const float value = std::strtof(text.c_str(), &parsed_end);
+        if (!parsed_end || *parsed_end != '\0' || !std::isfinite(value)) {
+            return setError("JSON number is outside the supported range");
+        }
+        lua_pushnumber(state_, static_cast<lua_Number>(value));
+        return true;
+    }
+
+    bool parseArray(unsigned depth) {
+        if (!take('[')) return false;
+        lua_createtable(state_, 0, 0);
+        const int table = lua_absindex(state_, -1);
+        skipWhitespace();
+        if (take(']')) return true;
+        lua_Integer index = 1;
+        for (;;) {
+            skipWhitespace();
+            if (!parseValue(depth + 1U)) {
+                lua_pop(state_, 1);
+                return false;
+            }
+            lua_rawseti(state_, table, index++);
+            skipWhitespace();
+            if (take(']')) return true;
+            if (!take(',')) {
+                lua_pop(state_, 1);
+                return setError("expected ',' or ']' in JSON array");
+            }
+        }
+    }
+
+    bool parseObject(unsigned depth) {
+        if (!take('{')) return false;
+        lua_createtable(state_, 0, 0);
+        const int table = lua_absindex(state_, -1);
+        skipWhitespace();
+        if (take('}')) return true;
+        std::string key;
+        for (;;) {
+            skipWhitespace();
+            if (!parseString(key)) {
+                lua_pop(state_, 1);
+                return false;
+            }
+            skipWhitespace();
+            if (!take(':')) {
+                lua_pop(state_, 1);
+                return setError("expected ':' in JSON object");
+            }
+            skipWhitespace();
+            lua_pushlstring(state_, key.data(), key.size());
+            if (!parseValue(depth + 1U)) {
+                lua_pop(state_, 2);
+                return false;
+            }
+            lua_settable(state_, table);
+            skipWhitespace();
+            if (take('}')) return true;
+            if (!take(',')) {
+                lua_pop(state_, 1);
+                return setError("expected ',' or '}' in JSON object");
+            }
+        }
+    }
+
+    bool parseValue(unsigned depth) {
+        if (depth > 64U) return setError("JSON nesting is too deep");
+        if (!lua_checkstack(state_, 4)) return setError("Lua stack exhausted by JSON");
+        skipWhitespace();
+        if (cursor_ >= end_) return setError("unexpected end of JSON");
+        if (*cursor_ == '{') return parseObject(depth);
+        if (*cursor_ == '[') return parseArray(depth);
+        if (*cursor_ == '"') {
+            std::string text;
+            if (!parseString(text)) return false;
+            lua_pushlstring(state_, text.data(), text.size());
+            return true;
+        }
+        if (*cursor_ == 't') return parseLiteral("true", 1);
+        if (*cursor_ == 'f') return parseLiteral("false", 0);
+        if (*cursor_ == 'n') return parseLiteral("null", -1);
+        if (*cursor_ == '-' || (*cursor_ >= '0' && *cursor_ <= '9')) {
+            return parseNumber();
+        }
+        return setError("unexpected JSON token");
+    }
+};
+
 std::string adaptPlaydateLua(const char* source, size_t size) {
     std::string output(source, size);
     size_t position = 0;
@@ -208,6 +489,7 @@ struct Runtime::Impl {
     Game game = Game::PDSnake;
     PackageInfo package_info{};
     PdzArchive pdz{};
+    PdzArchive external_pdz{};
     bool package_mode = false;
 
     bool is_running = false;
@@ -236,6 +518,7 @@ struct Runtime::Impl {
 
     static constexpr size_t kMaximumCachedSounds = 32;
     static constexpr size_t kMaximumSoundCacheBytes = 2U * 1024U * 1024U;
+    static constexpr size_t kMaximumCachedSoundBytes = 512U * 1024U;
     std::array<CachedSound, kMaximumCachedSounds> sound_cache{};
     size_t sound_cache_bytes = 0;
 
@@ -258,6 +541,9 @@ struct Runtime::Impl {
     size_t peak_allocated_bytes = 0;
     Stats runtime_stats{};
     std::array<bool, PdzArchive::MAX_ENTRIES> loaded_modules{};
+    std::array<std::array<char, 128>, 32> loaded_external_modules{};
+    size_t loaded_external_count = 0;
+    unsigned external_import_depth = 0;
     char last_error[kErrorCapacity]{};
 
     static Impl* self(lua_State* state) {
@@ -365,26 +651,84 @@ struct Runtime::Impl {
 
     bool importModule(const char* requested) {
         if (!requested) return false;
-        if (std::strncmp(requested, "CoreLibs/", 9) == 0) return true;
+        // Most CoreLibs are supplied by compat.lua because their stock
+        // versions expect lower-level SDK objects we do not expose.  Easing is
+        // pure Lua data/math, however, so execute the exact version bundled by
+        // the game instead of maintaining an incomplete clone.
+        if (std::strncmp(requested, "CoreLibs/", 9) == 0 &&
+            std::strcmp(requested, "CoreLibs/easing") != 0) return true;
         if (package_mode) {
-            const PdzEntry* entry = pdz.findLua(requested);
+            PdzArchive* archive = &pdz;
+            const PdzEntry* entry = archive->findLua(requested);
+            bool external = false;
+            bool opened_external = false;
             if (!entry) {
-                setError("import", requested);
-                return false;
+                if (external_pdz.path()[0]) {
+                    entry = external_pdz.findLua(requested);
+                    if (entry) {
+                        archive = &external_pdz;
+                        external = true;
+                    }
+                }
+                if (!entry && external_import_depth == 0U) {
+                    char module[128]{};
+                    std::snprintf(module, sizeof(module), "%s", requested);
+                    size_t length = std::strlen(module);
+                    if (length > 4U &&
+                        std::strcmp(module + length - 4U, ".lua") == 0) {
+                        module[length - 4U] = '\0';
+                    }
+                    char archive_path[384]{};
+                    char archive_error[128]{};
+                    if (module[0] && !std::strstr(module, "..") &&
+                        module[0] != '/' && pdxJoinPath(
+                            archive_path, sizeof(archive_path), package_info.path,
+                            module, ".pdz") &&
+                        external_pdz.open(archive_path, archive_error,
+                                          sizeof(archive_error), false) == ESP_OK) {
+                        entry = external_pdz.findLua(requested);
+                        if (entry) {
+                            archive = &external_pdz;
+                            external = true;
+                            opened_external = true;
+                        } else {
+                            external_pdz.close();
+                        }
+                    }
+                }
+                if (!entry) {
+                    setError("import", requested);
+                    return false;
+                }
             }
             const size_t slot = entry->slot;
-            if (slot >= loaded_modules.size()) {
+            if (!external && slot >= loaded_modules.size()) {
                 setError("import", "PDZ module index overflow");
                 return false;
             }
-            if (loaded_modules[slot]) return true;
+            if (!external && loaded_modules[slot]) return true;
+            if (external) {
+                for (size_t index = 0; index < loaded_external_count; ++index) {
+                    if (!std::strcmp(loaded_external_modules[index].data(),
+                                     entry->name)) {
+                        if (opened_external) external_pdz.close();
+                        return true;
+                    }
+                }
+                if (loaded_external_count >= loaded_external_modules.size()) {
+                    if (opened_external) external_pdz.close();
+                    setError("import", "too many external PDZ modules");
+                    return false;
+                }
+            }
             uint8_t* bytecode = nullptr;
             size_t bytecode_size = 0;
             char archive_error[128]{};
-            const esp_err_t err = pdz.load(*entry, bytecode, bytecode_size,
-                                           archive_error, sizeof(archive_error));
+            const esp_err_t err = archive->load(*entry, bytecode, bytecode_size,
+                                                archive_error, sizeof(archive_error));
             if (err != ESP_OK) {
                 setError(entry->name, archive_error);
+                if (opened_external) external_pdz.close();
                 return false;
             }
             if (!normalizePlaydateLuaBytecode(bytecode, bytecode_size,
@@ -392,9 +736,18 @@ struct Runtime::Impl {
                                               sizeof(archive_error))) {
                 setError(entry->name, archive_error);
                 heap_caps_free(bytecode);
+                if (opened_external) external_pdz.close();
                 return false;
             }
-            loaded_modules[slot] = true;
+            if (external) {
+                std::snprintf(loaded_external_modules[loaded_external_count].data(),
+                              loaded_external_modules[loaded_external_count].size(),
+                              "%s", entry->name);
+                ++loaded_external_count;
+                ++external_import_depth;
+            } else {
+                loaded_modules[slot] = true;
+            }
             const int64_t started = esp_timer_get_time();
             ESP_LOGI(TAG, "PDZ exec begin: %s (%u bytes)", entry->name,
                      static_cast<unsigned>(bytecode_size));
@@ -404,7 +757,15 @@ struct Runtime::Impl {
             ESP_LOGI(TAG, "PDZ exec %s: %s in %lu ms", ok ? "ready" : "failed",
                      entry->name, static_cast<unsigned long>(elapsed_ms));
             heap_caps_free(bytecode);
-            if (!ok) loaded_modules[slot] = false;
+            if (external) {
+                --external_import_depth;
+                if (!ok && loaded_external_count > 0U) {
+                    loaded_external_modules[--loaded_external_count].fill('\0');
+                }
+                if (opened_external) external_pdz.close();
+            } else if (!ok) {
+                loaded_modules[slot] = false;
+            }
             return ok;
         }
         size_t index = 0;
@@ -932,13 +1293,53 @@ struct Runtime::Impl {
 
     bool resourcePath(char* output, size_t capacity, const char* requested,
                       const char* extension) const {
-        if (!package_mode || !requested || !requested[0] ||
-            std::strstr(requested, "..") || requested[0] == '/') return false;
-        const size_t length = std::strlen(requested);
+        if (!package_mode || !requested || !requested[0]) return false;
+        char relative[192]{};
+        const char* start = requested;
+        while (*start == '/') ++start;
+        if (!start[0] || std::strstr(start, "..") ||
+            std::strlen(start) >= sizeof(relative)) return false;
+        std::snprintf(relative, sizeof(relative), "%s", start);
+
+        // Lua source refers to authoring files (for example
+        // foo-table-16-16.png), while a compiled PDX contains foo.pdt.  The
+        // Playdate loader performs this source-to-compiled extension mapping.
+        const char* source_extensions[] = {".png", ".gif", ".bmp", ".fnt"};
+        size_t length = std::strlen(relative);
+        for (const char* source_extension : source_extensions) {
+            const size_t source_length = std::strlen(source_extension);
+            if (length >= source_length &&
+                std::strcmp(relative + length - source_length,
+                            source_extension) == 0) {
+                relative[length - source_length] = '\0';
+                length -= source_length;
+                break;
+            }
+        }
+        if (std::strcmp(extension, ".pdt") == 0) {
+            char* table_suffix = std::strstr(relative, "-table-");
+            if (table_suffix) {
+                const char* cursor = table_suffix + 7;
+                bool first_number = false;
+                while (*cursor >= '0' && *cursor <= '9') {
+                    first_number = true;
+                    ++cursor;
+                }
+                if (first_number && *cursor++ == '-') {
+                    bool second_number = false;
+                    while (*cursor >= '0' && *cursor <= '9') {
+                        second_number = true;
+                        ++cursor;
+                    }
+                    if (second_number && *cursor == '\0') *table_suffix = '\0';
+                }
+            }
+        }
+        length = std::strlen(relative);
         const size_t extension_length = std::strlen(extension);
         const bool has_extension = length >= extension_length &&
-            std::strcmp(requested + length - extension_length, extension) == 0;
-        return pdxJoinPath(output, capacity, package_info.path, requested,
+            std::strcmp(relative + length - extension_length, extension) == 0;
+        return pdxJoinPath(output, capacity, package_info.path, relative,
                            has_extension ? nullptr : extension);
     }
 
@@ -1958,6 +2359,58 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cSetFontFamily(lua_State* state) {
+        Impl* runtime = self(state);
+        if (auto* direct = static_cast<PdFont*>(
+                luaL_testudata(state, 1, kFontMetatable))) {
+            runtime->current_font = direct;
+            if (runtime->current_font_ref != LUA_NOREF) {
+                luaL_unref(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+            }
+            lua_pushvalue(state, 1);
+            runtime->current_font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
+            return 0;
+        }
+        luaL_checktype(state, 1, LUA_TTABLE);
+
+        // SDK font families use the variant keys "normal", "bold" and
+        // "italic".  Old SDK output is also seen with a zero-based numeric
+        // normal slot, so accept both without tying compatibility to one SDK.
+        lua_getfield(state, 1, "normal");
+        if (lua_isnil(state, -1)) {
+            lua_pop(state, 1);
+            lua_rawgeti(state, 1, 0);
+        }
+        if (lua_isnil(state, -1)) {
+            lua_pop(state, 1);
+            lua_rawgeti(state, 1, 1);
+        }
+        auto* font = static_cast<PdFont*>(
+            luaL_testudata(state, -1, kFontMetatable));
+        if (!font) {
+            lua_pop(state, 1);
+            // Missing variants are valid according to the SDK.  If normal is
+            // absent, choose the first actual font in the family.
+            lua_pushnil(state);
+            while (lua_next(state, 1) != 0) {
+                font = static_cast<PdFont*>(
+                    luaL_testudata(state, -1, kFontMetatable));
+                if (font) {
+                    lua_remove(state, -2); // discard iterator key
+                    break;
+                }
+                lua_pop(state, 1);
+            }
+        }
+        if (!font) return 0;
+        runtime->current_font = font;
+        if (runtime->current_font_ref != LUA_NOREF) {
+            luaL_unref(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+        }
+        runtime->current_font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
+        return 0;
+    }
+
     static int cPushContext(lua_State* state) {
         Impl* runtime = self(state);
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
@@ -2234,6 +2687,47 @@ struct Runtime::Impl {
         return pdxJoinPath(output, capacity, package_info.path, relative, ".pda");
     }
 
+    bool pdaDuration(const char* requested, float& seconds) const {
+        seconds = 0.0f;
+        char path[256]{};
+        if (!pdaPath(path, sizeof(path), requested)) return false;
+        FILE* file = std::fopen(path, "rb");
+        if (!file) return false;
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        uint8_t header[18]{};
+        const bool header_ok = length > 16 &&
+            std::fread(header, 1, sizeof(header), file) == sizeof(header) &&
+            std::memcmp(header, "Playdate AUD", 12) == 0;
+        std::fclose(file);
+        if (!header_ok) return false;
+        const uint32_t rate = readLe24(header + 12);
+        const uint8_t format = header[15];
+        const uint64_t payload = static_cast<uint64_t>(length - 16);
+        uint64_t frames = 0;
+        if (rate < 8000U || rate > 48000U || format > 5U) return false;
+        if (format <= 3U) {
+            const uint32_t bytes_per_sample = format >= 2U ? 2U : 1U;
+            const uint32_t channels = (format & 1U) ? 2U : 1U;
+            const uint32_t bytes_per_frame = bytes_per_sample * channels;
+            if (!bytes_per_frame || payload % bytes_per_frame != 0U) return false;
+            frames = payload / bytes_per_frame;
+        } else {
+            const uint16_t block_align = readLe16(header + 16);
+            const uint16_t channel_headers = format == 5U ? 8U : 4U;
+            if (payload < 2U || block_align <= channel_headers ||
+                (payload - 2U) % block_align != 0U) return false;
+            const uint64_t blocks = (payload - 2U) / block_align;
+            const uint64_t per_block = format == 5U
+                ? 1U + block_align - channel_headers
+                : 1U + (block_align - channel_headers) * 2U;
+            frames = blocks * per_block;
+        }
+        seconds = static_cast<float>(frames) / static_cast<float>(rate);
+        return std::isfinite(seconds) && seconds >= 0.0f;
+    }
+
     bool loadPda(const char* requested, int16_t*& samples, uint32_t& frames,
                  uint32_t& sample_rate) {
         samples = nullptr; frames = 0; sample_rate = 0;
@@ -2254,7 +2748,7 @@ struct Runtime::Impl {
         const uint8_t format = header[15];
         const size_t payload_size = static_cast<size_t>(length - 16);
         if (sample_rate < 8000U || sample_rate > 48000U ||
-            payload_size > 16U * 1024U * 1024U || format > 4U) {
+            payload_size > 16U * 1024U * 1024U || format > 5U) {
             std::fclose(file);
             return false;
         }
@@ -2320,20 +2814,29 @@ struct Runtime::Impl {
             return ok;
         }
 
+        // Formats 4 and 5 are Microsoft-style IMA ADPCM blocks.  Each channel
+        // starts with a 4-byte predictor/index header.  Stereo sample payloads
+        // then alternate four encoded bytes for left and four for right.
+        const bool stereo = format == 5U;
+        const uint16_t channel_header_bytes = stereo ? 8U : 4U;
         uint8_t block_bytes[2]{};
         if (payload_size < 6U || std::fread(block_bytes, 1, 2, file) != 2) {
             std::fclose(file);
             return false;
         }
         const uint16_t block_align = readLe16(block_bytes);
-        if (block_align < 5U || block_align > 4096U) {
+        if (block_align <= channel_header_bytes || block_align > 4096U ||
+            (payload_size - 2U) % block_align != 0U ||
+            (stereo && (block_align - channel_header_bytes) % 8U != 0U)) {
             std::fclose(file);
             return false;
         }
         const uint32_t block_count = static_cast<uint32_t>((payload_size - 2U) / block_align);
-        const uint32_t samples_per_block = 1U + (block_align - 4U) * 2U;
+        const uint32_t samples_per_block = stereo
+            ? 1U + (block_align - channel_header_bytes)
+            : 1U + (block_align - channel_header_bytes) * 2U;
         const uint64_t total_frames = static_cast<uint64_t>(block_count) * samples_per_block;
-        if (block_count == 0 || total_frames > 2U * 1024U * 1024U) {
+        if (block_count == 0 || total_frames > 4U * 1024U * 1024U) {
             std::fclose(file);
             return false;
         }
@@ -2363,22 +2866,57 @@ struct Runtime::Impl {
             -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
         uint32_t output = 0;
         bool ok = true;
+        auto decodeNibble = [&](int nibble, int& predictor, int& step_index) {
+            const int step = step_table[step_index];
+            const int delta = (((nibble & 7) * 2 + 1) * step) >> 3;
+            predictor += (nibble & 8) ? -delta : delta;
+            predictor = std::clamp(predictor, -32768, 32767);
+            step_index = std::clamp(step_index + index_table[nibble], 0, 88);
+            return static_cast<int16_t>(predictor);
+        };
         for (uint32_t block_index = 0; block_index < block_count; ++block_index) {
             if (std::fread(block, 1, block_align, file) != block_align) {
                 ok = false; break;
             }
-            int predictor = static_cast<int16_t>(readLe16(block));
-            int step_index = std::clamp<int>(block[2], 0, 88);
-            samples[output++] = static_cast<int16_t>(predictor);
-            for (uint16_t byte_index = 4; byte_index < block_align; ++byte_index) {
-                for (int shift : {0, 4}) {
-                    const int nibble = (block[byte_index] >> shift) & 0x0F;
-                    const int step = step_table[step_index];
-                    const int delta = (((nibble & 7) * 2 + 1) * step) >> 3;
-                    predictor += (nibble & 8) ? -delta : delta;
-                    predictor = std::clamp(predictor, -32768, 32767);
-                    step_index = std::clamp(step_index + index_table[nibble], 0, 88);
-                    samples[output++] = static_cast<int16_t>(predictor);
+            int predictor[2] = {
+                static_cast<int16_t>(readLe16(block)),
+                stereo ? static_cast<int16_t>(readLe16(block + 4U)) : 0,
+            };
+            int step_index[2] = {
+                std::clamp<int>(block[2], 0, 88),
+                stereo ? std::clamp<int>(block[6], 0, 88) : 0,
+            };
+            samples[output++] = static_cast<int16_t>(stereo
+                ? (predictor[0] + predictor[1]) / 2 : predictor[0]);
+            if (!stereo) {
+                for (uint16_t byte_index = 4; byte_index < block_align; ++byte_index) {
+                    for (int shift : {0, 4}) {
+                        const int nibble = (block[byte_index] >> shift) & 0x0F;
+                        samples[output++] = decodeNibble(
+                            nibble, predictor[0], step_index[0]);
+                    }
+                }
+                continue;
+            }
+            for (uint16_t group = 8U; group < block_align; group += 8U) {
+                int16_t decoded[2][8]{};
+                for (int channel = 0; channel < 2; ++channel) {
+                    const uint16_t channel_start = static_cast<uint16_t>(
+                        group + channel * 4U);
+                    int sample_index = 0;
+                    for (uint16_t byte_index = channel_start;
+                         byte_index < channel_start + 4U; ++byte_index) {
+                        for (int shift : {0, 4}) {
+                            const int nibble = (block[byte_index] >> shift) & 0x0F;
+                            decoded[channel][sample_index++] = decodeNibble(
+                                nibble, predictor[channel], step_index[channel]);
+                        }
+                    }
+                }
+                for (int index = 0; index < 8; ++index) {
+                    samples[output++] = static_cast<int16_t>(
+                        (static_cast<int32_t>(decoded[0][index]) +
+                         static_cast<int32_t>(decoded[1][index])) / 2);
                 }
             }
         }
@@ -2410,6 +2948,13 @@ struct Runtime::Impl {
                 return static_cast<int>(index);
             }
         }
+        struct stat source_info{};
+        if (stat(resolved_path, &source_info) != 0 ||
+            source_info.st_size <= 0 ||
+            static_cast<uint64_t>(source_info.st_size) >
+                kMaximumCachedSoundBytes) {
+            return -1;
+        }
 
         size_t free_index = sound_cache.size();
         for (size_t index = 0; index < sound_cache.size(); ++index) {
@@ -2425,7 +2970,12 @@ struct Runtime::Impl {
         uint32_t sample_rate = 0;
         if (!loadPda(requested, samples, frames, sample_rate)) return -1;
         const size_t bytes = static_cast<size_t>(frames) * sizeof(int16_t);
-        if (bytes > kMaximumSoundCacheBytes - sound_cache_bytes) {
+        // Large effects and music-like samples should be decoded only when
+        // played.  Caching them and then cloning for the audio owner doubles
+        // peak PSRAM use; that can starve image/JSON loading even when the PDX
+        // itself is small.
+        if (bytes > kMaximumCachedSoundBytes ||
+            bytes > kMaximumSoundCacheBytes - sound_cache_bytes) {
             heap_caps_free(samples);
             return -1;
         }
@@ -2634,6 +3184,19 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cSoundGetLength(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        float seconds = 0.0f;
+        if (!sound || !runtime->pdaDuration(sound->path, seconds)) {
+            lua_pushnumber(state, 0);
+            return 1;
+        }
+        lua_pushnumber(state, seconds / std::max(0.01f, sound->rate));
+        return 1;
+    }
+
     static int cSoundSetSample(lua_State* state) {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         auto* sample = static_cast<Sound*>(luaL_checkudata(state, 2, kSoundMetatable));
@@ -2680,18 +3243,38 @@ struct Runtime::Impl {
         return 0;
     }
 
-    int createTimer(lua_State* state, int duration_index, int callback_index) {
+    int createTimer(lua_State* state, int duration_index, int callback_index,
+                    bool callback_required = false) {
         const lua_Number duration = std::max<lua_Number>(1, luaL_checknumber(state, duration_index));
-        luaL_checktype(state, callback_index, LUA_TFUNCTION);
+        const bool has_callback = lua_isfunction(state, callback_index);
+        if (callback_required && !has_callback) {
+            return luaL_argerror(state, callback_index, "function expected");
+        }
+        const lua_Number start_value = has_callback ? 0 :
+            luaL_optnumber(state, callback_index, 0);
+        const lua_Number end_value = has_callback ? 0 :
+            luaL_optnumber(state, callback_index + 1, 0);
         lua_newtable(state);
         const int timer = lua_gettop(state);
         lua_pushnumber(state, duration); lua_setfield(state, timer, "duration");
         lua_pushnumber(state, 0); lua_setfield(state, timer, "elapsed");
         lua_pushnumber(state, 0); lua_setfield(state, timer, "currentTime");
+        lua_pushnumber(state, duration); lua_setfield(state, timer, "timeLeft");
+        lua_pushnumber(state, start_value); lua_setfield(state, timer, "startValue");
+        lua_pushnumber(state, end_value); lua_setfield(state, timer, "endValue");
+        lua_pushnumber(state, start_value); lua_setfield(state, timer, "value");
         lua_pushboolean(state, 0); lua_setfield(state, timer, "paused");
         lua_pushboolean(state, 0); lua_setfield(state, timer, "removed");
         lua_pushboolean(state, 0); lua_setfield(state, timer, "repeats");
-        lua_pushvalue(state, callback_index); lua_setfield(state, timer, "callback");
+        lua_pushboolean(state, 0); lua_setfield(state, timer, "reverses");
+        lua_pushboolean(state, 1); lua_setfield(state, timer, "discardOnCompletion");
+        if (has_callback) {
+            lua_pushvalue(state, callback_index);
+            lua_setfield(state, timer, "callback");
+        } else if (lua_isfunction(state, callback_index + 2)) {
+            lua_pushvalue(state, callback_index + 2);
+            lua_setfield(state, timer, "easingFunction");
+        }
         setFunction(timer, "pause", cTimerPause); setFunction(timer, "start", cTimerStart);
         setFunction(timer, "reset", cTimerReset); setFunction(timer, "remove", cTimerRemove);
         pushTimerRegistry();
@@ -2700,8 +3283,36 @@ struct Runtime::Impl {
         return 1;
     }
 
-    static int cTimerNew(lua_State* state) { return self(state)->createTimer(state, 1, 2); }
-    static int cTimerAfter(lua_State* state) { return self(state)->createTimer(state, 1, 2); }
+    static int cTimerNew(lua_State* state) {
+        return self(state)->createTimer(state, 1, 2, false);
+    }
+    static int cTimerAfter(lua_State* state) {
+        return self(state)->createTimer(state, 1, 2, true);
+    }
+
+    static int cTimerAll(lua_State* state) {
+        Impl* runtime = self(state);
+        lua_newtable(state);
+        const int result = lua_absindex(state, -1);
+        runtime->pushTimerRegistry();
+        const int registry = lua_absindex(state, -1);
+        lua_Integer output = 1;
+        lua_pushnil(state);
+        while (lua_next(state, registry) != 0) {
+            if (lua_istable(state, -1)) {
+                lua_getfield(state, -1, "removed");
+                const bool removed = lua_toboolean(state, -1) != 0;
+                lua_pop(state, 1);
+                if (!removed) {
+                    lua_pushvalue(state, -1);
+                    lua_rawseti(state, result, output++);
+                }
+            }
+            lua_pop(state, 1);
+        }
+        lua_remove(state, registry);
+        return 1;
+    }
 
     bool updateTimers() {
         const int top = lua_gettop(lua);
@@ -2717,9 +3328,32 @@ struct Runtime::Impl {
             lua_getfield(lua, timer, "currentTime"); lua_Number elapsed = lua_tonumber(lua,-1) + frame_dt_ms; lua_pop(lua,1);
             lua_pushnumber(lua, elapsed); lua_setfield(lua, timer, "currentTime");
             lua_pushnumber(lua, elapsed); lua_setfield(lua, timer, "elapsed");
+            lua_pushnumber(lua, std::max<lua_Number>(0, duration - elapsed));
+            lua_setfield(lua, timer, "timeLeft");
+            lua_getfield(lua, timer, "startValue");
+            const lua_Number start_value = lua_tonumber(lua, -1); lua_pop(lua, 1);
+            lua_getfield(lua, timer, "endValue");
+            const lua_Number end_value = lua_tonumber(lua, -1); lua_pop(lua, 1);
+            const lua_Number clamped_time = std::min(elapsed, duration);
+            lua_Number timer_value = start_value +
+                (end_value - start_value) * (clamped_time / duration);
+            lua_getfield(lua, timer, "easingFunction");
+            if (lua_isfunction(lua, -1)) {
+                lua_pushnumber(lua, clamped_time);
+                lua_pushnumber(lua, start_value);
+                lua_pushnumber(lua, end_value - start_value);
+                lua_pushnumber(lua, duration);
+                if (lua_pcall(lua, 4, 1, 0) != LUA_OK) {
+                    takeLuaError("timer easing"); lua_settop(lua, top); return false;
+                }
+                if (lua_isnumber(lua, -1)) timer_value = lua_tonumber(lua, -1);
+                lua_pop(lua, 1);
+            } else lua_pop(lua, 1);
+            lua_pushnumber(lua, timer_value); lua_setfield(lua, timer, "value");
             lua_getfield(lua, timer, "updateCallback");
             if (lua_isfunction(lua, -1)) {
-                if (lua_pcall(lua, 0, 0, 0) != LUA_OK) { takeLuaError("timer update"); lua_settop(lua,top); return false; }
+                lua_pushvalue(lua, timer);
+                if (lua_pcall(lua, 1, 0, 0) != LUA_OK) { takeLuaError("timer update"); lua_settop(lua,top); return false; }
             } else lua_pop(lua,1);
             if (elapsed >= duration) {
                 lua_getfield(lua, timer, "repeats"); const bool repeats = lua_toboolean(lua,-1); lua_pop(lua,1);
@@ -2732,7 +3366,13 @@ struct Runtime::Impl {
                 }
                 lua_getfield(lua, timer, "callback");
                 if (lua_isfunction(lua, -1)) {
-                    if (lua_pcall(lua, 0, 0, 0) != LUA_OK) { takeLuaError("timer callback"); lua_settop(lua,top); return false; }
+                    lua_pushvalue(lua, timer);
+                    if (lua_pcall(lua, 1, 0, 0) != LUA_OK) { takeLuaError("timer callback"); lua_settop(lua,top); return false; }
+                } else lua_pop(lua,1);
+                lua_getfield(lua, timer, "timerEndedCallback");
+                if (lua_isfunction(lua, -1)) {
+                    lua_pushvalue(lua, timer);
+                    if (lua_pcall(lua, 1, 0, 0) != LUA_OK) { takeLuaError("timer ended"); lua_settop(lua,top); return false; }
                 } else lua_pop(lua,1);
             }
             lua_pop(lua, 1);
@@ -2887,6 +3527,95 @@ struct Runtime::Impl {
             return true;
         }
         return false;
+    }
+
+    bool readMergedFile(const char* requested, std::string& bytes,
+                        std::string& error) const {
+        struct stat value{};
+        char path[384]{};
+        if (!mergedStat(requested, value, path, sizeof(path)) ||
+            !S_ISREG(value.st_mode)) {
+            error = "file not found";
+            return false;
+        }
+        if (value.st_size < 0 || value.st_size > 2 * 1024 * 1024) {
+            error = "file is too large";
+            return false;
+        }
+        FILE* file = std::fopen(path, "rb");
+        if (!file) {
+            error = errno ? std::strerror(errno) : "open failed";
+            return false;
+        }
+        bytes.resize(static_cast<size_t>(value.st_size));
+        const bool ok = bytes.empty() ||
+            std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size();
+        std::fclose(file);
+        if (!ok) {
+            bytes.clear();
+            error = errno ? std::strerror(errno) : "short read";
+        }
+        return ok;
+    }
+
+    static int pushJsonResult(lua_State* state, const char* bytes, size_t size) {
+        std::string error;
+        JsonToLua parser(state, bytes, size);
+        if (parser.parse(error)) return 1;
+        lua_pushnil(state);
+        lua_pushlstring(state, error.data(), error.size());
+        return 2;
+    }
+
+    static int cJsonDecode(lua_State* state) {
+        size_t size = 0;
+        const char* bytes = luaL_checklstring(state, 1, &size);
+        return pushJsonResult(state, bytes, size);
+    }
+
+    static int cJsonDecodeFile(lua_State* state) {
+        Impl* runtime = self(state);
+        if (auto* input = static_cast<PdFile*>(
+                luaL_testudata(state, 1, kFileMetatable))) {
+            if (!input->handle) {
+                lua_pushnil(state);
+                lua_pushliteral(state, "file is closed");
+                return 2;
+            }
+            const long original = std::ftell(input->handle);
+            if (original < 0 || std::fseek(input->handle, 0, SEEK_END) != 0) {
+                lua_pushnil(state);
+                lua_pushliteral(state, "could not seek JSON file");
+                return 2;
+            }
+            const long length = std::ftell(input->handle);
+            if (length < 0 || length > 2 * 1024 * 1024 ||
+                std::fseek(input->handle, 0, SEEK_SET) != 0) {
+                if (original >= 0) std::fseek(input->handle, original, SEEK_SET);
+                lua_pushnil(state);
+                lua_pushliteral(state, "JSON file is too large or unreadable");
+                return 2;
+            }
+            std::string bytes(static_cast<size_t>(length), '\0');
+            const bool ok = bytes.empty() ||
+                std::fread(bytes.data(), 1, bytes.size(), input->handle) == bytes.size();
+            if (original >= 0) std::fseek(input->handle, original, SEEK_SET);
+            if (!ok) {
+                lua_pushnil(state);
+                lua_pushliteral(state, "could not read JSON file");
+                return 2;
+            }
+            return pushJsonResult(state, bytes.data(), bytes.size());
+        }
+        const char* requested = luaL_checkstring(state, 1);
+        std::string bytes;
+        std::string error;
+        if (!runtime->readMergedFile(requested, bytes, error)) {
+            lua_pushnil(state);
+            lua_pushlstring(state, error.data(), error.size());
+            return 2;
+        }
+        return pushJsonResult(state, bytes.data(), bytes.size());
     }
 
     static int pushFileError(lua_State* state, const char* fallback) {
@@ -3390,7 +4119,8 @@ struct Runtime::Impl {
             setFunction(-1,"play",cSoundPlay);setFunction(-1,"stop",cSoundStop);
             setFunction(-1,"pause",cSoundPause);setFunction(-1,"isPlaying",cSoundIsPlaying);
             setFunction(-1,"setVolume",cSoundSetVolume);setFunction(-1,"setSample",cSoundSetSample);
-            setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"setLoopRange",cNoop);
+            setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"getLength",cSoundGetLength);
+            setFunction(-1,"setLoopRange",cNoop);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kFileMetatable)){
@@ -3482,11 +4212,16 @@ struct Runtime::Impl {
         setFunction(graphics,"fillCircleInRect",cFillCircleInRect);setFunction(graphics,"drawCircleInRect",cDrawCircleInRect);
         setFunction(graphics,"drawText",cDrawText);setFunction(graphics,"drawTextInRect",cDrawTextInRect);
         setFunction(graphics,"drawTextAligned",cDrawTextAligned);
-        setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"pushContext",cPushContext);
+        setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"setFontFamily",cSetFontFamily);
+        setFunction(graphics,"pushContext",cPushContext);
         setFunction(graphics,"popContext",cPopContext);setFunction(graphics,"setClipRect",cSetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
         setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
-        lua_newtable(lua);setFunction(-1,"new",cFontNew);lua_setfield(lua,graphics,"font");
+        lua_newtable(lua);setFunction(-1,"new",cFontNew);
+        lua_pushliteral(lua,"normal");lua_setfield(lua,-2,"kVariantNormal");
+        lua_pushliteral(lua,"bold");lua_setfield(lua,-2,"kVariantBold");
+        lua_pushliteral(lua,"italic");lua_setfield(lua,-2,"kVariantItalic");
+        lua_setfield(lua,graphics,"font");
         lua_newtable(lua);setFunction(-1,"new",cImageNew);
         setInteger(-1,"kDitherTypeBayer2x2",0);setInteger(-1,"kDitherTypeHorizontalLine",1);setInteger(-1,"kDitherTypeDiagonalLine",2);
         lua_setfield(lua,graphics,"image");
@@ -3499,7 +4234,8 @@ struct Runtime::Impl {
         lua_newtable(lua);setFunction(-1,"new",cFilePlayerNew);lua_setfield(lua,-2,"fileplayer");
         lua_setfield(lua,playdate,"sound");
         lua_newtable(lua);setFunction(-1,"new",cTimerNew);setFunction(-1,"performAfterDelay",cTimerAfter);
-        setFunction(-1,"updateTimers",cUpdateTimers);lua_setfield(lua,playdate,"timer");
+        setFunction(-1,"updateTimers",cUpdateTimers);setFunction(-1,"allTimers",cTimerAll);
+        lua_setfield(lua,playdate,"timer");
         lua_newtable(lua);setFunction(-1,"read",cDatastoreRead);setFunction(-1,"write",cDatastoreWrite);
         setFunction(-1,"delete",cDatastoreDelete);lua_setfield(lua,playdate,"datastore");
         lua_newtable(lua);const int file=lua_gettop(lua);
@@ -3514,6 +4250,11 @@ struct Runtime::Impl {
         lua_newtable(lua);lua_setfield(lua,file,"file");
         lua_setfield(lua,playdate,"file");
         lua_setglobal(lua,"playdate");
+
+        lua_newtable(lua);
+        setFunction(-1,"decode",cJsonDecode);
+        setFunction(-1,"decodeFile",cJsonDecodeFile);
+        lua_setglobal(lua,"json");
     }
 
     bool callGlobal(const char* table_name,const char* function_name,bool optional=false) {
@@ -3538,8 +4279,10 @@ struct Runtime::Impl {
                     const char* package_path = nullptr) {
         canvas=&target_canvas;audio=&target_audio;storage=&target_storage;game=selected_game;
         last_error[0]='\0';loaded_modules.fill(false);runtime_stats={};
+        for (auto& name : loaded_external_modules) name.fill('\0');
+        loaded_external_count=0;external_import_depth=0;
         allocated_bytes=0;peak_allocated_bytes=0;
-        package_mode=false;package_info={};pdz.close();
+        package_mode=false;package_info={};pdz.close();external_pdz.close();
         if (package_path && package_path[0]) {
             const esp_err_t inspect_error = inspectPackage(package_path, package_info);
             if (inspect_error != ESP_OK) {
@@ -3606,7 +4349,8 @@ struct Runtime::Impl {
         if(audio)audio->stopMusicPcm();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
         clearSoundCache();
-        pdz.close();package_mode=false;package_info={};
+        pdz.close();external_pdz.close();package_mode=false;package_info={};
+        loaded_external_count=0;external_import_depth=0;
         releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;
         current_font_ref=LUA_NOREF;canvas=nullptr;audio=nullptr;storage=nullptr;

@@ -307,7 +307,8 @@ bool normalizePlaydateLuaBytecode(uint8_t* data, size_t size,
     return normalizer.run();
 }
 
-esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity) {
+esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity,
+                           bool require_main) {
     close();
     if (!path || std::strlen(path) >= sizeof(path_)) {
         setError(error, error_capacity, "main.pdz path is too long");
@@ -398,7 +399,7 @@ esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity)
         entries_[count_++] = entry;
     }
     std::fclose(file);
-    if (!findLua("main")) {
+    if (require_main && !findLua("main")) {
         close();
         setError(error, error_capacity, "main.pdz does not contain Lua module main");
         return ESP_ERR_NOT_FOUND;
