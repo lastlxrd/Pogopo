@@ -27,6 +27,7 @@ function class(name)
 	_G[name] = cls
 	return {
 		extends = function(parent)
+			if type(parent) == "string" then parent = _G[parent] end
 			parent = parent or Object
 			cls.super = parent
 			mt.__index = parent
@@ -69,6 +70,9 @@ function Sprite:init(image)
 	self.collisionsEnabled = true
 	self.imageDrawMode = gfx.kDrawModeCopy
 	self.flip = gfx.kImageUnflipped
+	self.xScale, self.yScale = 1, 1
+	self.rotation = 0
+	self.clipRect = nil
 	self.groups = {}
 	self.collidesWithGroups = {}
 	self._sequence = 0
@@ -76,7 +80,7 @@ end
 
 function Sprite.new(image) return Sprite(image) end
 
-function Sprite:setImage(image, flip)
+function Sprite:setImage(image, flip, xScale, yScale)
 	if self.image ~= image then
 		self.image = image
 		if image then
@@ -86,6 +90,8 @@ function Sprite:setImage(image, flip)
 		end
 	end
 	self.flip = flip or gfx.kImageUnflipped
+	self.xScale = xScale or 1
+	self.yScale = yScale or self.xScale
 	if image and self.width == 0 then
 		local width, height = image:getSize()
 		self.width, self.height = width, height
@@ -93,9 +99,22 @@ function Sprite:setImage(image, flip)
 end
 function Sprite:getImage() return self.image end
 function Sprite:setSize(width, height) self.width, self.height = width, height end
+function Sprite:getSize() return self.width, self.height end
 function Sprite:setCenter(x, y) self.centerX, self.centerY = x, y end
 function Sprite:moveTo(x, y) self.x, self.y = x, y end
 function Sprite:moveBy(x, y) self.x, self.y = self.x + x, self.y + y end
+function Sprite:setRotation(value) self.rotation = value or 0 end
+function Sprite:getRotation() return self.rotation end
+function Sprite:setClipRect(x, y, width, height)
+	if type(x) == "table" then
+		self.clipRect = {x=x.x or 0, y=x.y or 0,
+			width=x.width or x.w or 0, height=x.height or x.h or 0}
+	else
+		self.clipRect = {x=x or 0, y=y or 0,
+			width=width or 0, height=height or 0}
+	end
+end
+function Sprite:clearClipRect() self.clipRect = nil end
 function Sprite:setZIndex(value)
 	if self.zIndex ~= value then
 		self.zIndex = value
@@ -188,9 +207,27 @@ function Sprite:update()
 		if item.added and item.visible and item.image then
 			local previous = gfx._getImageDrawMode()
 			gfx.setImageDrawMode(item.imageDrawMode)
-			local x = math.floor(item.x - item.width * item.centerX)
-			local y = math.floor(item.y - item.height * item.centerY)
-			item.image:draw(x, y, item.flip)
+			if item.clipRect then
+				gfx.setClipRect(item.clipRect.x, item.clipRect.y,
+					item.clipRect.width, item.clipRect.height)
+			end
+			if item.rotation ~= 0 then
+				item.image:drawRotated(item.x, item.y, item.rotation,
+					item.xScale, item.yScale)
+			else
+				local x = math.floor(item.x - item.width * item.centerX)
+				local y = math.floor(item.y - item.height * item.centerY)
+				if item.xScale ~= 1 or item.yScale ~= 1 then
+					-- PogoDate's native scaled path is integer-only; animation
+					-- libraries normally use 1x, while rotated sprites retain
+					-- independent fractional scales through drawRotated above.
+					item.image:drawRotated(item.x, item.y, 0,
+						item.xScale, item.yScale)
+				else
+					item.image:draw(x, y, item.flip)
+				end
+			end
+			if item.clipRect then gfx.clearClipRect() end
 			gfx.setImageDrawMode(previous)
 		end
 	end
@@ -234,6 +271,38 @@ local function overlaps(ax, ay, aw, ah, bx, by, bw, bh)
 	return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 end
 
+local function hasGroup(groups, wanted)
+	if groups == nil then return false end
+	if type(groups) == "number" then return groups == wanted end
+	for i=1,#groups do if groups[i] == wanted then return true end end
+	return false
+end
+
+local function groupsEmpty(groups)
+	return groups == nil or (type(groups) == "table" and #groups == 0)
+end
+
+local function groupsAllow(left, right)
+	if groupsEmpty(left.collidesWithGroups) and groupsEmpty(right.collidesWithGroups) then
+		return true
+	end
+	if type(right.groups) == "number" then
+		if hasGroup(left.collidesWithGroups, right.groups) then return true end
+	else
+		for i=1,#right.groups do
+			if hasGroup(left.collidesWithGroups, right.groups[i]) then return true end
+		end
+	end
+	if type(left.groups) == "number" then
+		if hasGroup(right.collidesWithGroups, left.groups) then return true end
+	else
+		for i=1,#left.groups do
+			if hasGroup(right.collidesWithGroups, left.groups[i]) then return true end
+		end
+	end
+	return false
+end
+
 function Sprite:checkCollisions(goalX, goalY)
 	local previousX, previousY = self.x, self.y
 	self.x, self.y = goalX, goalY
@@ -246,6 +315,7 @@ function Sprite:checkCollisions(goalX, goalY)
 	for i=1,#candidates do
 		local other = candidates[i]
 		if other ~= self and other.added and other.collisionsEnabled and
+			groupsAllow(self, other) and
 			other.collideRect and self.collideRect then
 			local ox, oy, ow, oh = spriteBounds(other)
 			if overlaps(sx,sy,sw,sh,ox,oy,ow,oh) then
@@ -259,6 +329,12 @@ function Sprite:checkCollisions(goalX, goalY)
 	end
 	self.x, self.y = previousX, previousY
 	return goalX, goalY, collisions, #collisions
+end
+
+function Sprite:moveWithCollisions(goalX, goalY)
+	local actualX, actualY, collisions, length = self:checkCollisions(goalX, goalY)
+	self:moveTo(actualX, actualY)
+	return actualX, actualY, collisions, length
 end
 
 function Sprite.querySpritesInRect(x, y, width, height)
@@ -454,3 +530,56 @@ end
 playdate.ui = {gridview=Gridview}
 
 kTextAlignment = {left=0, center=1, right=2}
+
+playdate.math = playdate.math or {}
+function playdate.math.lerp(startValue, endValue, amount)
+	return startValue + (endValue - startValue) * amount
+end
+
+-- CoreLibs/frameTimer semantics: durations are measured in calls to
+-- updateTimers(), not milliseconds.  This keeps frame-authored animation and
+-- difficulty pacing stable when a package requests a non-default refresh rate.
+local frameTimers = {}
+local FrameTimer = {}
+FrameTimer.__index = FrameTimer
+
+function FrameTimer:pause() self.paused = true end
+function FrameTimer:start() self.paused = false end
+function FrameTimer:reset()
+	self.frame = 0
+	self.paused = false
+	self.removed = false
+end
+function FrameTimer:remove() self.removed = true end
+
+playdate.frameTimer = {}
+function playdate.frameTimer.new(duration, callback)
+	local timer = setmetatable({
+		duration=math.max(1, math.floor(duration or 1)),
+		callback=callback,
+		frame=0,
+		paused=false,
+		removed=false,
+		repeats=false,
+	}, FrameTimer)
+	frameTimers[#frameTimers + 1] = timer
+	return timer
+end
+
+function playdate.frameTimer.updateTimers()
+	local active = {}
+	for i=1,#frameTimers do
+		local timer = frameTimers[i]
+		if not timer.removed then
+			if not timer.paused then
+				timer.frame = timer.frame + 1
+				if timer.frame >= timer.duration then
+					if timer.callback then timer.callback() end
+					if timer.repeats then timer.frame = 0 else timer.removed = true end
+				end
+			end
+			if not timer.removed then active[#active + 1] = timer end
+		end
+	end
+	frameTimers = active
+end

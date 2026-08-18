@@ -199,8 +199,8 @@ private:
                 case 1U:   // false
                 case 17U:  // true
                     break;
-                case 3U:   // float
-                case 19U:  // integer
+                case 3U:   // integer
+                case 19U:  // float
                     if (!skip(4U)) return false;
                     break;
                 case 4U:   // short string

@@ -30,6 +30,9 @@ extern "C" {
 namespace pogopo::playdate {
 namespace {
 
+static_assert(sizeof(lua_Integer) == 4 && sizeof(lua_Number) == 4,
+    "PogoDate requires the Lua component and all API clients to use LUA_32BITS");
+
 constexpr char TAG[] = "pogodate";
 constexpr uint32_t kMaximumFps = 50;
 constexpr size_t kErrorCapacity = 384;
@@ -84,7 +87,16 @@ struct ImageTable {
 
 struct PdFont {
     bool pico = false;
+    bool compiled = false;
     int scale = 1;
+    int16_t tracking = 0;
+    uint8_t glyph_width = 0;
+    uint8_t glyph_height = 0;
+    uint32_t data_size = 0;
+
+    const uint8_t* data() const {
+        return reinterpret_cast<const uint8_t*>(this + 1);
+    }
 };
 
 struct Sound {
@@ -93,6 +105,7 @@ struct Sound {
     bool music = false;
     bool loop = false;
     float volume = 1.0f;
+    float rate = 1.0f;
     int16_t cache_index = -1;
     char path[160]{};
 };
@@ -203,6 +216,7 @@ struct Runtime::Impl {
     uint32_t frame_accumulator_units = 0;
     uint32_t frame_dt_ms = 20;
     uint32_t now_ms = 0;
+    uint32_t elapsed_reset_ms = 0;
     uint8_t held_buttons = 0;
     uint8_t pressed_buttons = 0;
     uint8_t previous_held_buttons = 0;
@@ -217,6 +231,7 @@ struct Runtime::Impl {
     Image* target = nullptr;
     Image* stencil = nullptr;
     PdFont* current_font = nullptr;
+    int current_font_ref = LUA_NOREF;
     ClipRect clip{};
     struct Context {
         Image* target = nullptr;
@@ -405,7 +420,8 @@ struct Runtime::Impl {
 
     bool allocateImage(Image& image, int width, int height, uint8_t color,
                        bool prefer_internal = false) {
-        if (width <= 0 || height <= 0 || width > 512 || height > 512) return false;
+        if (width <= 0 || height <= 0 || width > 1024 || height > 1024 ||
+            static_cast<size_t>(width) * height > 1024U * 1024U) return false;
         const size_t bytes = static_cast<size_t>(width) * height;
         uint8_t* pixels = nullptr;
         if (prefer_internal) {
@@ -458,7 +474,8 @@ struct Runtime::Impl {
     }
 
     Image* pushDynamicImage(int width, int height, uint8_t color) {
-        if (width <= 0 || height <= 0 || width > 512 || height > 512) {
+        if (width <= 0 || height <= 0 || width > 1024 || height > 1024 ||
+            static_cast<size_t>(width) * height > 1024U * 1024U) {
             lua_pushnil(lua);
             return nullptr;
         }
@@ -853,6 +870,12 @@ struct Runtime::Impl {
             (static_cast<uint32_t>(value[3]) << 24U);
     }
 
+    static uint32_t readLe24(const uint8_t* value) {
+        return static_cast<uint32_t>(value[0]) |
+            (static_cast<uint32_t>(value[1]) << 8U) |
+            (static_cast<uint32_t>(value[2]) << 16U);
+    }
+
     bool resourcePath(char* output, size_t capacity, const char* requested,
                       const char* extension) const {
         if (!package_mode || !requested || !requested[0] ||
@@ -936,11 +959,15 @@ struct Runtime::Impl {
         const uint16_t top = readLe16(bytes + 10);
         const uint16_t flags = readLe16(bytes + 14);
         const size_t plane_size = static_cast<size_t>(row_bytes) * stored_height;
-        const bool has_mask = (flags & 0x03U) == 0x03U;
+        // Playdate treats either of the low transparency bits as a masked
+        // cell.  Requiring both happened to work for the first Celeste
+        // assets, but is too strict for compiled fonts and other PDX files.
+        const bool has_mask = (flags & 0x03U) != 0U;
+        const size_t plane_count = has_mask ? 2U : 1U;
         if (stored_width == 0 || stored_height == 0 || row_bytes == 0 ||
             stored_width > row_bytes * 8U || left + stored_width > full_width ||
             top + stored_height > full_height ||
-            16U + plane_size * (has_mask ? 2U : 1U) > size) return false;
+            plane_size > (size - 16U) / plane_count) return false;
         const uint8_t* bitmap = bytes + 16U;
         const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
         std::memset(image.pixels, Clear,
@@ -1470,9 +1497,235 @@ struct Runtime::Impl {
         return 11;
     }
 
-    int textWidth(const char*, size_t length) const {
-        if (!current_font) return static_cast<int>(length) * 6;
-        return static_cast<int>(length) * (current_font->pico ? 4 : 6 * current_font->scale);
+    struct CompiledGlyph {
+        const uint8_t* cell = nullptr;
+        size_t cell_size = 0;
+        int advance = 0;
+    };
+
+    static unsigned bitCount(uint8_t value) {
+        unsigned count = 0;
+        while (value) {
+            value = static_cast<uint8_t>(value & (value - 1U));
+            ++count;
+        }
+        return count;
+    }
+
+    static size_t flagCount(const uint8_t* flags, size_t bytes) {
+        size_t count = 0;
+        for (size_t index = 0; index < bytes; ++index) {
+            count += bitCount(flags[index]);
+        }
+        return count;
+    }
+
+    static size_t flagOrdinal(const uint8_t* flags, unsigned bit_index) {
+        size_t ordinal = flagCount(flags, bit_index >> 3U);
+        const unsigned bit = bit_index & 7U;
+        if (bit != 0U) {
+            ordinal += bitCount(static_cast<uint8_t>(
+                flags[bit_index >> 3U] & ((1U << bit) - 1U)));
+        }
+        return ordinal;
+    }
+
+    static uint32_t nextUtf8(const char* text, size_t length, size_t& offset) {
+        if (!text || offset >= length) return 0;
+        const uint8_t first = static_cast<uint8_t>(text[offset++]);
+        if (first < 0x80U) return first;
+        unsigned continuation_count = 0;
+        uint32_t codepoint = 0;
+        if ((first & 0xe0U) == 0xc0U) {
+            continuation_count = 1; codepoint = first & 0x1fU;
+        } else if ((first & 0xf0U) == 0xe0U) {
+            continuation_count = 2; codepoint = first & 0x0fU;
+        } else if ((first & 0xf8U) == 0xf0U) {
+            continuation_count = 3; codepoint = first & 0x07U;
+        } else {
+            return 0xfffdU;
+        }
+        if (continuation_count > length - offset) {
+            offset = length;
+            return 0xfffdU;
+        }
+        for (unsigned index = 0; index < continuation_count; ++index) {
+            const uint8_t value = static_cast<uint8_t>(text[offset]);
+            if ((value & 0xc0U) != 0x80U) return 0xfffdU;
+            ++offset;
+            codepoint = (codepoint << 6U) | (value & 0x3fU);
+        }
+        return codepoint <= 0x3ffffU ? codepoint : 0xfffdU;
+    }
+
+    bool compiledGlyph(const PdFont& font, uint32_t codepoint,
+                       uint32_t next_codepoint, CompiledGlyph& result) const {
+        result = {};
+        if (!font.compiled || font.data_size < 68U || codepoint > 0x1ffffU) {
+            return false;
+        }
+        const uint8_t* data = font.data();
+        const uint8_t* page_flags = data + 4U;
+        const unsigned page_index = static_cast<unsigned>(codepoint >> 8U);
+        if ((page_flags[page_index >> 3U] &
+             (1U << (page_index & 7U))) == 0U) {
+            return false;
+        }
+
+        const size_t page_count = flagCount(page_flags, 64U);
+        const size_t page_ordinal = flagOrdinal(page_flags, page_index);
+        const size_t page_table_size = page_count * 4U;
+        if (page_count == 0U || page_table_size > font.data_size - 68U) {
+            return false;
+        }
+        const uint8_t* page_offsets = data + 68U;
+        const uint8_t* pages = page_offsets + page_table_size;
+        const size_t pages_size = font.data_size - 68U - page_table_size;
+        const uint32_t page_start = page_ordinal == 0U ? 0U
+            : readLe32(page_offsets + (page_ordinal - 1U) * 4U);
+        const uint32_t page_end = readLe32(
+            page_offsets + page_ordinal * 4U);
+        if (page_start > page_end || page_end > pages_size ||
+            page_end - page_start < 36U) {
+            return false;
+        }
+
+        const uint8_t* page = pages + page_start;
+        const size_t page_size = page_end - page_start;
+        const uint8_t* glyph_flags = page + 4U;
+        const unsigned glyph_index = static_cast<unsigned>(codepoint & 0xffU);
+        if ((glyph_flags[glyph_index >> 3U] &
+             (1U << (glyph_index & 7U))) == 0U) {
+            return false;
+        }
+        const size_t glyph_count = flagCount(glyph_flags, 32U);
+        const size_t glyph_ordinal = flagOrdinal(glyph_flags, glyph_index);
+        const size_t glyph_table_size = glyph_count * 2U;
+        if (glyph_count == 0U || glyph_table_size > page_size - 36U) {
+            return false;
+        }
+        const uint8_t* glyph_offsets = page + 36U;
+        const uint8_t* glyphs = glyph_offsets + glyph_table_size;
+        const size_t glyphs_size = page_size - 36U - glyph_table_size;
+        const uint16_t glyph_start = glyph_ordinal == 0U ? 0U
+            : readLe16(glyph_offsets + (glyph_ordinal - 1U) * 2U);
+        const uint16_t glyph_end = readLe16(
+            glyph_offsets + glyph_ordinal * 2U);
+        if (glyph_start > glyph_end || glyph_end > glyphs_size ||
+            static_cast<size_t>(glyph_end - glyph_start) < 4U) {
+            return false;
+        }
+
+        const uint8_t* glyph = glyphs + glyph_start;
+        const size_t glyph_size = glyph_end - glyph_start;
+        const size_t short_count = glyph[1];
+        const size_t long_count = readLe16(glyph + 2U);
+        const size_t short_end = 4U + short_count * 2U;
+        const size_t long_start = (short_end + 3U) & ~size_t{3U};
+        const size_t cell_start = long_start + long_count * 4U;
+        if (short_end > glyph_size || long_start > glyph_size ||
+            cell_start > glyph_size) {
+            return false;
+        }
+
+        int kerning = 0;
+        if ((next_codepoint >> 8U) == page_index) {
+            for (size_t index = 0; index < short_count; ++index) {
+                const uint8_t* entry = glyph + 4U + index * 2U;
+                if (entry[0] == (next_codepoint & 0xffU)) {
+                    kerning = static_cast<int8_t>(entry[1]);
+                    break;
+                }
+            }
+        }
+        if (kerning == 0) {
+            for (size_t index = 0; index < long_count; ++index) {
+                const uint8_t* entry = glyph + long_start + index * 4U;
+                const uint32_t other = static_cast<uint32_t>(entry[0]) |
+                    (static_cast<uint32_t>(entry[1]) << 8U) |
+                    (static_cast<uint32_t>(entry[2]) << 16U);
+                if (other == next_codepoint) {
+                    kerning = static_cast<int8_t>(entry[3]);
+                    break;
+                }
+            }
+        }
+        result.cell = glyph + cell_start;
+        result.cell_size = glyph_size - cell_start;
+        result.advance = static_cast<int>(glyph[0]) + font.tracking + kerning;
+        return true;
+    }
+
+    void drawCompiledGlyph(const PdFont& font, const CompiledGlyph& glyph,
+                           int x, int y) {
+        if (!glyph.cell || glyph.cell_size < 16U) return;
+        const uint8_t* cell = glyph.cell;
+        const uint16_t stored_width = readLe16(cell);
+        const uint16_t stored_height = readLe16(cell + 2U);
+        const uint16_t row_bytes = readLe16(cell + 4U);
+        const uint16_t left = readLe16(cell + 6U);
+        const uint16_t top = readLe16(cell + 10U);
+        const uint16_t flags = readLe16(cell + 14U);
+        if (stored_width == 0U || stored_height == 0U) return;
+        const size_t plane_size = static_cast<size_t>(row_bytes) * stored_height;
+        const bool has_mask = (flags & 0x03U) != 0U;
+        const size_t plane_count = has_mask ? 2U : 1U;
+        if (row_bytes == 0U || stored_width > row_bytes * 8U ||
+            left + stored_width > font.glyph_width ||
+            top + stored_height > font.glyph_height ||
+            plane_size > (glyph.cell_size - 16U) / plane_count) {
+            return;
+        }
+        const uint8_t* bitmap = cell + 16U;
+        const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
+        for (uint16_t row = 0; row < stored_height; ++row) {
+            for (uint16_t column = 0; column < stored_width; ++column) {
+                const uint8_t bit = static_cast<uint8_t>(
+                    0x80U >> (column & 7U));
+                const size_t index = static_cast<size_t>(row) * row_bytes +
+                    (column >> 3U);
+                if (mask && (mask[index] & bit) == 0U) continue;
+                putLogicalPixel(x + left + column, y + top + row,
+                    (bitmap[index] & bit) != 0U ? White : Black);
+            }
+        }
+    }
+
+    int textWidthForFont(const PdFont* font, const char* text,
+                         size_t length) const {
+        if (!text) return 0;
+        int line_width = 0;
+        int maximum_width = 0;
+        size_t offset = 0;
+        while (offset < length) {
+            const uint32_t codepoint = nextUtf8(text, length, offset);
+            if (codepoint == '\n') {
+                maximum_width = std::max(maximum_width, line_width);
+                line_width = 0;
+                continue;
+            }
+            size_t lookahead = offset;
+            const uint32_t next_codepoint = lookahead < length
+                ? nextUtf8(text, length, lookahead) : 0U;
+            if (font && font->compiled) {
+                CompiledGlyph glyph{};
+                if (!compiledGlyph(*font, codepoint, next_codepoint, glyph) &&
+                    codepoint != '?') {
+                    compiledGlyph(*font, '?', next_codepoint, glyph);
+                }
+                line_width += glyph.advance > 0 ? glyph.advance
+                    : std::max<int>(1, font->glyph_width);
+            } else if (font && font->pico) {
+                line_width += 4;
+            } else {
+                line_width += 6 * (font ? font->scale : 1);
+            }
+        }
+        return std::max(maximum_width, line_width);
+    }
+
+    int textWidth(const char* text, size_t length) const {
+        return textWidthForFont(current_font, text, length);
     }
 
     void drawText(const char* text, size_t length, int x, int y) {
@@ -1481,13 +1734,32 @@ struct Runtime::Impl {
         const bool pico = current_font && current_font->pico;
         const int scale = current_font ? current_font->scale : 1;
         const CelesteAsset* font_asset = pico ? findCelesteAsset("Assets/pico") : nullptr;
-        for (size_t i = 0; i < length; ++i) {
-            const unsigned char character = static_cast<unsigned char>(text[i]);
-            if (character == '\n') {
+        size_t offset = 0;
+        while (offset < length) {
+            const uint32_t codepoint = nextUtf8(text, length, offset);
+            if (codepoint == '\n') {
                 cursor_x = x;
-                cursor_y += pico ? 6 : 8 * scale;
+                cursor_y += current_font && current_font->compiled
+                    ? std::max<int>(1, current_font->glyph_height)
+                    : (pico ? 6 : 8 * scale);
                 continue;
             }
+            size_t lookahead = offset;
+            const uint32_t next_codepoint = lookahead < length
+                ? nextUtf8(text, length, lookahead) : 0U;
+            if (current_font && current_font->compiled) {
+                CompiledGlyph glyph{};
+                if (!compiledGlyph(*current_font, codepoint, next_codepoint,
+                                   glyph) && codepoint != '?') {
+                    compiledGlyph(*current_font, '?', next_codepoint, glyph);
+                }
+                drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
+                cursor_x += glyph.advance > 0 ? glyph.advance
+                    : std::max<int>(1, current_font->glyph_width);
+                continue;
+            }
+            const unsigned char character = codepoint <= 0xffU
+                ? static_cast<unsigned char>(codepoint) : '?';
             if (pico && font_asset) {
                 Image glyph{};
                 glyph.width = 3; glyph.height = 5; glyph.asset = font_asset;
@@ -1537,9 +1809,54 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cDrawTextAligned(lua_State* state) {
+        Impl* runtime = self(state);
+        size_t length = 0;
+        const char* value = luaL_tolstring(state, 1, &length);
+        int x = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
+        const int y = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
+        const int alignment = static_cast<int>(luaL_optinteger(state, 4, 0));
+        const int width = runtime->textWidth(value, length);
+        if (alignment == 1) x -= width / 2;
+        else if (alignment == 2) x -= width;
+        runtime->drawText(value, length, x, y);
+        lua_pop(state, 1);
+        return 0;
+    }
+
     static int cFontNew(lua_State* state) {
+        Impl* runtime = self(state);
         const char* path = luaL_optstring(state, 1, "");
-        auto* font = static_cast<PdFont*>(lua_newuserdatauv(state, sizeof(PdFont), 0));
+        uint8_t* bytes = nullptr;
+        size_t size = 0;
+        uint32_t maximum_width = 0, maximum_height = 0, unused = 0;
+        if (runtime->loadCompiledResource(path, ".pft", "Playdate FNT",
+                                          bytes, size, maximum_width,
+                                          maximum_height, unused) &&
+            bytes && size >= 68U && bytes[0] > 0U && bytes[1] > 0U &&
+            maximum_width <= 255U && maximum_height <= 255U) {
+            auto* font = static_cast<PdFont*>(lua_newuserdatauv(
+                state, sizeof(PdFont) + size, 0));
+            new (font) PdFont{};
+            font->compiled = true;
+            font->tracking = static_cast<int16_t>(readLe16(bytes + 2U));
+            font->glyph_width = bytes[0];
+            font->glyph_height = bytes[1];
+            font->data_size = static_cast<uint32_t>(size);
+            std::memcpy(reinterpret_cast<uint8_t*>(font + 1), bytes, size);
+            heap_caps_free(bytes);
+            luaL_getmetatable(state, kFontMetatable);
+            lua_setmetatable(state, -2);
+            ESP_LOGI(TAG, "PFT ready: %s (%ux%u, %u bytes)", path,
+                     static_cast<unsigned>(font->glyph_width),
+                     static_cast<unsigned>(font->glyph_height),
+                     static_cast<unsigned>(font->data_size));
+            return 1;
+        }
+        if (bytes) heap_caps_free(bytes);
+        auto* font = static_cast<PdFont*>(lua_newuserdatauv(
+            state, sizeof(PdFont), 0));
+        new (font) PdFont{};
         font->pico = path && std::strstr(path, "Assets/pico");
         font->scale = (!font->pico && path && std::strstr(path, "-20-")) ? 2 : 1;
         luaL_getmetatable(state, kFontMetatable);
@@ -1549,13 +1866,30 @@ struct Runtime::Impl {
 
     static int cFontGetHeight(lua_State* state) {
         auto* font = static_cast<PdFont*>(luaL_checkudata(state, 1, kFontMetatable));
-        lua_pushinteger(state, font && font->pico ? 5 : 7 * (font ? font->scale : 1));
+        lua_pushinteger(state, font && font->compiled ? font->glyph_height :
+            (font && font->pico ? 5 : 7 * (font ? font->scale : 1)));
+        return 1;
+    }
+
+    static int cFontGetTextWidth(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        size_t length = 0;
+        const char* text = luaL_checklstring(state, 2, &length);
+        lua_pushinteger(state, runtime->textWidthForFont(font, text, length));
         return 1;
     }
 
     static int cSetFont(lua_State* state) {
-        self(state)->current_font = static_cast<PdFont*>(
+        Impl* runtime = self(state);
+        runtime->current_font = static_cast<PdFont*>(
             luaL_checkudata(state, 1, kFontMetatable));
+        if (runtime->current_font_ref != LUA_NOREF) {
+            luaL_unref(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+        }
+        lua_pushvalue(state, 1);
+        runtime->current_font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
         return 0;
     }
 
@@ -1661,6 +1995,23 @@ struct Runtime::Impl {
 
     static int cGetCurrentTime(lua_State* state) {
         lua_pushinteger(state, static_cast<lua_Integer>(self(state)->now_ms));
+        return 1;
+    }
+
+    static int cGetElapsedTime(lua_State* state) {
+        const Impl* runtime = self(state);
+        const uint32_t elapsed = runtime->now_ms - runtime->elapsed_reset_ms;
+        lua_pushnumber(state, static_cast<lua_Number>(elapsed) /
+            static_cast<lua_Number>(1000));
+        return 1;
+    }
+
+    static int cResetElapsedTime(lua_State* state) {
+        Impl* runtime = self(state);
+        const uint32_t elapsed = runtime->now_ms - runtime->elapsed_reset_ms;
+        runtime->elapsed_reset_ms = runtime->now_ms;
+        lua_pushnumber(state, static_cast<lua_Number>(elapsed) /
+            static_cast<lua_Number>(1000));
         return 1;
     }
 
@@ -1828,24 +2179,68 @@ struct Runtime::Impl {
             std::fclose(file);
             return false;
         }
-        sample_rate = readLe16(header + 12);
+        sample_rate = readLe24(header + 12);
         const uint8_t format = header[15];
         const size_t payload_size = static_cast<size_t>(length - 16);
         if (sample_rate < 8000U || sample_rate > 48000U ||
-            payload_size > 4U * 1024U * 1024U ||
-            (format != 2U && format != 4U)) {
+            payload_size > 16U * 1024U * 1024U || format > 4U) {
             std::fclose(file);
             return false;
         }
 
-        if (format == 2U) {
-            frames = static_cast<uint32_t>(payload_size / 2U);
+        // PDA PCM encodings 0..3 are unsigned 8-bit/signed 16-bit, mono/stereo.
+        // Pogopo's audio path is mono, so stereo assets are downmixed while
+        // streaming from SD instead of allocating a second full-size buffer.
+        if (format <= 3U) {
+            const bool sixteen_bit = format >= 2U;
+            const bool stereo = (format & 1U) != 0U;
+            const size_t bytes_per_sample = sixteen_bit ? 2U : 1U;
+            const size_t bytes_per_frame = bytes_per_sample * (stereo ? 2U : 1U);
+            if (payload_size == 0U || payload_size % bytes_per_frame != 0U) {
+                std::fclose(file);
+                return false;
+            }
+            const size_t decoded_frames = payload_size / bytes_per_frame;
+            if (decoded_frames > 2U * 1024U * 1024U) {
+                std::fclose(file);
+                return false;
+            }
+            frames = static_cast<uint32_t>(decoded_frames);
             samples = static_cast<int16_t*>(heap_caps_malloc(
                 static_cast<size_t>(frames) * sizeof(int16_t),
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             if (!samples) samples = static_cast<int16_t*>(heap_caps_malloc(
                 static_cast<size_t>(frames) * sizeof(int16_t), MALLOC_CAP_8BIT));
-            const bool ok = samples && std::fread(samples, sizeof(int16_t), frames, file) == frames;
+            uint8_t* chunk = static_cast<uint8_t*>(heap_caps_malloc(
+                4096U, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            if (!chunk) chunk = static_cast<uint8_t*>(heap_caps_malloc(4096U, MALLOC_CAP_8BIT));
+            bool ok = samples && chunk;
+            uint32_t output = 0U;
+            while (ok && output < frames) {
+                const size_t remaining = static_cast<size_t>(frames - output);
+                const size_t chunk_frames = std::min<size_t>(remaining, 4096U / bytes_per_frame);
+                const size_t chunk_bytes = chunk_frames * bytes_per_frame;
+                if (std::fread(chunk, 1, chunk_bytes, file) != chunk_bytes) {
+                    ok = false;
+                    break;
+                }
+                for (size_t index = 0; index < chunk_frames; ++index) {
+                    const uint8_t* source = chunk + index * bytes_per_frame;
+                    int32_t left = sixteen_bit
+                        ? static_cast<int16_t>(readLe16(source))
+                        : (static_cast<int32_t>(source[0]) - 128) * 256;
+                    int32_t mixed = left;
+                    if (stereo) {
+                        const uint8_t* right_source = source + bytes_per_sample;
+                        const int32_t right = sixteen_bit
+                            ? static_cast<int16_t>(readLe16(right_source))
+                            : (static_cast<int32_t>(right_source[0]) - 128) * 256;
+                        mixed = (left + right) / 2;
+                    }
+                    samples[output++] = static_cast<int16_t>(mixed);
+                }
+            }
+            if (chunk) heap_caps_free(chunk);
             std::fclose(file);
             if (!ok) {
                 if (samples) heap_caps_free(samples);
@@ -2075,6 +2470,24 @@ struct Runtime::Impl {
         return 1;
     }
 
+    static int cFilePlayerNew(lua_State* state) {
+        const char* path = lua_type(state, 1) == LUA_TSTRING ? lua_tostring(state, 1) : "";
+        auto* original = static_cast<Sound*>(luaL_testudata(state, 1, kSoundMetatable));
+        auto* sound = static_cast<Sound*>(lua_newuserdatauv(state, sizeof(Sound), 0));
+        new (sound) Sound{};
+        if (original) *sound = *original;
+        else {
+            sound->effect = effectForPath(path);
+            std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
+        }
+        // Long music tracks must not briefly enter the 2 MiB SFX cache.
+        sound->music = true;
+        sound->cache_index = -1;
+        luaL_getmetatable(state, kSoundMetatable);
+        lua_setmetatable(state, -2);
+        return 1;
+    }
+
     static int cSoundPlay(lua_State* state) {
         Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
@@ -2087,6 +2500,12 @@ struct Runtime::Impl {
                                            sample_rate) ||
                  runtime->loadPda(sound->path, samples, frames, sample_rate));
             if (loaded) {
+                const float requested_rate = !lua_isnoneornil(state, 3)
+                    ? static_cast<float>(luaL_checknumber(state, 3))
+                    : sound->rate;
+                sample_rate = static_cast<uint32_t>(std::clamp<float>(
+                    sample_rate * std::max(0.01f, requested_rate),
+                    4000.0f, 96000.0f));
                 const uint8_t volume = static_cast<uint8_t>(std::clamp<int>(
                     static_cast<int>(std::lround(sound->volume * 100.0f)), 0, 100));
                 if (!lua_isnoneornil(state, 2)) {
@@ -2129,6 +2548,17 @@ struct Runtime::Impl {
             sound->volume = static_cast<float>(std::clamp<lua_Number>(
                 luaL_checknumber(state, 2), static_cast<lua_Number>(0),
                 static_cast<lua_Number>(1)));
+        }
+        return 0;
+    }
+
+    static int cSoundSetRate(lua_State* state) {
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound) {
+            sound->rate = static_cast<float>(std::clamp<lua_Number>(
+                luaL_checknumber(state, 2), static_cast<lua_Number>(0.01),
+                static_cast<lua_Number>(8.0)));
         }
         return 0;
     }
@@ -2244,6 +2674,13 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         if (!runtime->updateTimers()) return luaL_error(state, "%s", runtime->last_error);
         return 0;
+    }
+
+    static int cDisplaySize(lua_State* state) {
+        const Impl* runtime = self(state);
+        lua_pushinteger(state, 400 / runtime->display_scale);
+        lua_pushinteger(state, 240 / runtime->display_scale);
+        return 2;
     }
 
     static void sanitizeIdentifier(const char* value, char* output,
@@ -2857,7 +3294,9 @@ struct Runtime::Impl {
 
     void createMetatables() {
         if(luaL_newmetatable(lua,kFontMetatable)){
-            lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");setFunction(-1,"getHeight",cFontGetHeight);
+            lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
+            setFunction(-1,"getHeight",cFontGetHeight);
+            setFunction(-1,"getTextWidth",cFontGetTextWidth);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kImageMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
@@ -2880,6 +3319,7 @@ struct Runtime::Impl {
             setFunction(-1,"play",cSoundPlay);setFunction(-1,"stop",cSoundStop);
             setFunction(-1,"pause",cSoundPause);setFunction(-1,"isPlaying",cSoundIsPlaying);
             setFunction(-1,"setVolume",cSoundSetVolume);setFunction(-1,"setSample",cSoundSetSample);
+            setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"setLoopRange",cNoop);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kFileMetatable)){
@@ -2916,6 +3356,8 @@ struct Runtime::Impl {
         setInteger(playdate,"kButtonA",0x20);setInteger(playdate,"kButtonB",0x10);
         setBoolean(playdate,"isSimulator",false);
         setFunction(playdate,"getCurrentTimeMilliseconds",cGetCurrentTime);
+        setFunction(playdate,"getElapsedTime",cGetElapsedTime);
+        setFunction(playdate,"resetElapsedTime",cResetElapsedTime);
         setFunction(playdate,"getFPS",cGetRefreshRate);
         setFunction(playdate,"buttonJustPressed",cButtonJustPressed);setFunction(playdate,"buttonIsPressed",cButtonIsPressed);
         setFunction(playdate,"buttonJustReleased",cButtonJustReleased);setFunction(playdate,"getButtonState",cGetButtonState);
@@ -2942,6 +3384,7 @@ struct Runtime::Impl {
         lua_setfield(lua,playdate,"metadata");
 
         lua_newtable(lua);setFunction(-1,"getWidth",cDisplayWidth);setFunction(-1,"getHeight",cDisplayHeight);
+        setFunction(-1,"getSize",cDisplaySize);
         setFunction(-1,"setRefreshRate",cSetRefreshRate);setFunction(-1,"getRefreshRate",cGetRefreshRate);
         setFunction(-1,"flush",cNoop);setFunction(-1,"setScale",cSetScale);
         setFunction(-1,"setOffset",cSetOffset);setFunction(-1,"setInverted",cSetInverted);
@@ -2955,6 +3398,7 @@ struct Runtime::Impl {
         setInteger(graphics,"kImageFlippedX",FlippedX);setInteger(graphics,"kImageFlippedY",FlippedY);
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
+        setFunction(graphics,"getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"clear",cGraphicsClear);setFunction(graphics,"setColor",cSetColor);
         setFunction(graphics,"setPattern",cSetPattern);
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
@@ -2963,6 +3407,7 @@ struct Runtime::Impl {
         setFunction(graphics,"fillCircleAtPoint",cFillCircle);setFunction(graphics,"drawCircleAtPoint",cDrawCircle);
         setFunction(graphics,"fillCircleInRect",cFillCircleInRect);setFunction(graphics,"drawCircleInRect",cDrawCircleInRect);
         setFunction(graphics,"drawText",cDrawText);setFunction(graphics,"drawTextInRect",cDrawTextInRect);
+        setFunction(graphics,"drawTextAligned",cDrawTextAligned);
         setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"pushContext",cPushContext);
         setFunction(graphics,"popContext",cPopContext);setFunction(graphics,"setClipRect",cSetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
@@ -2977,7 +3422,7 @@ struct Runtime::Impl {
         lua_newtable(lua);
         lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,-2,"sample");
         lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,-2,"sampleplayer");
-        lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,-2,"fileplayer");
+        lua_newtable(lua);setFunction(-1,"new",cFilePlayerNew);lua_setfield(lua,-2,"fileplayer");
         lua_setfield(lua,playdate,"sound");
         lua_newtable(lua);setFunction(-1,"new",cTimerNew);setFunction(-1,"performAfterDelay",cTimerAfter);
         setFunction(-1,"updateTimers",cUpdateTimers);lua_setfield(lua,playdate,"timer");
@@ -3053,9 +3498,11 @@ struct Runtime::Impl {
         // 50 update callbacks per second makes physics and animation 1.67x
         // faster.  Packages can request another rate with setRefreshRate().
         refresh_rate=30;runtime_stats.requested_fps=refresh_rate;
-        frame_accumulator_units=0;now_ms=0;held_buttons=pressed_buttons=previous_held_buttons=0;
+        frame_accumulator_units=0;now_ms=0;elapsed_reset_ms=0;
+        held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
         inverted_display=false;background_color=White;current_font=nullptr;
+        current_font_ref=LUA_NOREF;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
@@ -3086,7 +3533,8 @@ struct Runtime::Impl {
         clearSoundCache();
         pdz.close();package_mode=false;package_info={};
         releaseImage(screen);
-        target=nullptr;stencil=nullptr;current_font=nullptr;canvas=nullptr;audio=nullptr;storage=nullptr;
+        target=nullptr;stencil=nullptr;current_font=nullptr;
+        current_font_ref=LUA_NOREF;canvas=nullptr;audio=nullptr;storage=nullptr;
     }
 
     uint32_t update(uint32_t dt_ms) {
