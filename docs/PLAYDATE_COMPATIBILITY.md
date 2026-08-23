@@ -51,13 +51,17 @@ frames; a third drops the ball into a hole and runs through `LevelComplete`
 for 780 frames. All complete with zero Lua errors. Hardware maps the
 Pogopo-mounted BMI270 to Playdate's +X-right/+Y-down/+Z-through-display
 coordinates with a low-latency IIR filter and held-last-good-sample behavior.
-Maze's saved neutral calibration must be recreated after flashing STEP11.6.6.
+The board's reversed horizontal input lines and BMI270 X orientation are
+corrected at the PDX boundary. Maze's saved neutral calibration must be
+recreated after flashing STEP11.6.7. Its 400x240 completion frames use a
+reusable large-image pool, and the scripted result-screen button returns to
+the menu without an error.
 
 ### Duel Of Shadows
 
 Validated against the attached free Lua PDX without modifying its package files
 or assets. It exercises JSON and LDtk loading, source-name to compiled-resource
-mapping, a real PFT font, tilemap sprites, timer overloads and callbacks,
+mapping, a real PFT font, native clipped tilemap sprites, timer overloads and callbacks,
 easing, overlap queries, subclass sprite defaults, draw-offset screen shake,
 large sample handling and stereo IMA ADPCM music. A scripted run leaves the
 title, uses the A-button dash to cross the tutorial portal, renders and plays
@@ -79,12 +83,14 @@ above.
 ## Currently implemented API areas
 
 - display size, scale, offset, inversion and per-package refresh rate;
-- buttons, just-pressed/released state and input-handler stack;
+- buttons, just-pressed/released state and input-handler stack, with the
+  Pogopo PCB's horizontal lines translated to Playdate left/right;
 - images with fractional drawing and generated scaling, image tables with
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
   locking, primitives, text,
-  system/current-font lookup and rotated/faded drawing;
+  system/current-font lookup, circled A/B system glyph fallbacks and
+  rotated/faded drawing;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, subclass defaults, visibility, image/center/scale/rotation/
@@ -115,7 +121,7 @@ above.
 - Crank input, networking, microphone and SDK extensions are not emulated by
   this step. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after the Z-axis correction.
+  the device after the STEP11.6.7 horizontal-axis correction.
 - Audio playback supports the package formats and basic controls used by the
   test set, not every Playdate synth/effect/sequence API. File-player seeking,
   true streamed decoding and loop subranges are not implemented yet; long PDA

@@ -369,15 +369,18 @@ function Sprite:update()
 				item.image:drawRotated(item.x, item.y, item.rotation,
 					item.xScale, item.yScale)
 			else
-				local x = math.floor(item.x - item.width * item.centerX)
-				local y = math.floor(item.y - item.height * item.centerY)
 				if item.xScale ~= 1 or item.yScale ~= 1 then
-					-- PogoDate's native scaled path is integer-only; animation
-					-- libraries normally use 1x, while rotated sprites retain
-					-- independent fractional scales through drawRotated above.
-					item.image:drawRotated(item.x, item.y, 0,
-						item.xScale, item.yScale)
+					-- A zero-degree scale does not need the general inverse
+					-- rotation rasterizer. Keep the same centre semantics while
+					-- using the much cheaper native nearest-neighbour path.
+					local x = math.floor(item.x -
+						item.width * item.xScale * item.centerX)
+					local y = math.floor(item.y -
+						item.height * item.yScale * item.centerY)
+					item.image:drawScaled(x, y, item.xScale, item.yScale)
 				else
+					local x = math.floor(item.x - item.width * item.centerX)
+					local y = math.floor(item.y - item.height * item.centerY)
 					item.image:draw(x, y, item.flip)
 				end
 			end
@@ -670,6 +673,10 @@ function Tilemap:getPixelSize()
 end
 function Tilemap:draw(x, y)
 	if not self.imagetable then return end
+	if gfx._drawTilemap then
+		gfx._drawTilemap(self.imagetable, self.tiles, self.width, x or 0, y or 0)
+		return
+	end
 	local first = self.imagetable:getImage(1)
 	local tileWidth, tileHeight = 8, 8
 	if first then tileWidth, tileHeight = first:getSize() end

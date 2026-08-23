@@ -24,6 +24,15 @@ input::ButtonMask playdateButtons(input::ButtonMask raw) {
         input::mask(input::Button::A) |
         input::mask(input::Button::B);
     input::ButtonMask translated = raw & supported;
+    // The PCB's left/right switch lines are labelled opposite to the
+    // Playdate coordinate system.  Keep that board-specific correction at
+    // the PogoDate boundary so PogopoOS' own menus retain their established
+    // mapping while PDX games receive the documented logical direction.
+    constexpr input::ButtonMask left = input::mask(input::Button::Left);
+    constexpr input::ButtonMask right = input::mask(input::Button::Right);
+    translated = static_cast<input::ButtonMask>(translated & ~(left | right));
+    if (raw & left) translated = static_cast<input::ButtonMask>(translated | right);
+    if (raw & right) translated = static_cast<input::ButtonMask>(translated | left);
     // Pogopo has an extra START key while Playdate games only know A/B.
     // Treat START as an A alias so title screens that say "Press A" also
     // behave naturally on Pogopo, without inventing a seventh Playdate bit.
@@ -166,7 +175,10 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         // Playdate specifies +1 g for that pose. A short
         // one-sample IIR removes 50 Hz sensor chatter without the sluggish
         // 170 ms visual filtering used by Motion Lab.
-        const float mapped_x = std::clamp(motion.ax, -2.0f, 2.0f);
+        // The same board orientation makes BMI270 +X point to Playdate -X.
+        // Negate it here so tilting the right side down produces +X, as the
+        // Playdate accelerometer API specifies.
+        const float mapped_x = std::clamp(-motion.ax, -2.0f, 2.0f);
         const float mapped_y = std::clamp(-motion.ay, -2.0f, 2.0f);
         const float mapped_z = std::clamp(-motion.az, -2.0f, 2.0f);
         constexpr float alpha = 0.60f;

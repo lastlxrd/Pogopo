@@ -93,6 +93,7 @@ struct Image {
     int frame = 0;
     bool inverted = false;
     Image* mask = nullptr;
+    int8_t pooled_slot = -1;
 };
 
 struct ImageTable {
@@ -555,6 +556,19 @@ struct Runtime::Impl {
     std::array<Context, 8> context_stack{};
     size_t context_depth = 0;
 
+    // Full-screen scratch images are common in Playdate transitions.  Putting
+    // their 96 KiB pixel planes inside Lua userdata makes every animation
+    // frame grow the Lua heap and eventually forces a long full collection.
+    // Reuse a small PSRAM-backed plane pool while keeping only the lightweight
+    // Image userdata under Lua's ownership.
+    struct LargeImageSlot {
+        uint8_t* pixels = nullptr;
+        size_t capacity = 0;
+        bool in_use = false;
+    };
+    static constexpr size_t kLargeImageThreshold = 64U * 1024U;
+    std::array<LargeImageSlot, 6> large_image_pool{};
+
     size_t allocated_bytes = 0;
     size_t peak_allocated_bytes = 0;
     Stats runtime_stats{};
@@ -885,6 +899,13 @@ struct Runtime::Impl {
         image = {};
     }
 
+    void clearLargeImagePool() {
+        for (LargeImageSlot& slot : large_image_pool) {
+            if (slot.pixels) heap_caps_free(slot.pixels);
+            slot = {};
+        }
+    }
+
     Image* pushImage() {
         auto* image = static_cast<Image*>(lua_newuserdatauv(lua, sizeof(Image), 1));
         new (image) Image{};
@@ -900,6 +921,52 @@ struct Runtime::Impl {
             return nullptr;
         }
         const size_t bytes = static_cast<size_t>(width) * height;
+        if (bytes >= kLargeImageThreshold) {
+            // Advance the collector so the previous frame's image userdata
+            // promptly returns its plane to the pool.  This bounded step is
+            // much cheaper than allowing several megabytes of dead 400x240
+            // images to accumulate and trigger a stop-the-world collection.
+            lua_gc(lua, LUA_GCSTEP, 96);
+            auto find_free_slot = [this]() -> int {
+                for (size_t index = 0; index < large_image_pool.size(); ++index) {
+                    if (!large_image_pool[index].in_use) {
+                        return static_cast<int>(index);
+                    }
+                }
+                return -1;
+            };
+            int slot_index = find_free_slot();
+            if (slot_index < 0) {
+                lua_gc(lua, LUA_GCCOLLECT);
+                slot_index = find_free_slot();
+            }
+            if (slot_index >= 0) {
+                LargeImageSlot& slot = large_image_pool[slot_index];
+                if (slot.capacity < bytes) {
+                    void* replacement = heap_caps_realloc(
+                        slot.pixels, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (!replacement) {
+                        replacement = heap_caps_realloc(
+                            slot.pixels, bytes, MALLOC_CAP_8BIT);
+                    }
+                    if (replacement) {
+                        slot.pixels = static_cast<uint8_t*>(replacement);
+                        slot.capacity = bytes;
+                    }
+                }
+                if (slot.pixels && slot.capacity >= bytes) {
+                    Image* image = pushImage();
+                    image->width = width;
+                    image->height = height;
+                    image->stride = width;
+                    image->pixels = slot.pixels;
+                    image->pooled_slot = static_cast<int8_t>(slot_index);
+                    slot.in_use = true;
+                    std::memset(image->pixels, color, bytes);
+                    return image;
+                }
+            }
+        }
         auto* image = static_cast<Image*>(lua_newuserdatauv(
             lua, sizeof(Image) + bytes, 1));
         new (image) Image{};
@@ -915,8 +982,17 @@ struct Runtime::Impl {
     }
 
     static int cImageGc(lua_State* state) {
+        Impl* runtime = self(state);
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
-        if (image) releaseImage(*image);
+        if (image && image->pooled_slot >= 0 && runtime) {
+            const size_t slot_index = static_cast<size_t>(image->pooled_slot);
+            if (slot_index < runtime->large_image_pool.size()) {
+                runtime->large_image_pool[slot_index].in_use = false;
+            }
+            *image = {};
+        } else if (image) {
+            releaseImage(*image);
+        }
         return 0;
     }
 
@@ -1956,25 +2032,23 @@ struct Runtime::Impl {
         return 1;
     }
 
-    static int cImageTableGetImage(lua_State* state) {
-        Impl* runtime = self(state);
-        auto* table = static_cast<ImageTable*>(luaL_checkudata(state, 1, kImageTableMetatable));
-        const int index = static_cast<int>(luaL_checkinteger(state, 2));
+    bool pushImageTableFrame(lua_State* state, int table_index,
+                             ImageTable* table, int index) {
+        table_index = lua_absindex(state, table_index);
         const int count = table ? (table->asset ? table->asset->frame_count : table->frame_count) : 0;
         if (!table || index < 1 || index > count) {
-            lua_pushnil(state);
-            return 1;
+            return false;
         }
-        lua_getiuservalue(state, 1, 1);
+        lua_getiuservalue(state, table_index, 1);
         lua_rawgeti(state, -1, index);
         if (luaL_testudata(state, -1, kImageMetatable)) {
             lua_remove(state, -2);
-            return 1;
+            return true;
         }
         lua_pop(state, 1);
         Image* image = nullptr;
         if (table->asset) {
-            image = runtime->pushImage();
+            image = pushImage();
             image->width = table->asset->frame_width;
             image->height = table->asset->frame_height;
             image->asset = table->asset;
@@ -1987,24 +2061,104 @@ struct Runtime::Impl {
             const uint32_t end = readLe32(table->data + 4U + static_cast<size_t>(index - 1) * 4U);
             if (table_bytes + end > table->data_size || previous >= end) {
                 lua_pop(state, 1);
-                lua_pushnil(state);
-                return 1;
+                return false;
             }
-            image = runtime->pushDynamicImage(table->frame_width,
-                                              table->frame_height, Clear);
-            if (!image || !runtime->decodeSerializedImage(
+            image = pushDynamicImage(table->frame_width,
+                                     table->frame_height, Clear);
+            if (!image || !decodeSerializedImage(
                     *image, table->data + table_bytes + previous, end - previous,
                     table->frame_width, table->frame_height)) {
                 if (image) lua_pop(state, 1);
                 lua_pop(state, 1);
-                lua_pushnil(state);
-                return 1;
+                return false;
             }
         }
         lua_pushvalue(state, -1);
         lua_rawseti(state, -3, index);
         lua_remove(state, -2);
+        return true;
+    }
+
+    static int cImageTableGetImage(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* table = static_cast<ImageTable*>(luaL_checkudata(
+            state, 1, kImageTableMetatable));
+        const int index = static_cast<int>(luaL_checkinteger(state, 2));
+        if (!runtime || !runtime->pushImageTableFrame(state, 1, table, index)) {
+            lua_pushnil(state);
+        }
         return 1;
+    }
+
+    static int floorDivide(int value, int divisor) {
+        int quotient = value / divisor;
+        const int remainder = value % divisor;
+        if (remainder < 0) --quotient;
+        return quotient;
+    }
+
+    static int cDrawTilemap(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* table = static_cast<ImageTable*>(luaL_checkudata(
+            state, 1, kImageTableMetatable));
+        luaL_checktype(state, 2, LUA_TTABLE);
+        const int columns = std::max(1, static_cast<int>(
+            luaL_checkinteger(state, 3)));
+        const int origin_x = static_cast<int>(std::floor(
+            luaL_optnumber(state, 4, 0.0)));
+        const int origin_y = static_cast<int>(std::floor(
+            luaL_optnumber(state, 5, 0.0)));
+        if (!runtime || !table || !runtime->target) return 0;
+
+        const int tile_width = table->asset
+            ? table->asset->frame_width : table->frame_width;
+        const int tile_height = table->asset
+            ? table->asset->frame_height : table->frame_height;
+        const int tile_count = static_cast<int>(lua_rawlen(state, 2));
+        const int rows = (tile_count + columns - 1) / columns;
+        if (tile_width <= 0 || tile_height <= 0 || rows <= 0) return 0;
+
+        const int clip_left = std::max(0, runtime->clip.x);
+        const int clip_top = std::max(0, runtime->clip.y);
+        const int clip_right = std::min(runtime->target->width,
+            runtime->clip.x + runtime->clip.w);
+        const int clip_bottom = std::min(runtime->target->height,
+            runtime->clip.y + runtime->clip.h);
+        if (clip_left >= clip_right || clip_top >= clip_bottom) return 0;
+
+        const int first_column = std::max(0,
+            floorDivide(clip_left - origin_x, tile_width));
+        const int last_column = std::min(columns - 1,
+            floorDivide(clip_right - 1 - origin_x, tile_width));
+        const int first_row = std::max(0,
+            floorDivide(clip_top - origin_y, tile_height));
+        const int last_row = std::min(rows - 1,
+            floorDivide(clip_bottom - 1 - origin_y, tile_height));
+        if (first_column > last_column || first_row > last_row) return 0;
+
+        for (int row = first_row; row <= last_row; ++row) {
+            for (int column = first_column; column <= last_column; ++column) {
+                const int cell = row * columns + column + 1;
+                if (cell > tile_count) break;
+                lua_rawgeti(state, 2, cell);
+                const int frame = lua_isnumber(state, -1)
+                    ? static_cast<int>(lua_tointeger(state, -1)) : 0;
+                lua_pop(state, 1);
+                if (frame <= 0 || !runtime->pushImageTableFrame(
+                        state, 1, table, frame)) {
+                    continue;
+                }
+                auto* image = static_cast<Image*>(luaL_testudata(
+                    state, -1, kImageMetatable));
+                if (image) {
+                    runtime->drawImage(*image,
+                        origin_x + column * tile_width,
+                        origin_y + row * tile_height, Unflipped);
+                }
+                lua_pop(state, 1);
+            }
+        }
+        return 0;
     }
 
     static int cImageTableDrawImage(lua_State* state) {
@@ -2660,6 +2814,60 @@ struct Runtime::Impl {
         }
     }
 
+    static bool playdateButtonSymbol(uint32_t codepoint, char& label) {
+        if (codepoint == 0x24b6U) {
+            label = 'A';
+            return true;
+        }
+        if (codepoint == 0x24b7U) {
+            label = 'B';
+            return true;
+        }
+        return false;
+    }
+
+    static int buttonSymbolAdvance(int scale = 1) {
+        return 8 * std::max(1, scale);
+    }
+
+    void drawButtonSymbol(uint32_t codepoint, int x, int y, int scale = 1) {
+        char label = 0;
+        if (!playdateButtonSymbol(codepoint, label)) return;
+        scale = std::max(1, scale);
+        static constexpr uint8_t ring_rows[7] = {
+            0x1cU, 0x22U, 0x41U, 0x41U, 0x41U, 0x22U, 0x1cU,
+        };
+        static constexpr uint8_t letter_a[5] = {
+            0x2U, 0x5U, 0x7U, 0x5U, 0x5U,
+        };
+        static constexpr uint8_t letter_b[5] = {
+            0x6U, 0x5U, 0x6U, 0x5U, 0x6U,
+        };
+        for (int row = 0; row < 7; ++row) {
+            for (int column = 0; column < 7; ++column) {
+                if ((ring_rows[row] & (1U << column)) == 0U) continue;
+                for (int sy = 0; sy < scale; ++sy) {
+                    for (int sx = 0; sx < scale; ++sx) {
+                        putLogicalPixel(x + column * scale + sx,
+                            y + row * scale + sy, Black);
+                    }
+                }
+            }
+        }
+        const uint8_t* rows = label == 'A' ? letter_a : letter_b;
+        for (int row = 0; row < 5; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                if ((rows[row] & (1U << (2 - column))) == 0U) continue;
+                for (int sy = 0; sy < scale; ++sy) {
+                    for (int sx = 0; sx < scale; ++sx) {
+                        putLogicalPixel(x + (column + 2) * scale + sx,
+                            y + (row + 1) * scale + sy, Black);
+                    }
+                }
+            }
+        }
+    }
+
     int textWidthForFont(const PdFont* font, const char* text,
                          size_t length) const {
         if (!text) return 0;
@@ -2678,16 +2886,30 @@ struct Runtime::Impl {
                 ? nextUtf8(text, length, lookahead) : 0U;
             if (font && font->compiled) {
                 CompiledGlyph glyph{};
-                if (!compiledGlyph(*font, codepoint, next_codepoint, glyph) &&
-                    codepoint != '?') {
-                    compiledGlyph(*font, '?', next_codepoint, glyph);
+                if (compiledGlyph(*font, codepoint, next_codepoint, glyph)) {
+                    line_width += glyph.advance > 0 ? glyph.advance
+                        : std::max<int>(1, font->glyph_width);
+                } else {
+                    char button_label = 0;
+                    if (playdateButtonSymbol(codepoint, button_label)) {
+                        line_width += buttonSymbolAdvance();
+                    } else {
+                        if (codepoint != '?') {
+                            compiledGlyph(*font, '?', next_codepoint, glyph);
+                        }
+                        line_width += glyph.advance > 0 ? glyph.advance
+                            : std::max<int>(1, font->glyph_width);
+                    }
                 }
-                line_width += glyph.advance > 0 ? glyph.advance
-                    : std::max<int>(1, font->glyph_width);
             } else if (font && font->pico) {
-                line_width += 4;
+                char button_label = 0;
+                line_width += playdateButtonSymbol(codepoint, button_label)
+                    ? buttonSymbolAdvance() : 4;
             } else {
-                line_width += 6 * (font ? font->scale : 1);
+                char button_label = 0;
+                const int scale = font ? font->scale : 1;
+                line_width += playdateButtonSymbol(codepoint, button_label)
+                    ? buttonSymbolAdvance(scale) : 6 * scale;
             }
         }
         return std::max(maximum_width, line_width);
@@ -2747,13 +2969,31 @@ struct Runtime::Impl {
                 ? nextUtf8(text, length, lookahead) : 0U;
             if (current_font && current_font->compiled) {
                 CompiledGlyph glyph{};
-                if (!compiledGlyph(*current_font, codepoint, next_codepoint,
-                                   glyph) && codepoint != '?') {
+                if (compiledGlyph(*current_font, codepoint, next_codepoint,
+                                  glyph)) {
+                    drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
+                    cursor_x += glyph.advance > 0 ? glyph.advance
+                        : std::max<int>(1, current_font->glyph_width);
+                    continue;
+                }
+                char button_label = 0;
+                if (playdateButtonSymbol(codepoint, button_label)) {
+                    drawButtonSymbol(codepoint, cursor_x, cursor_y);
+                    cursor_x += buttonSymbolAdvance();
+                    continue;
+                }
+                if (codepoint != '?') {
                     compiledGlyph(*current_font, '?', next_codepoint, glyph);
                 }
                 drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
                 cursor_x += glyph.advance > 0 ? glyph.advance
                     : std::max<int>(1, current_font->glyph_width);
+                continue;
+            }
+            char button_label = 0;
+            if (playdateButtonSymbol(codepoint, button_label)) {
+                drawButtonSymbol(codepoint, cursor_x, cursor_y, pico ? 1 : scale);
+                cursor_x += buttonSymbolAdvance(pico ? 1 : scale);
                 continue;
             }
             const unsigned char character = codepoint <= 0xffU
@@ -4838,7 +5078,7 @@ struct Runtime::Impl {
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kImageMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
-            lua_pushcfunction(lua,cImageGc);lua_setfield(lua,-2,"__gc");
+            pushFunction(cImageGc);lua_setfield(lua,-2,"__gc");
             setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawCentered",cImageDrawCentered);
             setFunction(-1,"drawIgnoringOffset",cImageDrawIgnoringOffset);
             setFunction(-1,"drawScaled",cImageDrawScaled);
@@ -4967,6 +5207,7 @@ struct Runtime::Impl {
         setInteger(graphics,"kImageFlippedX",FlippedX);setInteger(graphics,"kImageFlippedY",FlippedY);
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
+        setFunction(graphics,"_drawTilemap",cDrawTilemap);
         setFunction(graphics,"getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"getDisplayImage",cGetDisplayImage);
         setFunction(graphics,"getWorkingImage",cGetDisplayImage);
@@ -5122,10 +5363,10 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.6: scaled images + full draw modes + overlap masks");
+                 "PogoDate API STEP11.6.7: input axes + pooled frames + native tilemaps");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
-            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
+            lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
         // Our native animation/animator replacements intentionally skip the
         // bundled CoreLibs modules, but the stock animation module normally
@@ -5135,10 +5376,10 @@ struct Runtime::Impl {
         // Sequence.new undefined even though their module itself loaded.
         if(package_mode && pdz.findLua("CoreLibs/easing") &&
            !importModule("CoreLibs/easing")){
-            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
+            lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
         if(!importModule("main")){
-            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
+            lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
         // Incremental collection trades rare long stop-the-world nursery/major
         // sweeps for small, regular slices.  A low pause keeps the Lua heap
@@ -5160,6 +5401,7 @@ struct Runtime::Impl {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
         if(audio)audio->stopMusicPcm();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
+        clearLargeImagePool();
         clearSoundCache();
         pdz.close();external_pdz.close();package_mode=false;package_info={};
         loaded_external_count=0;external_import_depth=0;
