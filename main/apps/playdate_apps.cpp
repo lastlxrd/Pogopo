@@ -132,6 +132,8 @@ void PogoDateApp::onEvent(AppContext& context, const input::Event& event) {
 void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     if (start_error_ != ESP_OK || !runtime_.running()) return;
 
+    const imu::Sample motion = context.imu.sample();
+    runtime_.setAccelerometer(motion.ax, motion.ay, motion.az, motion.valid);
     runtime_.setInput(context.input.heldMask(), queued_pressed_);
     const uint32_t produced = runtime_.update(dt_ms);
     if (produced > 0) {

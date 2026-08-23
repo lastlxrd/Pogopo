@@ -70,6 +70,9 @@ public:
     void stop();
 
     void setInput(uint8_t held_mask, uint8_t pressed_mask);
+    // Supplies the latest normalized accelerometer sample in g. Games opt in
+    // through playdate.startAccelerometer()/readAccelerometer().
+    void setAccelerometer(float x, float y, float z, bool valid = true);
     // Advances the native Lua VM. Returns the number of Playdate frames run.
     uint32_t update(uint32_t dt_ms);
 

@@ -5,6 +5,19 @@
 Object = Object or {}
 Object.__index = Object
 function Object:init() end
+
+local function objectIsA(value, candidate)
+	if type(candidate) == "string" then candidate = _G[candidate] end
+	if type(candidate) ~= "table" then return false end
+	local current = getmetatable(value)
+	while type(current) == "table" do
+		if current == candidate then return true end
+		current = rawget(current, "super")
+	end
+	return false
+end
+
+function Object:isa(candidate) return objectIsA(self, candidate) end
 setmetatable(Object, {
 	__call = function(cls, ...)
 		local value = setmetatable({}, cls)
@@ -37,11 +50,64 @@ function class(name)
 	}
 end
 
+-- CoreLibs/utilities table additions.  Newer Noble Engine releases use
+-- table.deepcopy() while constructing their settings defaults, before the
+-- first game frame is allowed to run.  Keep these helpers general instead of
+-- special-casing Noble or a package name.  The memo table makes deepcopy safe
+-- for cyclic tables and preserves shared references between nested values.
+function table.indexOfElement(source, element)
+	for index, value in ipairs(source) do
+		if value == element then return index end
+	end
+	return nil
+end
+
+function table.getsize(source)
+	local arrayCount = #source
+	local hashCount = 0
+	for key in pairs(source) do
+		if type(key) ~= "number" or key < 1 or key > arrayCount or key % 1 ~= 0 then
+			hashCount = hashCount + 1
+		end
+	end
+	return arrayCount, hashCount
+end
+
+function table.create(arrayCount, hashCount)
+	-- Lua does not expose its table preallocation hint to Lua code.  Returning
+	-- an ordinary empty table preserves the public behavior; the counts are
+	-- accepted so games can use the same call signature as on Playdate.
+	return {}
+end
+
+function table.shallowcopy(source, destination)
+	destination = destination or {}
+	for key, value in pairs(source) do destination[key] = value end
+	return destination
+end
+
+local function deepcopyValue(value, memo)
+	if type(value) ~= "table" then return value end
+	local existing = memo[value]
+	if existing then return existing end
+	local copy = {}
+	memo[value] = copy
+	for key, nested in pairs(value) do
+		copy[deepcopyValue(key, memo)] = deepcopyValue(nested, memo)
+	end
+	return setmetatable(copy, getmetatable(value))
+end
+
+function table.deepcopy(source)
+	return deepcopyValue(source, {})
+end
+
 local gfx = playdate.graphics
 local sprites = {}
 local collision_sprites = {}
 local wall_cells = {}
 local background_callback = nil
+local always_redraw = true
 local sprite_sequence = 0
 local sprites_dirty = false
 local collision_sprites_dirty = false
@@ -80,6 +146,8 @@ function Sprite:init(image)
 	self._sequence = 0
 end
 
+function Sprite:isa(candidate) return objectIsA(self, candidate) end
+
 function Sprite.new(image) return Sprite(image) end
 
 function Sprite:setImage(image, flip, xScale, yScale)
@@ -115,6 +183,11 @@ function Sprite:moveBy(x, y) self.x, self.y = self.x + x, self.y + y end
 function Sprite:getPosition() return self.x, self.y end
 function Sprite:setRotation(value) self.rotation = value or 0 end
 function Sprite:getRotation() return self.rotation end
+function Sprite:setScale(xScale, yScale)
+	self.xScale = xScale or 1
+	self.yScale = yScale or self.xScale
+end
+function Sprite:getScale() return self.xScale or 1, self.yScale or self.xScale or 1 end
 function Sprite:setClipRect(x, y, width, height)
 	if type(x) == "table" then
 		self.clipRect = {x=x.x or 0, y=x.y or 0,
@@ -163,6 +236,27 @@ end
 
 function Sprite:add()
 	if self.added then return self end
+	-- Native Playdate sprite storage is initialized before a Lua subclass'
+	-- init() runs.  A valid subclass therefore does not have to call
+	-- super.init() just to receive the default visibility/update flags.
+	-- Preserve that behavior for framework and game-defined sprite classes.
+	if self.visible == nil then self.visible = true end
+	if self._updatesEnabled == nil then self._updatesEnabled = true end
+	if self._collisionsEnabled == nil then self._collisionsEnabled = true end
+	if self.x == nil then self.x = 0 end
+	if self.y == nil then self.y = 0 end
+	if self.centerX == nil then self.centerX = 0.5 end
+	if self.centerY == nil then self.centerY = 0.5 end
+	if self.width == nil then self.width = 0 end
+	if self.height == nil then self.height = 0 end
+	if self.zIndex == nil then self.zIndex = 0 end
+	if self.imageDrawMode == nil then self.imageDrawMode = gfx.kDrawModeCopy end
+	if self.flip == nil then self.flip = gfx.kImageUnflipped end
+	if self.xScale == nil then self.xScale = 1 end
+	if self.yScale == nil then self.yScale = self.xScale end
+	if self.rotation == nil then self.rotation = 0 end
+	if self.groups == nil then self.groups = {} end
+	if self.collidesWithGroups == nil then self.collidesWithGroups = {} end
 	self.added = true
 	if not self._listed then
 		sprite_sequence = sprite_sequence + 1
@@ -273,6 +367,7 @@ function Sprite.removeAll()
 end
 
 function Sprite.setBackgroundDrawingCallback(callback) background_callback = callback end
+function Sprite.setAlwaysRedraw(value) always_redraw = value == true end
 function Sprite.redrawBackground()
 	if background_callback then background_callback(0, 0, 400, 240) end
 end
@@ -352,7 +447,55 @@ function Sprite:checkCollisions(goalX, goalY)
 end
 
 function Sprite:moveWithCollisions(goalX, goalY)
+	local previousX, previousY = self.x, self.y
 	local actualX, actualY, collisions, length = self:checkCollisions(goalX, goalY)
+	local moveX, moveY = goalX - previousX, goalY - previousY
+	for i=1,length do
+		local collision = collisions[i]
+		local sx, sy, sw, sh = collision.spriteRect.x, collision.spriteRect.y,
+			collision.spriteRect.width, collision.spriteRect.height
+		local ox, oy, ow, oh = collision.otherRect.x, collision.otherRect.y,
+			collision.otherRect.width, collision.otherRect.height
+		local previousLeft = sx - moveX
+		local previousTop = sy - moveY
+		local normalX, normalY = 0, 0
+		if moveX > 0 and previousLeft + sw <= ox then normalX = -1
+		elseif moveX < 0 and previousLeft >= ox + ow then normalX = 1 end
+		if moveY > 0 and previousTop + sh <= oy then normalY = -1
+		elseif moveY < 0 and previousTop >= oy + oh then normalY = 1 end
+		if normalX ~= 0 and normalY ~= 0 then
+			local penetrationX = normalX < 0 and (sx + sw - ox) or (ox + ow - sx)
+			local penetrationY = normalY < 0 and (sy + sh - oy) or (oy + oh - sy)
+			if penetrationX < penetrationY then normalY = 0 else normalX = 0 end
+		elseif normalX == 0 and normalY == 0 then
+			local left, right = sx + sw - ox, ox + ow - sx
+			local top, bottom = sy + sh - oy, oy + oh - sy
+			local minimum = math.min(left, right, top, bottom)
+			if minimum == left then normalX = -1
+			elseif minimum == right then normalX = 1
+			elseif minimum == top then normalY = -1
+			else normalY = 1 end
+		end
+		local response = self.collisionResponse and
+			self:collisionResponse(collision.other) or Sprite.kCollisionTypeSlide
+		collision.normal = {x=normalX, y=normalY, dx=normalX, dy=normalY}
+		collision.move = {x=moveX, y=moveY}
+		collision.touch = {x=actualX, y=actualY}
+		collision.type = response
+		collision.overlaps = false
+		collision.ti = 0
+		if response ~= Sprite.kCollisionTypeOverlap then
+			if response == Sprite.kCollisionTypeFreeze then
+				actualX, actualY = previousX, previousY
+			elseif normalX ~= 0 then
+				local desiredLeft = normalX < 0 and (ox - sw) or (ox + ow)
+				actualX = actualX + desiredLeft - sx
+			elseif normalY ~= 0 then
+				local desiredTop = normalY < 0 and (oy - sh) or (oy + oh)
+				actualY = actualY + desiredTop - sy
+			end
+		end
+	end
 	self:moveTo(actualX, actualY)
 	return actualX, actualY, collisions, length
 end
@@ -537,7 +680,52 @@ function Rect:intersects(other)
 	return overlaps(self.x,self.y,self.width,self.height,
 		other.x,other.y,other.width or other.w,other.height or other.h)
 end
-playdate.geometry = {rect=Rect}
+
+local Vector2D = {}
+Vector2D.__index = Vector2D
+function Vector2D.new(x, y)
+	return setmetatable({x=x or 0, y=y or 0, dx=x or 0, dy=y or 0}, Vector2D)
+end
+function Vector2D:copy() return Vector2D.new(self.x, self.y) end
+function Vector2D:unpack() return self.x, self.y end
+function Vector2D:magnitudeSquared() return self.x * self.x + self.y * self.y end
+function Vector2D:magnitude() return math.sqrt(self:magnitudeSquared()) end
+function Vector2D:normalize()
+	local length = self:magnitude()
+	if length > 0 then self.x, self.y = self.x / length, self.y / length end
+	self.dx, self.dy = self.x, self.y
+	return self
+end
+function Vector2D:normalized() return self:copy():normalize() end
+function Vector2D:scale(amount)
+	self.x, self.y = self.x * amount, self.y * amount
+	self.dx, self.dy = self.x, self.y
+	return self
+end
+function Vector2D:scaledBy(amount) return self:copy():scale(amount) end
+function Vector2D:addVector(other)
+	self.x, self.y = self.x + other.x, self.y + other.y
+	self.dx, self.dy = self.x, self.y
+	return self
+end
+function Vector2D:dotProduct(other) return self.x * other.x + self.y * other.y end
+function Vector2D:angleBetween(other)
+	local lengths = self:magnitude() * other:magnitude()
+	if lengths == 0 then return 0 end
+	local cosine = math.max(-1, math.min(1, self:dotProduct(other) / lengths))
+	return math.deg(math.acos(cosine))
+end
+Vector2D.__add = function(a, b) return Vector2D.new(a.x + b.x, a.y + b.y) end
+Vector2D.__sub = function(a, b) return Vector2D.new(a.x - b.x, a.y - b.y) end
+Vector2D.__unm = function(a) return Vector2D.new(-a.x, -a.y) end
+Vector2D.__mul = function(a, b)
+	if type(a) == "number" then return b:scaledBy(a) end
+	if type(b) == "number" then return a:scaledBy(b) end
+	return a:dotProduct(b)
+end
+Vector2D.__div = function(a, b) return a:scaledBy(1 / b) end
+
+playdate.geometry = {rect=Rect, vector2D=Vector2D}
 
 playdate.inputHandlers = {stack={}}
 function playdate.inputHandlers.push(handler, exclusive)
@@ -572,34 +760,91 @@ end
 local Gridview = {}
 Gridview.__index = Gridview
 function Gridview.new(cellWidth, cellHeight)
-	return setmetatable({cellWidth=cellWidth,cellHeight=cellHeight,rows=1,selected=1,needsdisplay=true}, Gridview)
+	return setmetatable({
+		cellWidth=cellWidth, cellHeight=cellHeight,
+		sections=1, rows=1, columns=1,
+		selectedSection=1, selectedRow=1, selectedColumn=1,
+		paddingLeft=0, paddingRight=0, paddingTop=0, paddingBottom=0,
+		needsdisplay=true,
+	}, Gridview)
 end
-function Gridview:setNumberOfSections() end
-function Gridview:setNumberOfColumns() end
-function Gridview:setNumberOfRows(value) self.rows = value end
-function Gridview:setCellPadding() end
+function Gridview:setNumberOfSections(value)
+	self.sections = math.max(1, value or 1)
+	self.selectedSection = math.min(self.selectedSection, self.sections)
+end
+function Gridview:setNumberOfColumns(value)
+	self.columns = math.max(1, value or 1)
+	self.selectedColumn = math.min(self.selectedColumn, self.columns)
+	self.needsdisplay = true
+end
+function Gridview:setNumberOfRows(value)
+	self.rows = math.max(1, value or 1)
+	self.selectedRow = math.min(self.selectedRow, self.rows)
+	self.needsdisplay = true
+end
+function Gridview:setCellPadding(left, right, top, bottom)
+	self.paddingLeft = left or 0
+	self.paddingRight = right or 0
+	self.paddingTop = top or 0
+	self.paddingBottom = bottom or 0
+end
 function Gridview:setContentInset() end
 function Gridview:setHorizontalDividerHeight() end
 function Gridview:addHorizontalDividerAbove() end
-function Gridview:getSelectedRow() return self.selected end
-function Gridview:setSelection(section, row) self.selected = math.max(1, math.min(self.rows,row)); self.needsdisplay=true end
+function Gridview:getSelection()
+	return self.selectedSection, self.selectedRow, self.selectedColumn
+end
+function Gridview:getSelectedRow() return self.selectedRow end
+function Gridview:getSelectedColumn() return self.selectedColumn end
+function Gridview:setSelection(section, row, column)
+	if column == nil then
+		column = row
+		row = section
+		section = 1
+	end
+	self.selectedSection = math.max(1, math.min(self.sections, section or 1))
+	self.selectedRow = math.max(1, math.min(self.rows, row or 1))
+	self.selectedColumn = math.max(1, math.min(self.columns, column or 1))
+	self.needsdisplay = true
+end
 function Gridview:scrollToCell() end
 function Gridview:selectPreviousRow(wrap)
-	self.selected = self.selected - 1
-	if self.selected < 1 then self.selected = wrap and self.rows or 1 end
+	self.selectedRow = self.selectedRow - 1
+	if self.selectedRow < 1 then self.selectedRow = wrap and self.rows or 1 end
 	self.needsdisplay = true
 end
 function Gridview:selectNextRow(wrap)
-	self.selected = self.selected + 1
-	if self.selected > self.rows then self.selected = wrap and 1 or self.rows end
+	self.selectedRow = self.selectedRow + 1
+	if self.selectedRow > self.rows then self.selectedRow = wrap and 1 or self.rows end
+	self.needsdisplay = true
+end
+function Gridview:selectPreviousColumn(wrap)
+	self.selectedColumn = self.selectedColumn - 1
+	if self.selectedColumn < 1 then
+		self.selectedColumn = wrap and self.columns or 1
+	end
+	self.needsdisplay = true
+end
+function Gridview:selectNextColumn(wrap)
+	self.selectedColumn = self.selectedColumn + 1
+	if self.selectedColumn > self.columns then
+		self.selectedColumn = wrap and 1 or self.columns
+	end
 	self.needsdisplay = true
 end
 function Gridview:drawInRect(x, y, width, height)
 	local rowHeight = self.cellHeight > 0 and self.cellHeight or 8
+	local columnWidth = self.cellWidth > 0 and self.cellWidth or math.floor(width / self.columns)
 	for row=1,self.rows do
-		local top = y + (row-1) * rowHeight
-		if top < y + height and self.drawCell then
-			self:drawCell(1, row, 1, row == self.selected, x, top, width, rowHeight)
+		for column=1,self.columns do
+			local left = x + (column-1) * (columnWidth + self.paddingLeft + self.paddingRight)
+			local top = y + (row-1) * (rowHeight + self.paddingTop + self.paddingBottom)
+			if left < x + width and top < y + height and self.drawCell then
+				local selected = row == self.selectedRow and
+					column == self.selectedColumn and self.selectedSection == 1
+				self:drawCell(1, row, column, selected,
+					left, top, columnWidth, rowHeight)
+			end
 		end
 	end
 	self.needsdisplay = false

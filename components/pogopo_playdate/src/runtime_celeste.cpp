@@ -14,6 +14,7 @@
 #include <new>
 #include <string>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 extern "C" {
 #include "lauxlib.h"
@@ -88,6 +89,7 @@ struct Image {
     const CelesteAsset* asset = nullptr;
     int frame = 0;
     bool inverted = false;
+    Image* mask = nullptr;
 };
 
 struct ImageTable {
@@ -500,6 +502,8 @@ struct Runtime::Impl {
     bool draw_pattern_transparent = false;
     std::array<uint8_t, 8> draw_pattern{{0xff, 0xff, 0xff, 0xff,
                                          0xff, 0xff, 0xff, 0xff}};
+    std::array<uint8_t, 64> draw_pattern_pixels{};
+    bool draw_pattern_uses_image = false;
     int pattern_offset_x = 0;
     int pattern_offset_y = 0;
     uint8_t background_color = White;
@@ -509,6 +513,8 @@ struct Runtime::Impl {
     int display_scale = 1;
     int display_offset_x = 0;
     int display_offset_y = 0;
+    int draw_offset_x = 0;
+    int draw_offset_y = 0;
     uint32_t refresh_rate = 50;
     uint32_t frame_accumulator_units = 0;
     uint32_t frame_dt_ms = 20;
@@ -517,6 +523,11 @@ struct Runtime::Impl {
     uint8_t held_buttons = 0;
     uint8_t pressed_buttons = 0;
     uint8_t previous_held_buttons = 0;
+    float accelerometer_x = 0.0f;
+    float accelerometer_y = 0.0f;
+    float accelerometer_z = 1.0f;
+    bool accelerometer_valid = false;
+    bool accelerometer_running = false;
     uint32_t next_timer_id = 1;
 
     static constexpr size_t kMaximumCachedSounds = 32;
@@ -656,11 +667,22 @@ struct Runtime::Impl {
     bool importModule(const char* requested) {
         if (!requested) return false;
         // Most CoreLibs are supplied by compat.lua because their stock
-        // versions expect lower-level SDK objects we do not expose.  Easing is
-        // pure Lua data/math, however, so execute the exact version bundled by
-        // the game instead of maintaining an incomplete clone.
-        if (std::strncmp(requested, "CoreLibs/", 9) == 0 &&
-            std::strcmp(requested, "CoreLibs/easing") != 0) return true;
+        // versions expect lower-level SDK objects we do not expose.  Pure-Lua
+        // helpers should instead execute the exact copy bundled in the PDX.
+        // Pretending these imports succeeded without executing them left
+        // gfx.nineSlice nil in Maze even though its main.pdz contains the
+        // official implementation.
+        if (std::strncmp(requested, "CoreLibs/", 9) == 0) {
+            const bool bundled_pure_lua =
+                std::strcmp(requested, "CoreLibs/easing") == 0 ||
+                std::strcmp(requested, "CoreLibs/animation") == 0 ||
+                std::strcmp(requested, "CoreLibs/animator") == 0 ||
+                std::strcmp(requested, "CoreLibs/nineslice") == 0 ||
+                std::strcmp(requested, "CoreLibs/qrcode") == 0 ||
+                std::strcmp(requested,
+                            "CoreLibs/3rdparty/qrencode_panic_mod") == 0;
+            if (!bundled_pure_lua) return true;
+        }
         if (package_mode) {
             PdzArchive* archive = &pdz;
             const PdzEntry* entry = archive->findLua(requested);
@@ -857,7 +879,7 @@ struct Runtime::Impl {
     }
 
     Image* pushImage() {
-        auto* image = static_cast<Image*>(lua_newuserdatauv(lua, sizeof(Image), 0));
+        auto* image = static_cast<Image*>(lua_newuserdatauv(lua, sizeof(Image), 1));
         new (image) Image{};
         luaL_getmetatable(lua, kImageMetatable);
         lua_setmetatable(lua, -2);
@@ -872,7 +894,7 @@ struct Runtime::Impl {
         }
         const size_t bytes = static_cast<size_t>(width) * height;
         auto* image = static_cast<Image*>(lua_newuserdatauv(
-            lua, sizeof(Image) + bytes, 0));
+            lua, sizeof(Image) + bytes, 1));
         new (image) Image{};
         image->width = width;
         image->height = height;
@@ -934,6 +956,10 @@ struct Runtime::Impl {
                 destination_y - pattern_offset_y) & 7U;
             const unsigned column = static_cast<unsigned>(
                 destination_x - pattern_offset_x) & 7U;
+            if (draw_pattern_uses_image) {
+                source = draw_pattern_pixels[row * 8U + column];
+                if (source == Clear) return Clear;
+            } else {
             const bool set =
                 (draw_pattern[row] & (0x80U >> column)) != 0U;
             if (draw_pattern_transparent) {
@@ -941,6 +967,7 @@ struct Runtime::Impl {
                 else source = Clear;
             } else {
                 source = set ? Black : White;
+            }
             }
         }
         if (source == Xor) {
@@ -982,6 +1009,7 @@ struct Runtime::Impl {
         // frame. Copy their byte pixels row-wise into the logical framebuffer
         // instead of routing every pixel through the generic scaled path.
         if (scale == 1 && fade >= 0.999f && image.pixels && !image.inverted &&
+            !image.mask &&
             !stencil && draw_mode != Nxor && target && target->pixels) {
             const int start_x = std::max(0, std::max(clip.x - x, -x));
             const int start_y = std::max(0, std::max(clip.y - y, -y));
@@ -1057,6 +1085,8 @@ struct Runtime::Impl {
                 if (bayer[((y + sy) & 3) * 4 + ((x + sx) & 3)] >= threshold) continue;
                 const int source_x = (flip & FlippedX) ? image.width - 1 - sx : sx;
                 const int source_y = (flip & FlippedY) ? image.height - 1 - sy : sy;
+                if (image.mask &&
+                    imagePixel(*image.mask, source_x, source_y) != White) continue;
                 const uint8_t value = imagePixel(image, source_x, source_y);
                 if (value == Clear) continue;
                 for (int dy = 0; dy < scale; ++dy) {
@@ -1116,6 +1146,8 @@ struct Runtime::Impl {
                 const float local_y =
                     (source_y + 0.5f - half_height) * scale_y;
                 for (int source_x = 0; source_x < image.width; ++source_x) {
+                    if (image.mask &&
+                        imagePixel(*image.mask, source_x, source_y) != White) continue;
                     const uint8_t value = imagePixel(image, source_x, source_y);
                     if (value == Clear) continue;
                     const float local_x =
@@ -1208,6 +1240,12 @@ struct Runtime::Impl {
                     source_x < image.width && source_y < image.height) {
                     const int sample_x = static_cast<int>(std::floor(source_x));
                     const int sample_y = static_cast<int>(std::floor(source_y));
+                    if (image.mask &&
+                        imagePixel(*image.mask, sample_x, sample_y) != White) {
+                        source_x += x_step_source_x;
+                        source_y += x_step_source_y;
+                        continue;
+                    }
                     const uint8_t value = imagePixel(image, sample_x, sample_y);
                     if (value != Clear) {
                         putLogicalPixel(destination_x, destination_y, value);
@@ -1259,12 +1297,14 @@ struct Runtime::Impl {
 
     void flushScreen() {
         if (!canvas || !screen.pixels) return;
-        if (display_offset_x != 0 || display_offset_y != 0) {
+        const int output_x = display_offset_x + draw_offset_x;
+        const int output_y = display_offset_y + draw_offset_y;
+        if (output_x != 0 || output_y != 0) {
             canvas->clear(background_color == Black ? gfx::BLACK : gfx::WHITE);
         }
         canvas->reset_clip();
         canvas->draw_indexed2_fast(
-            display_offset_x, display_offset_y, screen.width, screen.height,
+            output_x, output_y, screen.width, screen.height,
             screen.pixels, screen.width * display_scale,
             screen.height * display_scale, false, false);
     }
@@ -1544,8 +1584,14 @@ struct Runtime::Impl {
             lua_pushnil(state);
             return 1;
         }
-        const int width = static_cast<int>(luaL_checkinteger(state, 1));
-        const int height = static_cast<int>(luaL_checkinteger(state, 2));
+        // Playdate's Lua bridge coerces numeric dimensions to the integer C
+        // image API.  Games commonly derive hit-box images from scaled sprite
+        // sizes, which can leave a fractional Lua number even when the final
+        // pixel extent is unambiguous.
+        const int width = static_cast<int>(std::lround(
+            luaL_checknumber(state, 1)));
+        const int height = static_cast<int>(std::lround(
+            luaL_checknumber(state, 2)));
         const uint8_t color = checkPlaydateColor(state, 3, Clear);
         runtime->pushDynamicImage(width, height, color);
         return 1;
@@ -1557,6 +1603,20 @@ struct Runtime::Impl {
         const int x = static_cast<int>(luaL_checknumber(state, 2));
         const int y = static_cast<int>(luaL_checknumber(state, 3));
         const int flip = static_cast<int>(luaL_optinteger(state, 4, Unflipped));
+        if (image) runtime->drawImage(*image, x, y, flip);
+        return 0;
+    }
+
+    static int cImageDrawIgnoringOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(
+            luaL_checkudata(state, 1, kImageMetatable));
+        const int x = static_cast<int>(luaL_checknumber(state, 2)) -
+            runtime->draw_offset_x;
+        const int y = static_cast<int>(luaL_checknumber(state, 3)) -
+            runtime->draw_offset_y;
+        const int flip = static_cast<int>(
+            luaL_optinteger(state, 4, Unflipped));
         if (image) runtime->drawImage(*image, x, y, flip);
         return 0;
     }
@@ -1610,6 +1670,32 @@ struct Runtime::Impl {
         const float alpha = static_cast<float>(luaL_checknumber(state, 4));
         if (image) runtime->drawImage(*image, x, y, Unflipped, 1, alpha);
         return 0;
+    }
+
+    static int cImageSetMaskImage(lua_State* state) {
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        Image* mask = nullptr;
+        if (!lua_isnoneornil(state, 2)) {
+            mask = static_cast<Image*>(luaL_checkudata(
+                state, 2, kImageMetatable));
+            if (image && mask &&
+                (image->width != mask->width || image->height != mask->height)) {
+                return luaL_error(state,
+                    "mask image must have the same dimensions as the image");
+            }
+        }
+        if (image) image->mask = mask;
+        if (mask) lua_pushvalue(state, 2);
+        else lua_pushnil(state);
+        lua_setiuservalue(state, 1, 1);
+        return 0;
+    }
+
+    static int cImageGetMaskImage(lua_State* state) {
+        luaL_checkudata(state, 1, kImageMetatable);
+        lua_getiuservalue(state, 1, 1);
+        return 1;
     }
 
     static int cImageGetSize(lua_State* state) {
@@ -1754,6 +1840,20 @@ struct Runtime::Impl {
         return 1;
     }
 
+    static int cImageTableIndex(lua_State* state) {
+        // Playdate image tables expose frames through both getImage(index) and
+        // the Lua shorthand imageTable[index].  CoreLibs/animation uses the
+        // latter, so a plain metatable-as-__index leaves every frame nil.
+        if (lua_type(state, 2) == LUA_TNUMBER) {
+            return cImageTableGetImage(state);
+        }
+        luaL_getmetatable(state, kImageTableMetatable);
+        lua_pushvalue(state, 2);
+        lua_rawget(state, -2);
+        lua_remove(state, -2);
+        return 1;
+    }
+
     static int cImageTableLen(lua_State* state) {
         auto* table = static_cast<ImageTable*>(luaL_checkudata(state, 1, kImageTableMetatable));
         lua_pushinteger(state, table ? (table->asset ? table->asset->frame_count :
@@ -1789,6 +1889,21 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cGetDisplayImage(lua_State* state) {
+        Impl* runtime = self(state);
+        if (!runtime->screen.pixels) {
+            lua_pushnil(state);
+            return 1;
+        }
+        Image* copy = runtime->pushDynamicImage(
+            runtime->screen.width, runtime->screen.height, Clear);
+        if (!copy) return 1;
+        const size_t bytes = static_cast<size_t>(runtime->screen.width) *
+            runtime->screen.height;
+        std::memcpy(copy->pixels, runtime->screen.pixels, bytes);
+        return 1;
+    }
+
     static int cGraphicsClear(lua_State* state) {
         Impl* runtime = self(state);
         const uint8_t color = checkPlaydateColor(
@@ -1806,18 +1921,34 @@ struct Runtime::Impl {
 
     static int cSetPattern(lua_State* state) {
         Impl* runtime = self(state);
-        luaL_checktype(state, 1, LUA_TTABLE);
-        for (lua_Integer row = 1; row <= 8; ++row) {
-            lua_rawgeti(state, 1, row);
-            const lua_Integer value = luaL_checkinteger(state, -1);
-            lua_pop(state, 1);
-            if (value < 0 || value > 255) {
-                return luaL_error(state,
-                    "pattern row %d must be between 0 and 255",
-                    static_cast<int>(row));
+        if (auto* image = static_cast<Image*>(
+                luaL_testudata(state, 1, kImageMetatable))) {
+            if (image->width <= 0 || image->height <= 0) {
+                return luaL_error(state, "pattern image is empty");
             }
-            runtime->draw_pattern[static_cast<size_t>(row - 1)] =
-                static_cast<uint8_t>(value);
+            for (int y = 0; y < 8; ++y) {
+                for (int x = 0; x < 8; ++x) {
+                    runtime->draw_pattern_pixels[static_cast<size_t>(y * 8 + x)] =
+                        runtime->imagePixel(*image, x % image->width,
+                                            y % image->height);
+                }
+            }
+            runtime->draw_pattern_uses_image = true;
+        } else {
+            luaL_checktype(state, 1, LUA_TTABLE);
+            for (lua_Integer row = 1; row <= 8; ++row) {
+                lua_rawgeti(state, 1, row);
+                const lua_Integer value = luaL_checkinteger(state, -1);
+                lua_pop(state, 1);
+                if (value < 0 || value > 255) {
+                    return luaL_error(state,
+                        "pattern row %d must be between 0 and 255",
+                        static_cast<int>(row));
+                }
+                runtime->draw_pattern[static_cast<size_t>(row - 1)] =
+                    static_cast<uint8_t>(value);
+            }
+            runtime->draw_pattern_uses_image = false;
         }
         runtime->pattern_offset_x = static_cast<int>(
             luaL_optinteger(state, 2, 0));
@@ -1888,6 +2019,7 @@ struct Runtime::Impl {
         }
         runtime->draw_pattern_color = white ? White : Black;
         runtime->draw_pattern_transparent = true;
+        runtime->draw_pattern_uses_image = false;
         runtime->pattern_offset_x = 0;
         runtime->pattern_offset_y = 0;
         runtime->draw_color = Pattern;
@@ -1969,6 +2101,60 @@ struct Runtime::Impl {
                 runtime->putLogicalPixel(x + w - 1 - line, py, runtime->draw_color);
             }
         }
+        return 0;
+    }
+
+    bool insideRoundedRect(int px, int py, int x, int y, int width,
+                           int height, int radius) const {
+        if (width <= 0 || height <= 0 || px < x || py < y ||
+            px >= x + width || py >= y + height) return false;
+        radius = std::clamp(radius, 0, std::min(width, height) / 2);
+        if (radius == 0) return true;
+        const int center_x = std::clamp(px, x + radius,
+                                       x + width - 1 - radius);
+        const int center_y = std::clamp(py, y + radius,
+                                       y + height - 1 - radius);
+        const int dx = px - center_x;
+        const int dy = py - center_y;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+
+    void roundedRect(int x, int y, int width, int height, int radius,
+                     bool fill) {
+        const int inset = std::max(1, line_width);
+        for (int py = y; py < y + height; ++py) {
+            for (int px = x; px < x + width; ++px) {
+                if (!insideRoundedRect(px, py, x, y, width, height, radius)) {
+                    continue;
+                }
+                const bool inner = !fill && insideRoundedRect(
+                    px, py, x + inset, y + inset,
+                    width - inset * 2, height - inset * 2,
+                    std::max(0, radius - inset));
+                if (!inner) putLogicalPixel(px, py, draw_color);
+            }
+        }
+    }
+
+    static int cFillRoundRect(lua_State* state) {
+        Impl* runtime = self(state);
+        int x, y, width, height;
+        runtime->readRect(state, 1, x, y, width, height);
+        const int radius_index = lua_istable(state, 1) ? 2 : 5;
+        const int radius = static_cast<int>(
+            luaL_checkinteger(state, radius_index));
+        runtime->roundedRect(x, y, width, height, radius, true);
+        return 0;
+    }
+
+    static int cDrawRoundRect(lua_State* state) {
+        Impl* runtime = self(state);
+        int x, y, width, height;
+        runtime->readRect(state, 1, x, y, width, height);
+        const int radius_index = lua_istable(state, 1) ? 2 : 5;
+        const int radius = static_cast<int>(
+            luaL_checkinteger(state, radius_index));
+        runtime->roundedRect(x, y, width, height, radius, false);
         return 0;
     }
 
@@ -2288,6 +2474,35 @@ struct Runtime::Impl {
 
     int textWidth(const char* text, size_t length) const {
         return textWidthForFont(current_font, text, length);
+    }
+
+    int textHeightForFont(const PdFont* font, const char* text,
+                          size_t length) const {
+        int lines = 1;
+        for (size_t index = 0; index < length; ++index) {
+            if (text[index] == '\n') ++lines;
+        }
+        const int line_height = font && font->compiled
+            ? std::max<int>(1, font->glyph_height)
+            : (font && font->pico ? 5 : 7 * (font ? font->scale : 1));
+        return text && length > 0 ? lines * line_height : 0;
+    }
+
+    static int cGetTextSize(lua_State* state) {
+        Impl* runtime = self(state);
+        size_t length = 0;
+        const char* text = luaL_tolstring(state, 1, &length);
+        const PdFont* font = runtime->current_font;
+        if (lua_gettop(state) >= 3 && luaL_testudata(
+                state, 2, kFontMetatable)) {
+            font = static_cast<PdFont*>(lua_touserdata(state, 2));
+        }
+        const int width = runtime->textWidthForFont(font, text, length);
+        const int height = runtime->textHeightForFont(font, text, length);
+        lua_pop(state, 1);  // luaL_tolstring result
+        lua_pushinteger(state, width);
+        lua_pushinteger(state, height);
+        return 2;
     }
 
     void drawText(const char* text, size_t length, int x, int y) {
@@ -2658,9 +2873,50 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cSetDrawOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        runtime->draw_offset_x = static_cast<int>(std::lround(
+            luaL_checknumber(state, 1)));
+        runtime->draw_offset_y = static_cast<int>(std::lround(
+            luaL_checknumber(state, 2)));
+        return 0;
+    }
+
+    static int cGetDrawOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        lua_pushinteger(state, runtime->draw_offset_x);
+        lua_pushinteger(state, runtime->draw_offset_y);
+        return 2;
+    }
+
     static int cSetInverted(lua_State* state) {
         self(state)->inverted_display = lua_toboolean(state, 1) != 0;
         return 0;
+    }
+
+    static int cStartAccelerometer(lua_State* state) {
+        self(state)->accelerometer_running = true;
+        return 0;
+    }
+
+    static int cStopAccelerometer(lua_State* state) {
+        self(state)->accelerometer_running = false;
+        return 0;
+    }
+
+    static int cAccelerometerIsRunning(lua_State* state) {
+        lua_pushboolean(state, self(state)->accelerometer_running);
+        return 1;
+    }
+
+    static int cReadAccelerometer(lua_State* state) {
+        Impl* runtime = self(state);
+        const bool available = runtime->accelerometer_running &&
+            runtime->accelerometer_valid;
+        lua_pushnumber(state, available ? runtime->accelerometer_x : 0.0f);
+        lua_pushnumber(state, available ? runtime->accelerometer_y : 0.0f);
+        lua_pushnumber(state, available ? runtime->accelerometer_z : 1.0f);
+        return 3;
     }
 
     static int cGetCurrentTime(lua_State* state) {
@@ -2761,30 +3017,138 @@ struct Runtime::Impl {
         return 3;
     }
 
-    static int cGetSecondsSinceEpoch(lua_State* state) {
-        lua_pushinteger(state, static_cast<lua_Integer>(std::time(nullptr)));
-        return 1;
-    }
+    static constexpr int64_t kPlaydateEpochUnixSeconds = 946684800LL;
 
-    static int cGetTime(lua_State* state) {
-        const std::time_t now = std::time(nullptr);
-        const std::tm* value = std::localtime(&now);
+    static void pushTimeTable(lua_State* state, const std::tm* value,
+                              int millisecond) {
         lua_newtable(state);
         auto set = [&](const char* name, int number) {
             lua_pushinteger(state, number); lua_setfield(state, -2, name);
         };
         if (value) {
             set("year", value->tm_year + 1900); set("month", value->tm_mon + 1);
-            set("day", value->tm_mday); set("hour", value->tm_hour);
+            set("day", value->tm_mday);
+            // C uses Sunday=0 while Playdate exposes Monday=1...Sunday=7.
+            set("weekday", ((value->tm_wday + 6) % 7) + 1);
+            set("hour", value->tm_hour);
             set("minute", value->tm_min); set("second", value->tm_sec);
+            set("millisecond", std::clamp(millisecond, 0, 999));
         }
+    }
+
+    static int readTimeField(lua_State* state, int table, const char* name,
+                             int fallback) {
+        table = lua_absindex(state, table);
+        lua_getfield(state, table, name);
+        const int result = lua_isnumber(state, -1)
+            ? static_cast<int>(lua_tointeger(state, -1)) : fallback;
+        lua_pop(state, 1);
+        return result;
+    }
+
+    // Days relative to 1970-01-01 in the proleptic Gregorian calendar.  This
+    // keeps epochFromGMTTime independent of the device's local TZ setting.
+    static int64_t daysFromCivil(int year, unsigned month, unsigned day) {
+        year -= month <= 2U;
+        const int era = (year >= 0 ? year : year - 399) / 400;
+        const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+        const unsigned adjusted_month = static_cast<unsigned>(
+            static_cast<int>(month) + (month > 2U ? -3 : 9));
+        const unsigned day_of_year =
+            (153U * adjusted_month + 2U) / 5U + day - 1U;
+        const unsigned day_of_era = year_of_era * 365U + year_of_era / 4U -
+            year_of_era / 100U + day_of_year;
+        return static_cast<int64_t>(era) * 146097LL +
+            static_cast<int64_t>(day_of_era) - 719468LL;
+    }
+
+    static void currentWallClock(timeval& now) {
+        if (gettimeofday(&now, nullptr) != 0) {
+            now.tv_sec = std::time(nullptr);
+            now.tv_usec = 0;
+        }
+    }
+
+    static int cGetSecondsSinceEpoch(lua_State* state) {
+        timeval now{};
+        currentWallClock(now);
+        lua_pushinteger(state, static_cast<lua_Integer>(
+            static_cast<int64_t>(now.tv_sec) - kPlaydateEpochUnixSeconds));
+        lua_pushinteger(state, static_cast<lua_Integer>(now.tv_usec / 1000));
+        return 2;
+    }
+
+    static int pushCurrentTime(lua_State* state, bool gmt) {
+        timeval now{};
+        currentWallClock(now);
+        std::tm value{};
+        const std::time_t seconds = now.tv_sec;
+        const std::tm* converted = gmt
+            ? gmtime_r(&seconds, &value) : localtime_r(&seconds, &value);
+        pushTimeTable(state, converted, static_cast<int>(now.tv_usec / 1000));
         return 1;
     }
 
+    static int cGetTime(lua_State* state) {
+        return pushCurrentTime(state, false);
+    }
+
+    static int cGetGmtTime(lua_State* state) {
+        return pushCurrentTime(state, true);
+    }
+
     static int cEpochFromTime(lua_State* state) {
-        (void)luaL_checktype(state, 1, LUA_TTABLE);
-        lua_pushinteger(state, static_cast<lua_Integer>(std::time(nullptr)));
+        luaL_checktype(state, 1, LUA_TTABLE);
+        std::tm value{};
+        value.tm_year = readTimeField(state, 1, "year", 2000) - 1900;
+        value.tm_mon = readTimeField(state, 1, "month", 1) - 1;
+        value.tm_mday = readTimeField(state, 1, "day", 1);
+        value.tm_hour = readTimeField(state, 1, "hour", 0);
+        value.tm_min = readTimeField(state, 1, "minute", 0);
+        value.tm_sec = readTimeField(state, 1, "second", 0);
+        value.tm_isdst = -1;
+        const std::time_t seconds = std::mktime(&value);
+        lua_pushinteger(state, static_cast<lua_Integer>(
+            static_cast<int64_t>(seconds) - kPlaydateEpochUnixSeconds));
+        lua_pushinteger(state, readTimeField(state, 1, "millisecond", 0));
+        return 2;
+    }
+
+    static int cEpochFromGmtTime(lua_State* state) {
+        luaL_checktype(state, 1, LUA_TTABLE);
+        const int year = readTimeField(state, 1, "year", 2000);
+        const unsigned month = static_cast<unsigned>(std::clamp(
+            readTimeField(state, 1, "month", 1), 1, 12));
+        const unsigned day = static_cast<unsigned>(std::clamp(
+            readTimeField(state, 1, "day", 1), 1, 31));
+        const int64_t unix_seconds = daysFromCivil(year, month, day) * 86400LL +
+            static_cast<int64_t>(readTimeField(state, 1, "hour", 0)) * 3600LL +
+            static_cast<int64_t>(readTimeField(state, 1, "minute", 0)) * 60LL +
+            static_cast<int64_t>(readTimeField(state, 1, "second", 0));
+        lua_pushinteger(state, static_cast<lua_Integer>(
+            unix_seconds - kPlaydateEpochUnixSeconds));
+        lua_pushinteger(state, readTimeField(state, 1, "millisecond", 0));
+        return 2;
+    }
+
+    static int pushTimeFromEpoch(lua_State* state, bool gmt) {
+        const int64_t playdate_seconds = luaL_checkinteger(state, 1);
+        const int milliseconds = static_cast<int>(luaL_optinteger(state, 2, 0));
+        const std::time_t seconds = static_cast<std::time_t>(
+            playdate_seconds + kPlaydateEpochUnixSeconds);
+        std::tm value{};
+        const std::tm* converted = gmt
+            ? gmtime_r(&seconds, &value) : localtime_r(&seconds, &value);
+        pushTimeTable(state, converted, milliseconds);
         return 1;
+    }
+
+    static int cTimeFromEpoch(lua_State* state) {
+        return pushTimeFromEpoch(state, false);
+    }
+
+    static int cGmtTimeFromEpoch(lua_State* state) {
+        return pushTimeFromEpoch(state, true);
     }
 
     static int cGetReduceFlashing(lua_State* state) { lua_pushboolean(state, 1); return 1; }
@@ -4186,6 +4550,11 @@ struct Runtime::Impl {
     }
 
     static int cDatastoreRead(lua_State* state) {
+        // A few shipped Lua packages accidentally call read(table, name,
+        // prettyPrint) at their save point.  Those arguments are the exact
+        // datastore.write signature; accepting it keeps the save operation
+        // recoverable while ordinary read(name) retains its documented form.
+        if (lua_istable(state, 1)) return cDatastoreWrite(state);
         Impl* runtime=self(state); const char* name=luaL_optstring(state,1,"data");
         if (!runtime->storage || !runtime->storage->mounted()) { lua_pushnil(state); return 1; }
         char path[240]{}; runtime->savePath(path,sizeof(path),name,"lua");
@@ -4225,6 +4594,9 @@ struct Runtime::Impl {
         Impl* runtime=self(state); lua_newtable(state);
         runtime->setFunction(-1,"addCheckmarkMenuItem",cNoop);
         runtime->setFunction(-1,"addMenuItem",cNoop);
+        runtime->setFunction(-1,"addOptionsMenuItem",cNoop);
+        runtime->setFunction(-1,"removeMenuItem",cNoop);
+        runtime->setFunction(-1,"removeAllMenuItems",cNoop);
         return 1;
     }
 
@@ -4238,15 +4610,18 @@ struct Runtime::Impl {
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             lua_pushcfunction(lua,cImageGc);lua_setfield(lua,-2,"__gc");
             setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawCentered",cImageDrawCentered);
+            setFunction(-1,"drawIgnoringOffset",cImageDrawIgnoringOffset);
             setFunction(-1,"drawScaled",cImageDrawScaled);
             setFunction(-1,"drawRotated",cImageDrawRotated);
             setFunction(-1,"drawFaded",cImageDrawFaded);setFunction(-1,"getSize",cImageGetSize);
+            setFunction(-1,"setMaskImage",cImageSetMaskImage);
+            setFunction(-1,"getMaskImage",cImageGetMaskImage);
             setFunction(-1,"clear",cImageClear);setFunction(-1,"copy",cImageCopy);
             setFunction(-1,"setInverted",cImageSetInverted);
             setFunction(-1,"invertedImage",cImageInverted);setFunction(-1,"fadedImage",cImageFaded);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kImageTableMetatable)){
-            lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
+            pushFunction(cImageTableIndex);lua_setfield(lua,-2,"__index");
             setFunction(-1,"getImage",cImageTableGetImage);
             pushFunction(cImageTableLen);lua_setfield(lua,-2,"__len");
         } lua_pop(lua,1);
@@ -4300,9 +4675,18 @@ struct Runtime::Impl {
         setFunction(playdate,"buttonJustReleased",cButtonJustReleased);setFunction(playdate,"getButtonState",cGetButtonState);
         setFunction(playdate,"getSystemMenu",cGetSystemMenu);setFunction(playdate,"setMenuImage",cSetMenuImage);
         setFunction(playdate,"drawFPS",cDrawFps);setFunction(playdate,"getSecondsSinceEpoch",cGetSecondsSinceEpoch);
-        setFunction(playdate,"getTime",cGetTime);setFunction(playdate,"epochFromTime",cEpochFromTime);
+        setFunction(playdate,"getTime",cGetTime);setFunction(playdate,"getGMTTime",cGetGmtTime);
+        setFunction(playdate,"epochFromTime",cEpochFromTime);
+        setFunction(playdate,"epochFromGMTTime",cEpochFromGmtTime);
+        setFunction(playdate,"timeFromEpoch",cTimeFromEpoch);
+        setFunction(playdate,"GMTTimeFromEpoch",cGmtTimeFromEpoch);
         setFunction(playdate,"getReduceFlashing",cGetReduceFlashing);setFunction(playdate,"getCrankTicks",cGetCrankTicks);
         setFunction(playdate,"setCrankSoundsDisabled",cNoop);
+        setFunction(playdate,"setAutoLockDisabled",cNoop);
+        setFunction(playdate,"startAccelerometer",cStartAccelerometer);
+        setFunction(playdate,"stopAccelerometer",cStopAccelerometer);
+        setFunction(playdate,"accelerometerIsRunning",cAccelerometerIsRunning);
+        setFunction(playdate,"readAccelerometer",cReadAccelerometer);
         lua_newtable(lua);
         const char* metadata_name = package_mode && package_info.name[0]
             ? package_info.name : (game==Game::Celeste?"Celeste Classic":"PDSnake");
@@ -4339,16 +4723,24 @@ struct Runtime::Impl {
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"getImageDrawMode",cGetDrawMode);
+        setFunction(graphics,"getDisplayImage",cGetDisplayImage);
+        setFunction(graphics,"getWorkingImage",cGetDisplayImage);
         setFunction(graphics,"clear",cGraphicsClear);setFunction(graphics,"setColor",cSetColor);
         setFunction(graphics,"setPattern",cSetPattern);
         setFunction(graphics,"setDitherPattern",cSetDitherPattern);
+        setFunction(graphics,"setDrawOffset",cSetDrawOffset);
+        setFunction(graphics,"getDrawOffset",cGetDrawOffset);
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
         setFunction(graphics,"setStrokeLocation",cSetStrokeLocation);setFunction(graphics,"fillRect",cFillRect);
-        setFunction(graphics,"drawRect",cDrawRect);setFunction(graphics,"drawLine",cDrawLine);
+        setFunction(graphics,"drawRect",cDrawRect);
+        setFunction(graphics,"fillRoundRect",cFillRoundRect);
+        setFunction(graphics,"drawRoundRect",cDrawRoundRect);
+        setFunction(graphics,"drawLine",cDrawLine);
         setFunction(graphics,"fillCircleAtPoint",cFillCircle);setFunction(graphics,"drawCircleAtPoint",cDrawCircle);
         setFunction(graphics,"fillCircleInRect",cFillCircleInRect);setFunction(graphics,"drawCircleInRect",cDrawCircleInRect);
         setFunction(graphics,"drawText",cDrawText);setFunction(graphics,"drawTextInRect",cDrawTextInRect);
         setFunction(graphics,"drawTextAligned",cDrawTextAligned);
+        setFunction(graphics,"getTextSize",cGetTextSize);
         setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"getFont",cGetFont);
         setFunction(graphics,"setFontFamily",cSetFontFamily);
         setFunction(graphics,"getSystemFont",cGetSystemFont);
@@ -4469,10 +4861,14 @@ struct Runtime::Impl {
         refresh_rate=30;runtime_stats.requested_fps=refresh_rate;
         frame_accumulator_units=0;now_ms=0;elapsed_reset_ms=0;
         held_buttons=pressed_buttons=previous_held_buttons=0;
+        accelerometer_x=accelerometer_y=0.0f;accelerometer_z=1.0f;
+        accelerometer_valid=false;accelerometer_running=false;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
+        draw_offset_x=draw_offset_y=0;
         inverted_display=false;background_color=White;
         draw_color=solid_draw_color=draw_pattern_color=Black;
         draw_pattern_transparent=false;draw_pattern.fill(0xffU);
+        draw_pattern_pixels.fill(Clear);draw_pattern_uses_image=false;
         pattern_offset_x=pattern_offset_y=0;current_font=nullptr;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
@@ -4480,9 +4876,22 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.3: dither pattern + full frameTimer forms");
+                 "PogoDate API STEP11.6.4: Maze gameplay + Duel boss room");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
-        if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
+        if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
+            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
+        }
+        // Our native animation/animator replacements intentionally skip the
+        // bundled CoreLibs modules, but the stock animation module normally
+        // installs playdate.easingFunctions as a side effect.  Load the
+        // package's exact pure-Lua easing implementation first when present;
+        // older Noble/Sequence releases otherwise return early and leave
+        // Sequence.new undefined even though their module itself loaded.
+        if(package_mode && pdz.findLua("CoreLibs/easing") &&
+           !importModule("CoreLibs/easing")){
+            lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
+        }
+        if(!importModule("main")){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
         // Incremental collection trades rare long stop-the-world nursery/major
@@ -4569,6 +4978,11 @@ esp_err_t Runtime::startPackage(gfx::Canvas& canvas,audio::Audio& audio,
 }
 void Runtime::stop(){if(impl_)impl_->stop();}
 void Runtime::setInput(uint8_t held_mask,uint8_t pressed_mask){if(!impl_)return;impl_->held_buttons=held_mask;impl_->pressed_buttons=static_cast<uint8_t>(impl_->pressed_buttons|pressed_mask);}
+void Runtime::setAccelerometer(float x,float y,float z,bool valid){
+    if(!impl_)return;
+    impl_->accelerometer_x=x;impl_->accelerometer_y=y;impl_->accelerometer_z=z;
+    impl_->accelerometer_valid=valid;
+}
 uint32_t Runtime::update(uint32_t dt_ms){return impl_?impl_->update(dt_ms):0;}
 bool Runtime::running()const{return impl_&&impl_->is_running;}
 const char* Runtime::error()const{return impl_&&impl_->last_error[0]?impl_->last_error:"";}
