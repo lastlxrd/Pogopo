@@ -264,6 +264,44 @@ bool Audio::tone(uint16_t frequency_hz, uint16_t duration_ms,
     return enqueue(command);
 }
 
+uint32_t Audio::playSynthTone(uint16_t frequency_hz, uint16_t duration_ms,
+                              uint8_t volume, Waveform waveform,
+                              uint16_t attack_ms, uint16_t decay_ms,
+                              uint16_t sustain_q15, uint16_t release_ms) {
+    if (!enabled_.load()) {
+        return 1;
+    }
+    const uint32_t sample_rate = config_.sample_rate ? config_.sample_rate : 32768;
+    if (frequency_hz < 20 || frequency_hz >= sample_rate / 2U ||
+        duration_ms == 0) {
+        return 0;
+    }
+
+    uint32_t token = next_synth_token_.fetch_add(1);
+    if (token == 0) token = next_synth_token_.fetch_add(1);
+    Command command;
+    command.type = CommandType::PlayTone;
+    command.waveform = waveform;
+    command.frequency_hz = frequency_hz;
+    command.duration_ms = duration_ms;
+    command.volume = std::min<uint8_t>(volume, 100);
+    command.attack_ms = std::min<uint16_t>(attack_ms, duration_ms);
+    command.decay_ms = std::min<uint16_t>(decay_ms, duration_ms);
+    command.sustain_q15 = std::min<uint16_t>(sustain_q15, 32767);
+    command.release_ms = std::min<uint16_t>(release_ms, duration_ms);
+    command.synth_token = token;
+    return enqueue(command) ? token : 0;
+}
+
+bool Audio::stopSynthTone(uint32_t token, uint16_t release_ms) {
+    if (token == 0) return false;
+    Command command;
+    command.type = CommandType::StopSynthTone;
+    command.synth_token = token;
+    command.release_ms = release_ms;
+    return enqueue(command);
+}
+
 bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume) {
     if (!samples || frames == 0 || sample_rate < 8000 || sample_rate > 96000) {
         if (samples) {
@@ -677,6 +715,9 @@ void Audio::processCommands() {
             case CommandType::StopMusicPcm:
                 clearMusicPcm();
                 break;
+            case CommandType::StopSynthTone:
+                stopTone(command);
+                break;
             case CommandType::StopAll:
                 silenceVoices();
                 clearPcm();
@@ -744,14 +785,35 @@ void Audio::startTone(const Command& command) {
         command.duration_ms,
         command.volume,
         command.waveform,
-        3,
-        8,
+        command.attack_ms,
+        command.release_ms,
+        command.decay_ms,
+        command.sustain_q15,
     };
     voice.notes = &voice.custom_note;
     voice.note_count = 1;
     voice.note_index = 0;
     voice.phase = 0;
+    voice.synth_token = command.synth_token;
     loadCurrentNote(voice);
+}
+
+void Audio::stopTone(const Command& command) {
+    for (auto& voice : voices_) {
+        if (!voice.active || voice.synth_token != command.synth_token) continue;
+        if (command.release_ms == 0) {
+            voice = Voice{};
+        } else {
+            voice.release_samples = static_cast<uint32_t>(
+                (static_cast<uint64_t>(command.release_ms) * config_.sample_rate) /
+                1000U);
+            voice.release_samples = std::max<uint32_t>(1U, voice.release_samples);
+            voice.release_samples = std::min(
+                voice.release_samples, voice.samples_total);
+            voice.samples_left = std::min(voice.samples_left, voice.release_samples);
+        }
+        break;
+    }
 }
 
 void Audio::startPcm(Command& command) {
@@ -1031,9 +1093,14 @@ void Audio::loadCurrentNote(Voice& voice) {
     voice.samples_left = voice.samples_total;
     voice.attack_samples = static_cast<uint32_t>(
         (static_cast<uint64_t>(note.attack_ms) * config_.sample_rate) / 1000U);
+    voice.decay_samples = static_cast<uint32_t>(
+        (static_cast<uint64_t>(note.decay_ms) * config_.sample_rate) / 1000U);
+    voice.sustain_q15 = std::min<uint16_t>(note.sustain_q15, 32767);
     voice.release_samples = static_cast<uint32_t>(
         (static_cast<uint64_t>(note.release_ms) * config_.sample_rate) / 1000U);
     voice.attack_samples = std::min(voice.attack_samples, voice.samples_total);
+    voice.decay_samples = std::min(
+        voice.decay_samples, voice.samples_total - voice.attack_samples);
     voice.release_samples = std::min(voice.release_samples, voice.samples_total);
 
     if (note.frequency_hz == 0) {
@@ -1101,6 +1168,9 @@ int16_t Audio::waveformSample(Voice& voice) {
             noise_state_ ^= noise_state_ << 5U;
             value = static_cast<int16_t>(noise_state_ & 0xFFFFU);
             break;
+        case Waveform::Sawtooth:
+            value = static_cast<int32_t>(voice.phase >> 16U) - 32768;
+            break;
     }
 
     voice.phase += voice.phase_increment;
@@ -1116,10 +1186,18 @@ uint16_t Audio::envelopeQ15(const Voice& voice) const {
 
     if (voice.attack_samples > 0 && elapsed < voice.attack_samples) {
         envelope = (elapsed * 32767U) / voice.attack_samples;
+    } else if (voice.decay_samples > 0 &&
+               elapsed < voice.attack_samples + voice.decay_samples) {
+        const uint32_t decay_elapsed = elapsed - voice.attack_samples;
+        const uint32_t range = 32767U - voice.sustain_q15;
+        envelope = 32767U -
+            (range * decay_elapsed) / voice.decay_samples;
+    } else {
+        envelope = voice.sustain_q15;
     }
     if (voice.release_samples > 0 && voice.samples_left < voice.release_samples) {
         const uint32_t release = (voice.samples_left * 32767U) / voice.release_samples;
-        envelope = std::min(envelope, release);
+        envelope = (envelope * release) / 32767U;
     }
     return static_cast<uint16_t>(envelope);
 }
@@ -1618,6 +1696,8 @@ const char* waveform_name(Waveform waveform) {
             return "TRIANGLE";
         case Waveform::Noise:
             return "NOISE";
+        case Waveform::Sawtooth:
+            return "SAWTOOTH";
         default:
             return "?";
     }

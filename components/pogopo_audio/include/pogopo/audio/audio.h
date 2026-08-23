@@ -19,6 +19,7 @@ enum class Waveform : uint8_t {
     Square,
     Triangle,
     Noise,
+    Sawtooth,
 };
 
 enum class Effect : uint8_t {
@@ -112,6 +113,15 @@ public:
     bool play(Effect effect);
     bool tone(uint16_t frequency_hz, uint16_t duration_ms,
               uint8_t volume = 70, Waveform waveform = Waveform::Sine);
+    // Managed oscillator voice used by the Playdate synth compatibility API.
+    // The returned token can stop only this note, without cutting samples,
+    // music, UI effects, or another synth.
+    uint32_t playSynthTone(uint16_t frequency_hz, uint16_t duration_ms,
+                           uint8_t volume, Waveform waveform,
+                           uint16_t attack_ms = 3, uint16_t decay_ms = 0,
+                           uint16_t sustain_q15 = 32767,
+                           uint16_t release_ms = 8);
+    bool stopSynthTone(uint32_t token, uint16_t release_ms = 0);
     // Takes ownership of samples allocated with heap_caps_malloc()/malloc-compatible heap.
     // Mono signed 16-bit PCM; the audio task frees it after playback or StopAll.
     bool playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume = 80);
@@ -168,6 +178,7 @@ private:
         PlayPcm,
         PlayMusicPcm,
         StopMusicPcm,
+        StopSynthTone,
         StopAll,
     };
 
@@ -186,6 +197,11 @@ private:
         uint16_t frequency_hz = 0;
         uint16_t duration_ms = 0;
         uint8_t volume = 0;
+        uint16_t attack_ms = 3;
+        uint16_t decay_ms = 0;
+        uint16_t sustain_q15 = 32767;
+        uint16_t release_ms = 8;
+        uint32_t synth_token = 0;
         int16_t* pcm_samples = nullptr;
         uint32_t pcm_frames = 0;
         uint32_t pcm_sample_rate = 0;
@@ -204,8 +220,10 @@ private:
         uint16_t duration_ms;
         uint8_t volume;
         Waveform waveform;
-        uint8_t attack_ms;
-        uint8_t release_ms;
+        uint16_t attack_ms;
+        uint16_t release_ms;
+        uint16_t decay_ms = 0;
+        uint16_t sustain_q15 = 32767;
     };
 
     struct PcmVoice {
@@ -231,8 +249,11 @@ private:
         uint32_t samples_total = 0;
         uint32_t samples_left = 0;
         uint32_t attack_samples = 0;
+        uint32_t decay_samples = 0;
+        uint16_t sustain_q15 = 32767;
         uint32_t release_samples = 0;
         uint32_t serial = 0;
+        uint32_t synth_token = 0;
     };
 
     struct WavHeader {
@@ -255,6 +276,7 @@ private:
 
     void startEffect(Effect effect);
     void startTone(const Command& command);
+    void stopTone(const Command& command);
     void startPcm(Command& command);
     int32_t renderPcm();
     void startMusicPcm(Command& command);
@@ -296,6 +318,7 @@ private:
     std::array<int16_t, SINE_TABLE_SIZE> sine_table_{};
     std::array<Voice, MAX_VOICES> voices_{};
     uint32_t voice_serial_ = 0;
+    std::atomic<uint32_t> next_synth_token_{1};
     uint32_t noise_state_ = 0xA5C31E27u;
     PcmVoice pcm_{};
     PcmVoice music_pcm_{};

@@ -43,6 +43,7 @@ constexpr char kImageMetatable[] = "PogoDate.Image";
 constexpr char kImageTableMetatable[] = "PogoDate.ImageTable";
 constexpr char kFontMetatable[] = "PogoDate.Font";
 constexpr char kSoundMetatable[] = "PogoDate.Sound";
+constexpr char kSynthMetatable[] = "PogoDate.Synth";
 constexpr char kFileMetatable[] = "PogoDate.File";
 char kTimerRegistryKey;
 
@@ -141,6 +142,21 @@ struct Sound {
     float rate = 1.0f;
     int16_t cache_index = -1;
     char path[160]{};
+};
+
+struct Synth {
+    int waveform = 2; // Playdate kWaveSine
+    float left_volume = 1.0f;
+    float right_volume = 1.0f;
+    float attack = 0.003f;
+    float decay = 0.0f;
+    float sustain = 1.0f;
+    float release = 0.008f;
+    float transpose = 0.0f;
+    uint32_t voice_token = 0;
+    uint32_t ends_at_ms = 0;
+    bool playing = false;
+    bool indefinite = false;
 };
 
 struct CachedSound {
@@ -4605,6 +4621,309 @@ struct Runtime::Impl {
         return 1;
     }
 
+    static int noteNameToMidi(const char* name, float& midi) {
+        if (!name || !name[0]) return 0;
+        int semitone = 0;
+        switch (static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(name[0])))) {
+            case 'C': semitone = 0; break;
+            case 'D': semitone = 2; break;
+            case 'E': semitone = 4; break;
+            case 'F': semitone = 5; break;
+            case 'G': semitone = 7; break;
+            case 'A': semitone = 9; break;
+            case 'B': semitone = 11; break;
+            default: return 0;
+        }
+        const char* cursor = name + 1;
+        if (*cursor == '#') { ++semitone; ++cursor; }
+        else if (*cursor == 'b' || *cursor == 'B') { --semitone; ++cursor; }
+        char* end = nullptr;
+        const long octave = std::strtol(cursor, &end, 10);
+        if (end == cursor || *end != '\0' || octave < -1 || octave > 9) return 0;
+        midi = static_cast<float>((octave + 1) * 12 + semitone);
+        return 1;
+    }
+
+    static float midiToFrequency(float midi) {
+        return 440.0f * std::pow(2.0f, (midi - 69.0f) / 12.0f);
+    }
+
+    static audio::Waveform synthWaveform(int waveform) {
+        switch (waveform) {
+            case 0: return audio::Waveform::Square;
+            case 1: return audio::Waveform::Triangle;
+            case 2: return audio::Waveform::Sine;
+            case 3: return audio::Waveform::Noise;
+            case 4: return audio::Waveform::Sawtooth;
+            // The three Playdate Organ-style generators do not have a direct
+            // equivalent in Pogopo's small mixer. Keep them audible with the
+            // closest inexpensive oscillator instead of silently dropping notes.
+            case 5: return audio::Waveform::Sawtooth;
+            case 6: return audio::Waveform::Square;
+            case 7: return audio::Waveform::Triangle;
+            default: return audio::Waveform::Sine;
+        }
+    }
+
+    static int cSynthNew(lua_State* state) {
+        const int argument = lua_istable(state, 1) ? 2 : 1;
+        auto* original = static_cast<Synth*>(
+            luaL_testudata(state, argument, kSynthMetatable));
+        auto* synth = static_cast<Synth*>(lua_newuserdatauv(state, sizeof(Synth), 0));
+        new (synth) Synth{};
+        if (original) {
+            *synth = *original;
+            synth->voice_token = 0;
+            synth->ends_at_ms = 0;
+            synth->playing = false;
+            synth->indefinite = false;
+        } else if (lua_isnumber(state, argument)) {
+            synth->waveform = static_cast<int>(std::clamp<lua_Integer>(
+                lua_tointeger(state, argument), 0, 7));
+        }
+        luaL_getmetatable(state, kSynthMetatable);
+        lua_setmetatable(state, -2);
+        return 1;
+    }
+
+    static int cSynthCopy(lua_State* state) {
+        luaL_checkudata(state, 1, kSynthMetatable);
+        lua_pushvalue(state, 1);
+        return cSynthNew(state);
+    }
+
+    static int cSynthPlay(lua_State* state, bool midi_pitch) {
+        Impl* runtime = self(state);
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        float frequency = 0.0f;
+        if (lua_type(state, 2) == LUA_TSTRING) {
+            float midi = 0.0f;
+            if (!noteNameToMidi(lua_tostring(state, 2), midi)) {
+                return luaL_argerror(state, 2, "invalid note name");
+            }
+            frequency = midiToFrequency(midi + synth->transpose);
+        } else {
+            const float pitch = static_cast<float>(luaL_checknumber(state, 2));
+            frequency = midi_pitch
+                ? midiToFrequency(pitch + synth->transpose)
+                : pitch * std::pow(2.0f, synth->transpose / 12.0f);
+        }
+        if (frequency <= 0.0f) {
+            if (synth->voice_token && runtime->audio) {
+                runtime->audio->stopSynthTone(synth->voice_token, 0);
+            }
+            synth->voice_token = 0;
+            synth->playing = false;
+            synth->indefinite = false;
+            lua_pushboolean(state, 1);
+            return 1;
+        }
+
+        const float velocity = static_cast<float>(std::clamp<lua_Number>(
+            luaL_optnumber(state, 3, 1.0), static_cast<lua_Number>(0),
+            static_cast<lua_Number>(1)));
+        const bool indefinite = lua_isnoneornil(state, 4);
+        const float requested_seconds = indefinite
+            ? 60.0f
+            : static_cast<float>(std::max<lua_Number>(
+                  luaL_checknumber(state, 4), static_cast<lua_Number>(0.001)));
+        const uint16_t duration_ms = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(requested_seconds * 1000.0f)), 1, 60000));
+        const uint16_t attack_ms = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(synth->attack * 1000.0f)), 0, 60000));
+        const uint16_t decay_ms = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(synth->decay * 1000.0f)), 0, 60000));
+        const uint16_t sustain_q15 = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(synth->sustain * 32767.0f)), 0, 32767));
+        const uint16_t release_ms = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(synth->release * 1000.0f)), 0, 60000));
+        const float source_volume = (synth->left_volume + synth->right_volume) * 0.5f;
+        const uint8_t volume = static_cast<uint8_t>(std::clamp<int>(
+            static_cast<int>(std::lround(source_volume * velocity * 100.0f)),
+            0, 100));
+
+        if (synth->voice_token && runtime->audio) {
+            runtime->audio->stopSynthTone(synth->voice_token, 0);
+        }
+        synth->voice_token = runtime->audio
+            ? runtime->audio->playSynthTone(
+                  static_cast<uint16_t>(std::clamp<int>(
+                      static_cast<int>(std::lround(frequency)), 20, 16000)),
+                  duration_ms, volume, synthWaveform(synth->waveform),
+                  attack_ms, decay_ms, sustain_q15, release_ms)
+            : 1;
+        synth->playing = synth->voice_token != 0;
+        synth->indefinite = synth->playing && indefinite;
+        synth->ends_at_ms = synth->indefinite
+            ? 0
+            : runtime->now_ms + duration_ms;
+        lua_pushboolean(state, synth->playing);
+        return 1;
+    }
+
+    static int cSynthPlayNote(lua_State* state) { return cSynthPlay(state, false); }
+    static int cSynthPlayMidiNote(lua_State* state) { return cSynthPlay(state, true); }
+
+    static int cSynthNoteOff(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        const uint16_t release_ms = static_cast<uint16_t>(std::clamp<int>(
+            static_cast<int>(std::lround(synth->release * 1000.0f)), 0, 60000));
+        if (synth->voice_token && runtime->audio) {
+            runtime->audio->stopSynthTone(synth->voice_token, release_ms);
+        }
+        synth->indefinite = false;
+        synth->ends_at_ms = runtime->now_ms + release_ms;
+        if (release_ms == 0) {
+            synth->voice_token = 0;
+            synth->playing = false;
+        }
+        return 0;
+    }
+
+    static int cSynthStop(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        if (synth->voice_token && runtime->audio) {
+            runtime->audio->stopSynthTone(synth->voice_token, 0);
+        }
+        synth->voice_token = 0;
+        synth->ends_at_ms = 0;
+        synth->playing = false;
+        synth->indefinite = false;
+        return 0;
+    }
+
+    static int cSynthGc(lua_State* state) { return cSynthStop(state); }
+
+    static int cSynthIsPlaying(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        if (synth->playing && !synth->indefinite &&
+            static_cast<int32_t>(runtime->now_ms - synth->ends_at_ms) >= 0) {
+            synth->voice_token = 0;
+            synth->playing = false;
+        }
+        lua_pushboolean(state, synth->playing);
+        return 1;
+    }
+
+    static int cSynthSetWaveform(lua_State* state) {
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        if (lua_isnumber(state, 2)) {
+            synth->waveform = static_cast<int>(std::clamp<lua_Integer>(
+                lua_tointeger(state, 2), 0, 7));
+        }
+        return 0;
+    }
+
+    static int cSynthSetVolume(lua_State* state) {
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        synth->left_volume = static_cast<float>(std::clamp<lua_Number>(
+            luaL_checknumber(state, 2), static_cast<lua_Number>(0),
+            static_cast<lua_Number>(1)));
+        synth->right_volume = static_cast<float>(std::clamp<lua_Number>(
+            luaL_optnumber(state, 3, synth->left_volume),
+            static_cast<lua_Number>(0), static_cast<lua_Number>(1)));
+        return 0;
+    }
+
+    static int cSynthGetVolume(lua_State* state) {
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        lua_pushnumber(state, (synth->left_volume + synth->right_volume) * 0.5f);
+        return 1;
+    }
+
+    static int cSynthSetAdsr(lua_State* state) {
+        auto* synth = static_cast<Synth*>(
+            luaL_checkudata(state, 1, kSynthMetatable));
+        synth->attack = static_cast<float>(std::max<lua_Number>(0,
+            luaL_checknumber(state, 2)));
+        synth->decay = static_cast<float>(std::max<lua_Number>(0,
+            luaL_checknumber(state, 3)));
+        synth->sustain = static_cast<float>(std::clamp<lua_Number>(
+            luaL_checknumber(state, 4), static_cast<lua_Number>(0),
+            static_cast<lua_Number>(1)));
+        synth->release = static_cast<float>(std::max<lua_Number>(0,
+            luaL_checknumber(state, 5)));
+        return 0;
+    }
+
+    static int cSynthSetAttack(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->attack = static_cast<float>(std::max<lua_Number>(0, luaL_checknumber(state, 2)));
+        return 0;
+    }
+    static int cSynthSetDecay(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->decay = static_cast<float>(std::max<lua_Number>(0, luaL_checknumber(state, 2)));
+        return 0;
+    }
+    static int cSynthSetSustain(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->sustain = static_cast<float>(std::clamp<lua_Number>(
+            luaL_checknumber(state, 2), static_cast<lua_Number>(0),
+            static_cast<lua_Number>(1)));
+        return 0;
+    }
+    static int cSynthSetRelease(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->release = static_cast<float>(std::max<lua_Number>(0, luaL_checknumber(state, 2)));
+        return 0;
+    }
+    static int cSynthClearEnvelope(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->attack = 0.0f;
+        synth->decay = 0.0f;
+        synth->sustain = 1.0f;
+        synth->release = 0.0f;
+        return 0;
+    }
+    static int cSynthGetEnvelope(lua_State* state) {
+        luaL_checkudata(state, 1, kSynthMetatable);
+        lua_pushvalue(state, 1);
+        return 1;
+    }
+    static int cSynthSetTranspose(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        synth->transpose = static_cast<float>(std::clamp<lua_Number>(
+            luaL_checknumber(state, 2), static_cast<lua_Number>(-96),
+            static_cast<lua_Number>(96)));
+        return 0;
+    }
+    static int cSynthSetParameter(lua_State* state) {
+        luaL_checkudata(state, 1, kSynthMetatable);
+        (void)luaL_checkinteger(state, 2);
+        (void)luaL_checknumber(state, 3);
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+    static int cSynthGetParameterCount(lua_State* state) {
+        auto* synth = static_cast<Synth*>(luaL_checkudata(state, 1, kSynthMetatable));
+        const int count = synth->waveform == 0 ? 1 :
+            (synth->waveform >= 5 ? 2 : 0);
+        lua_pushinteger(state, count);
+        return 1;
+    }
+    static int cSynthSetWavetable(lua_State* state) {
+        luaL_checkudata(state, 1, kSynthMetatable);
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+
+    static int cSoundGetCurrentTime(lua_State* state) {
+        lua_pushnumber(state, static_cast<lua_Number>(self(state)->now_ms) / 1000.0);
+        return 1;
+    }
+
     void pushTimerRegistry() { lua_rawgetp(lua, LUA_REGISTRYINDEX, &kTimerRegistryKey); }
 
     static int cTimerPause(lua_State* state) {
@@ -5530,6 +5849,43 @@ struct Runtime::Impl {
             setFunction(-1,"setLoopRange",cNoop);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
+        if(luaL_newmetatable(lua,kSynthMetatable)){
+            lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
+            pushFunction(cSynthGc);lua_setfield(lua,-2,"__gc");
+            setFunction(-1,"copy",cSynthCopy);
+            setFunction(-1,"playNote",cSynthPlayNote);
+            setFunction(-1,"playMIDINote",cSynthPlayMidiNote);
+            setFunction(-1,"noteOff",cSynthNoteOff);
+            setFunction(-1,"stop",cSynthStop);
+            setFunction(-1,"isPlaying",cSynthIsPlaying);
+            setFunction(-1,"setWaveform",cSynthSetWaveform);
+            setFunction(-1,"setSample",cSynthSetWaveform);
+            setFunction(-1,"setWavetable",cSynthSetWavetable);
+            setFunction(-1,"setADSR",cSynthSetAdsr);
+            setFunction(-1,"setAttack",cSynthSetAttack);
+            setFunction(-1,"setDecay",cSynthSetDecay);
+            setFunction(-1,"setSustain",cSynthSetSustain);
+            setFunction(-1,"setRelease",cSynthSetRelease);
+            setFunction(-1,"clearEnvelope",cSynthClearEnvelope);
+            setFunction(-1,"getEnvelope",cSynthGetEnvelope);
+            setFunction(-1,"setTranspose",cSynthSetTranspose);
+            setFunction(-1,"setVolume",cSynthSetVolume);
+            setFunction(-1,"getVolume",cSynthGetVolume);
+            setFunction(-1,"setParameter",cSynthSetParameter);
+            setFunction(-1,"getParameterCount",cSynthGetParameterCount);
+            setFunction(-1,"setParameterMod",cNoop);
+            setFunction(-1,"setFrequencyMod",cNoop);
+            setFunction(-1,"setFrequencyModulator",cNoop);
+            setFunction(-1,"setAmplitudeMod",cNoop);
+            setFunction(-1,"setAmplitudeModulator",cNoop);
+            setFunction(-1,"setLegato",cNoop);
+            setFunction(-1,"setFinishCallback",cNoop);
+            setFunction(-1,"setEnvelopeCurvature",cNoop);
+            setFunction(-1,"setCurvature",cNoop);
+            setFunction(-1,"setVelocitySensitivity",cNoop);
+            setFunction(-1,"setRateScaling",cNoop);
+            setFunction(-1,"setScale",cNoop);
+        } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kFileMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             lua_pushcfunction(lua,cFileGc);lua_setfield(lua,-2,"__gc");
@@ -5676,10 +6032,20 @@ struct Runtime::Impl {
         lua_newtable(lua);setFunction(-1,"new",cImageTableNew);lua_setfield(lua,graphics,"imagetable");
         lua_setfield(lua,playdate,"graphics");
 
-        lua_newtable(lua);
-        lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,-2,"sample");
-        lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,-2,"sampleplayer");
-        lua_newtable(lua);setFunction(-1,"new",cFilePlayerNew);lua_setfield(lua,-2,"fileplayer");
+        lua_newtable(lua);const int sound=lua_gettop(lua);
+        setInteger(sound,"kWaveSquare",0);
+        setInteger(sound,"kWaveTriangle",1);
+        setInteger(sound,"kWaveSine",2);
+        setInteger(sound,"kWaveNoise",3);
+        setInteger(sound,"kWaveSawtooth",4);
+        setInteger(sound,"kWavePOPhase",5);
+        setInteger(sound,"kWavePODigital",6);
+        setInteger(sound,"kWavePOVosim",7);
+        setFunction(sound,"getCurrentTime",cSoundGetCurrentTime);
+        lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,sound,"sample");
+        lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,sound,"sampleplayer");
+        lua_newtable(lua);setFunction(-1,"new",cFilePlayerNew);lua_setfield(lua,sound,"fileplayer");
+        lua_newtable(lua);setFunction(-1,"new",cSynthNew);lua_setfield(lua,sound,"synth");
         lua_setfield(lua,playdate,"sound");
         lua_newtable(lua);setFunction(-1,"new",cTimerNew);setFunction(-1,"performAfterDelay",cTimerAfter);
         setFunction(-1,"updateTimers",cUpdateTimers);setFunction(-1,"allTimers",cTimerAll);
@@ -5782,7 +6148,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.10: sparse images + scaled sprite fidelity");
+                 "PogoDate API STEP11.6.11: managed synth voices");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

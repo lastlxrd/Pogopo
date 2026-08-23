@@ -90,6 +90,15 @@ remain in the regression set. This matters because their tilemap, collision,
 Pico-8 font, persistent image layers and timer usage differ from the two games
 above.
 
+### Synth API probe
+
+A one-module Lua `main.pdz` probe covers the startup path that previously failed
+because `playdate.sound.synth` was nil. It creates and copies synths, validates
+the eight waveform constants, plays Hertz, MIDI and named notes, changes
+waveforms and transpose, applies ADSR/volume/parameters, then exercises
+`noteOff()` and `stop()`. The 300-frame run produces four managed tones with
+zero Lua errors. The user's separate game is not redistributed with the test.
+
 ## Currently implemented API areas
 
 - display size, scale, offset, inversion and per-package refresh rate;
@@ -121,6 +130,9 @@ above.
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
+- managed Lua synth voices with sine, square, triangle, noise and sawtooth
+  oscillators; Hertz/MIDI/named-note input; independent note release/stop;
+  volume, transpose and ADSR shaping;
 - package metadata and minimal system-menu hooks.
 
 ## Known limitations
@@ -135,11 +147,12 @@ above.
 - Crank input, networking, microphone and SDK extensions are not emulated by
   this step. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.10.
-- Audio playback supports the package formats and basic controls used by the
-  test set, not every Playdate synth/effect/sequence API. File-player seeking,
-  true streamed decoding and loop subranges are not implemented yet; long PDA
-  music is decoded into PSRAM when started.
+  the device after flashing STEP11.6.11.
+- Oscillator synths are implemented, but Playdate's PO waveforms are currently
+  approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
+  scheduled `when` events, finish callbacks, instruments and sequences are not
+  complete. File-player seeking, true streamed decoding and loop subranges are
+  also not implemented; long PDA music is decoded into PSRAM when started.
 - JSON decode/decodeFile are implemented; JSON encoding is not yet exposed.
 - The ESP32-S3 and Playdate have different CPU, memory and peripheral budgets.
   Passing the host regression is necessary, but final frame time, audio and SD
