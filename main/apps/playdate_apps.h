@@ -44,6 +44,11 @@ private:
     uint32_t lcd_frames_ = 0;
     uint32_t previous_lcd_frames_ = 0;
     bool frame_pending_ = false;
+    uint32_t accelerometer_sequence_ = 0;
+    float accelerometer_x_ = 0.0f;
+    float accelerometer_y_ = 0.0f;
+    float accelerometer_z_ = 1.0f;
+    bool accelerometer_initialized_ = false;
 };
 
 class PogoDateBrowserApp final : public Application {

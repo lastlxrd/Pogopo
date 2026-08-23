@@ -42,12 +42,16 @@ collisions, difficulty changes and game over.
 
 Validated against the supplied 53-module Lua PDX without changing its package
 files. Maze exercises Noble Engine settings and scenes, system and compiled
-fonts, grid views, bundled easing/animation CoreLibs, image-table indexing,
+fonts, the package's exact bundled `CoreLibs/ui/gridview`, bundled
+easing/animation CoreLibs, image-table indexing,
 image masks, vector geometry, sprite collision metadata and accelerometer
-input. A scripted run enters a live level, injects changing accelerometer data
-for 3,000 host ticks and produces 900 logical frames plus 11 audio starts with
-zero Lua errors. The physical BMI270 path is connected to the same runtime API
-and still requires a hardware play test after flashing.
+input. One scripted run opens LEVELS, draws and scrolls its multi-section grid
+for 540 frames; a second enters a live level, injects changing accelerometer
+data for 3,000 host ticks and produces 900 logical frames plus 11 audio starts.
+Both complete with zero Lua errors. Hardware maps the Pogopo-mounted BMI270 to
+Playdate's +X-right/+Y-down/+Z-through-display coordinates with a low-latency
+IIR filter and held-last-good-sample behavior. Directional feel and the game's
+own neutral calibration still require a play test after flashing.
 
 ### Duel Of Shadows
 
@@ -56,7 +60,7 @@ or assets. It exercises JSON and LDtk loading, source-name to compiled-resource
 mapping, a real PFT font, tilemap sprites, timer overloads and callbacks,
 easing, overlap queries, subclass sprite defaults, draw-offset screen shake,
 large sample handling and stereo IMA ADPCM music. A scripted run leaves the
-title, crosses the tutorial portal, renders and plays the boss fight, then
+title, uses the A-button dash to cross the tutorial portal, renders and plays the boss fight, then
 survives the player-death save/return path. It produces 1,800 logical frames
 and 50 audio starts with zero Lua errors. A second synthetic package keeps only
 `main` in `main.pdz` and resolves the remaining modules from separate nested
@@ -88,6 +92,7 @@ above.
   elapsed-time helpers;
 - Playdate date/time conversion forms and cycle-safe table copy helpers;
 - accelerometer start/stop/state/read APIs, fed by Pogopo's BMI270 on hardware;
+- Pogopo START-to-Playdate-A translation while a PDX owns input;
 - sandboxed files and datastore under each package bundle ID;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
@@ -103,8 +108,9 @@ above.
   used by the validated games and returns normal/move/touch metadata. It is not
   yet a complete swept Playdate solver, and bounce fidelity remains limited.
 - Crank input, networking, microphone and SDK extensions are not emulated by
-  this step. Accelerometer input is implemented, but requires hardware
-  validation with the BMI270 orientation used by the enclosure.
+  this step. Accelerometer axes and filtering are implemented for the BMI270
+  orientation used by Pogopo, but still require on-device direction and
+  calibration validation.
 - Audio playback supports the package formats and basic controls used by the
   test set, not every Playdate synth/effect/sequence API. File-player seeking,
   true streamed decoding and loop subranges are not implemented yet; long PDA

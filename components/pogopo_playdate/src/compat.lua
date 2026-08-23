@@ -680,6 +680,13 @@ function Rect:intersects(other)
 	return overlaps(self.x,self.y,self.width,self.height,
 		other.x,other.y,other.width or other.w,other.height or other.h)
 end
+function Rect.fast_intersection(ax, ay, aw, ah, bx, by, bw, bh)
+	local left = math.max(ax, bx)
+	local top = math.max(ay, by)
+	local right = math.min(ax + aw, bx + bw)
+	local bottom = math.min(ay + ah, by + bh)
+	return left, top, math.max(0, right - left), math.max(0, bottom - top)
+end
 
 local Vector2D = {}
 Vector2D.__index = Vector2D

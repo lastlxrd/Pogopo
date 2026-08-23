@@ -678,10 +678,14 @@ struct Runtime::Impl {
                 std::strcmp(requested, "CoreLibs/animation") == 0 ||
                 std::strcmp(requested, "CoreLibs/animator") == 0 ||
                 std::strcmp(requested, "CoreLibs/nineslice") == 0 ||
+                std::strcmp(requested, "CoreLibs/ui") == 0 ||
+                std::strcmp(requested, "CoreLibs/ui/gridview") == 0 ||
                 std::strcmp(requested, "CoreLibs/qrcode") == 0 ||
                 std::strcmp(requested,
                             "CoreLibs/3rdparty/qrencode_panic_mod") == 0;
-            if (!bundled_pure_lua) return true;
+            if (!bundled_pure_lua || !package_mode || !pdz.findLua(requested)) {
+                return true;
+            }
         }
         if (package_mode) {
             PdzArchive* archive = &pdz;
@@ -2801,6 +2805,15 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cGetClipRect(lua_State* state) {
+        const ClipRect& clip = self(state)->clip;
+        lua_pushinteger(state, clip.x);
+        lua_pushinteger(state, clip.y);
+        lua_pushinteger(state, clip.w);
+        lua_pushinteger(state, clip.h);
+        return 4;
+    }
+
     static int cClearClipRect(lua_State* state) {
         Impl* runtime = self(state);
         runtime->clip = {0, 0, runtime->target->width, runtime->target->height};
@@ -4749,6 +4762,7 @@ struct Runtime::Impl {
         setFunction(graphics,"lockFocus",cLockFocus);
         setFunction(graphics,"unlockFocus",cUnlockFocus);
         setFunction(graphics,"setClipRect",cSetClipRect);
+        setFunction(graphics,"getClipRect",cGetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
         setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
         lua_newtable(lua);setFunction(-1,"new",cFontNew);
@@ -4876,7 +4890,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.4: Maze gameplay + Duel boss room");
+                 "PogoDate API STEP11.6.5: bundled Gridview + Playdate-axis BMI270");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;

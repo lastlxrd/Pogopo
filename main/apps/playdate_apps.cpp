@@ -15,6 +15,24 @@ namespace {
 constexpr char TAG[] = "pogodate_app";
 constexpr uint32_t LCD_FRAME_MS = 20;
 
+input::ButtonMask playdateButtons(input::ButtonMask raw) {
+    constexpr input::ButtonMask supported =
+        input::mask(input::Button::Top) |
+        input::mask(input::Button::Down) |
+        input::mask(input::Button::Left) |
+        input::mask(input::Button::Right) |
+        input::mask(input::Button::A) |
+        input::mask(input::Button::B);
+    input::ButtonMask translated = raw & supported;
+    // Pogopo has an extra START key while Playdate games only know A/B.
+    // Treat START as an A alias so title screens that say "Press A" also
+    // behave naturally on Pogopo, without inventing a seventh Playdate bit.
+    if (raw & input::mask(input::Button::Start)) {
+        translated |= input::mask(input::Button::A);
+    }
+    return translated;
+}
+
 bool navigationEvent(const input::Event& event) {
     return event.type == input::EventType::Pressed ||
            event.type == input::EventType::Repeat;
@@ -73,6 +91,11 @@ void PogoDateApp::onEnter(AppContext& context) {
     lcd_frames_ = 0;
     previous_lcd_frames_ = 0;
     frame_pending_ = false;
+    accelerometer_sequence_ = 0;
+    accelerometer_x_ = 0.0f;
+    accelerometer_y_ = 0.0f;
+    accelerometer_z_ = 1.0f;
+    accelerometer_initialized_ = false;
 
     context.audio.stopStream();
     context.audio.stopRealtime();
@@ -133,8 +156,33 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     if (start_error_ != ESP_OK || !runtime_.running()) return;
 
     const imu::Sample motion = context.imu.sample();
-    runtime_.setAccelerometer(motion.ax, motion.ay, motion.az, motion.valid);
-    runtime_.setInput(context.input.heldMask(), queued_pressed_);
+    if (motion.valid && motion.sequence != accelerometer_sequence_) {
+        accelerometer_sequence_ = motion.sequence;
+
+        // BMI270 is mounted with sensor +Y pointing toward the top of the
+        // display. Playdate's public coordinate system uses +Y toward the
+        // bottom, while +X and +Z already match the Pogopo board. A short
+        // one-sample IIR removes 50 Hz sensor chatter without the sluggish
+        // 170 ms visual filtering used by Motion Lab.
+        const float mapped_x = std::clamp(motion.ax, -2.0f, 2.0f);
+        const float mapped_y = std::clamp(-motion.ay, -2.0f, 2.0f);
+        const float mapped_z = std::clamp(motion.az, -2.0f, 2.0f);
+        constexpr float alpha = 0.60f;
+        if (!accelerometer_initialized_) {
+            accelerometer_x_ = mapped_x;
+            accelerometer_y_ = mapped_y;
+            accelerometer_z_ = mapped_z;
+            accelerometer_initialized_ = true;
+        } else {
+            accelerometer_x_ += (mapped_x - accelerometer_x_) * alpha;
+            accelerometer_y_ += (mapped_y - accelerometer_y_) * alpha;
+            accelerometer_z_ += (mapped_z - accelerometer_z_) * alpha;
+        }
+    }
+    runtime_.setAccelerometer(accelerometer_x_, accelerometer_y_,
+                              accelerometer_z_, accelerometer_initialized_);
+    runtime_.setInput(playdateButtons(context.input.heldMask()),
+                      playdateButtons(queued_pressed_));
     const uint32_t produced = runtime_.update(dt_ms);
     if (produced > 0) {
         queued_pressed_ = 0;
@@ -179,7 +227,7 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
             "PERF PD %s lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
             "logic=%luus blit=%luus rows=%u/240 tx=%luB/%luus "
             "luaheap=%lu peak=%lu gc=%lu err=%lu RAM=%lu/%lu PSRAM=%lu "
-            "i2cerr=%lu",
+            "acc=%+.2f,%+.2f,%+.2f i2cerr=%lu",
             displayTitle(), static_cast<unsigned long>(lua_fps),
             static_cast<unsigned long>(lcd_fps),
             static_cast<unsigned long>(stats.requested_fps),
@@ -200,6 +248,9 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
             static_cast<unsigned long>(heap_caps_get_free_size(
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+            static_cast<double>(accelerometer_x_),
+            static_cast<double>(accelerometer_y_),
+            static_cast<double>(accelerometer_z_),
             static_cast<unsigned long>(context.input.readErrors()));
         previous_lua_frames_ = stats.lua_frames;
         previous_lcd_frames_ = lcd_frames_;
