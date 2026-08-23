@@ -5554,6 +5554,154 @@ struct Runtime::Impl {
         return 1;
     }
 
+    static int pushPdzLoadError(lua_State* state, const char* message) {
+        lua_pushnil(state);
+        lua_pushstring(state, message && message[0]
+            ? message : "could not load PDZ file");
+        return 2;
+    }
+
+    int pushPdzFunction(lua_State* state, const char* requested,
+                        int environment_index) {
+        int environment = 0;
+        if (environment_index != 0 &&
+            !lua_isnoneornil(state, environment_index)) {
+            luaL_checktype(state, environment_index, LUA_TTABLE);
+            environment = lua_absindex(state, environment_index);
+        }
+        char relative[192]{};
+        if (!normalizeGamePath(requested, relative, sizeof(relative)) ||
+            !relative[0]) {
+            return pushPdzLoadError(state, "invalid PDZ path");
+        }
+        size_t relative_length = std::strlen(relative);
+        if (relative_length < 4U ||
+            std::strcmp(relative + relative_length - 4U, ".pdz") != 0) {
+            if (relative_length + 4U >= sizeof(relative)) {
+                return pushPdzLoadError(state, "PDZ path is too long");
+            }
+            std::memcpy(relative + relative_length, ".pdz", 5U);
+        }
+
+        struct stat value{};
+        char path[384]{};
+        if (!mergedStat(relative, value, path, sizeof(path)) ||
+            !S_ISREG(value.st_mode)) {
+            return pushPdzLoadError(state, "PDZ file not found");
+        }
+
+        char archive_error[128]{};
+        external_pdz.close();
+        const esp_err_t open_result = external_pdz.open(
+            path, archive_error, sizeof(archive_error), false);
+        if (open_result != ESP_OK) {
+            external_pdz.close();
+            return pushPdzLoadError(state, archive_error);
+        }
+
+        // pdc names a standalone source chunk after the file (data.pdz has a
+        // Lua record named "data").  Accept the only Lua record as a fallback
+        // because generated tools are permitted to choose another chunk name.
+        char module[128]{};
+        const char* basename = std::strrchr(relative, '/');
+        basename = basename ? basename + 1 : relative;
+        const size_t basename_length = std::strlen(basename);
+        const size_t module_length = basename_length >= 4U
+            ? basename_length - 4U : basename_length;
+        if (module_length == 0U || module_length >= sizeof(module)) {
+            external_pdz.close();
+            return pushPdzLoadError(state, "invalid PDZ module name");
+        }
+        std::memcpy(module, basename, module_length);
+        module[module_length] = '\0';
+        const PdzEntry* entry = external_pdz.findLua(module);
+        if (!entry && external_pdz.luaCount() == 1U) {
+            for (size_t index = 0; index < external_pdz.count(); ++index) {
+                const PdzEntry* candidate = external_pdz.entry(index);
+                if (candidate && candidate->type == 1U) {
+                    entry = candidate;
+                    break;
+                }
+            }
+        }
+        if (!entry) {
+            external_pdz.close();
+            return pushPdzLoadError(state, "PDZ has no matching Lua chunk");
+        }
+
+        uint8_t* bytecode = nullptr;
+        size_t bytecode_size = 0;
+        const esp_err_t load_result = external_pdz.load(
+            *entry, bytecode, bytecode_size, archive_error,
+            sizeof(archive_error));
+        if (load_result != ESP_OK) {
+            external_pdz.close();
+            return pushPdzLoadError(state, archive_error);
+        }
+        const bool normalized = normalizePlaydateLuaBytecode(
+            bytecode, bytecode_size, archive_error, sizeof(archive_error));
+        if (!normalized) {
+            heap_caps_free(bytecode);
+            external_pdz.close();
+            return pushPdzLoadError(state, archive_error);
+        }
+
+        const int load_status = luaL_loadbufferx(
+            state, reinterpret_cast<const char*>(bytecode), bytecode_size,
+            relative, "b");
+        heap_caps_free(bytecode);
+        external_pdz.close();
+        if (load_status != LUA_OK) {
+            const char* message = lua_tostring(state, -1);
+            lua_pushnil(state);
+            lua_insert(state, -2);
+            if (!message) {
+                lua_pop(state, 1);
+                lua_pushliteral(state, "invalid Lua bytecode in PDZ");
+            }
+            return 2;
+        }
+
+        if (environment != 0) {
+            const int function_index = lua_absindex(state, -1);
+            lua_pushvalue(state, environment);
+            if (!lua_setupvalue(state, function_index, 1)) {
+                // A valid Lua source chunk normally owns an _ENV upvalue.  If
+                // a generated chunk does not, discard the unused value.
+                lua_pop(state, 1);
+            }
+        }
+        return 1;
+    }
+
+    static int cFileLoad(lua_State* state) {
+        Impl* runtime = self(state);
+        const char* requested = luaL_checkstring(state, 1);
+        return runtime->pushPdzFunction(state, requested, 2);
+    }
+
+    static int cFileRun(lua_State* state) {
+        const int loaded = cFileLoad(state);
+        if (loaded != 1) return loaded;
+        // cFileLoad() leaves the requested path/environment below the loaded
+        // function because it is called directly here rather than through the
+        // Lua VM. Move the function to slot one before executing it so only
+        // values returned by the PDZ chunk are returned to the caller.
+        lua_replace(state, 1);
+        lua_settop(state, 1);
+        if (lua_pcall(state, 0, LUA_MULTRET, 0) != LUA_OK) {
+            const char* message = lua_tostring(state, -1);
+            lua_pushnil(state);
+            lua_insert(state, -2);
+            if (!message) {
+                lua_pop(state, 1);
+                lua_pushliteral(state, "PDZ execution failed");
+            }
+            return 2;
+        }
+        return lua_gettop(state);
+    }
+
     static bool appendDirectory(lua_State* state, const char* path,
                                 bool show_hidden, int result, int seen,
                                 size_t& count) {
@@ -6111,7 +6259,8 @@ struct Runtime::Impl {
         setInteger(file,"kFileRead",0);setInteger(file,"kFileWrite",1);
         setInteger(file,"kFileAppend",2);setInteger(file,"kSeekSet",0);
         setInteger(file,"kSeekFromCurrent",1);setInteger(file,"kSeekFromEnd",2);
-        setFunction(file,"open",cFileOpen);setFunction(file,"listFiles",cFileList);
+        setFunction(file,"open",cFileOpen);setFunction(file,"load",cFileLoad);
+        setFunction(file,"run",cFileRun);setFunction(file,"listFiles",cFileList);
         setFunction(file,"exists",cFileExists);setFunction(file,"isdir",cFileIsDir);
         setFunction(file,"mkdir",cFileMkdir);setFunction(file,"delete",cFileDelete);
         setFunction(file,"getSize",cFileGetSize);setFunction(file,"getType",cFileGetType);
@@ -6231,7 +6380,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.12: complete Lua crank surface");
+                 "PogoDate API STEP11.6.13: external PDZ load + run");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

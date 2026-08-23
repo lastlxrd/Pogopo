@@ -11,7 +11,7 @@ display, controls, audio and SD storage.
 | Package content | Status | Notes |
 | --- | --- | --- |
 | `main.pdz` Lua game | Supported subset | Playdate's Lua opcode order is normalized before stock Lua 5.4 executes it. |
-| separate `.pdz` module | Supported | `import` can open root or nested module archives and satisfy their internal imports. |
+| separate `.pdz` module | Supported | `import` can open root or nested module archives; `playdate.file.load()`/`run()` return or execute standalone PDZ chunks such as Pulp `data.pdz`. |
 | `.pdi` image | Supported | Bitmap, transparent-mask and trimmed-cell data are decoded from the package. |
 | `.pdt` image table | Supported | Frames are decoded on demand and retained by the Lua table cache. |
 | `.pft` font | Supported | Glyph pages, masks, UTF-8 lookup, tracking and kerning are used. |
@@ -110,6 +110,15 @@ handler, then checks dock and undock callbacks. The 300-frame run completes
 with zero Lua errors. Pogopo hardware without a crank module stays at the
 neutral extended/0-degree/no-movement state.
 
+### External PDZ load probe
+
+A two-file synthetic Pulp-style package keeps its runtime in `main.pdz` and a
+returned data table in `data.pdz`. The 200-frame regression validates
+`playdate.file.load("data")`, the explicit `.pdz` suffix, a caller-supplied
+`_ENV`, `playdate.file.run()`, a missing-file `(nil, error)` result and the
+package's authored 20 FPS rate. The supplied `WOOD` hardware log reaches this
+same deferred-load boundary after its one Lua module starts successfully.
+
 ## Currently implemented API areas
 
 - display size, scale, offset, inversion and per-package refresh rate;
@@ -141,6 +150,8 @@ neutral extended/0-degree/no-movement state.
 - Pogopo START-to-Playdate-A translation while a PDX owns input, except for the
   Maze bundle where START must remain independent of result-screen A actions;
 - sandboxed files and datastore under each package bundle ID;
+- deferred standalone PDZ loading/running through `playdate.file.load()` and
+  `playdate.file.run()`, including optional custom `_ENV` tables;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
@@ -154,6 +165,9 @@ neutral extended/0-degree/no-movement state.
 - API coverage is intentionally incomplete. A new Lua game can still stop on
   the first unimplemented Playdate function or on CoreLib behavior beyond this
   compatibility layer.
+- Pulp's runtime can now load its separate `data.pdz`, but a Pulp game can
+  still reveal another unsupported graphics, sound, input or persistence call
+  after that data begins executing.
 - Sprite collision response covers overlap, slide, freeze and basic bounce,
   accepts callback and direct-string response forms, and returns swept
   normal/move/touch metadata. It is not yet a byte-for-byte replacement for
@@ -163,7 +177,7 @@ neutral extended/0-degree/no-movement state.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.12.
+  the device after flashing STEP11.6.13.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not

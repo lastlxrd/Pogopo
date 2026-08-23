@@ -35,6 +35,14 @@ walks records sequentially:
    Playdate's opcode numbering to stock Lua 5.4 numbering.
 6. The normalized bytes are passed to `luaL_loadbufferx(..., "b")`.
 
+Standalone compiled chunks use the same container. Pulp exports its engine in
+`main.pdz` and game data in `data.pdz`; the latter normally contains one Lua
+record named `data`. `playdate.file.load("data")` opens that archive, validates
+and normalizes the record, and returns the Lua function without executing it.
+`playdate.file.run("data")` executes the same function immediately and forwards
+all returned values. A caller-supplied environment table replaces the chunk's
+`_ENV` upvalue, matching the documented Playdate Lua API.
+
 The Celeste bytecode has the normal Lua 5.4 signature and 4-byte instruction,
 integer and number fields. That matches the firmware's `LUA_32BITS` build, but
 the header does not describe the opcode table. Playdate uses a tweaked Lua
