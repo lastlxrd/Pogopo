@@ -2084,7 +2084,23 @@ struct Runtime::Impl {
         }
 
         const uint8_t* glyph = glyphs + glyph_start;
-        const size_t glyph_size = glyph_end - glyph_start;
+        size_t glyph_size = glyph_end - glyph_start;
+
+        // pdc aligns each glyph header to a four-byte boundary in the whole
+        // unpacked PFT, not relative to the beginning of the glyph blob. A
+        // page whose offset table ends at address 2 mod 4 therefore places two
+        // zero padding bytes before every header. Treating those bytes as the
+        // advance/kerning header made valid fonts (including Duel Of Shadows)
+        // resolve to an empty or malformed image cell.
+        const size_t glyph_data_offset = static_cast<size_t>(glyph - data);
+        const size_t header_padding =
+            (4U - (glyph_data_offset & 3U)) & 3U;
+        if (header_padding > glyph_size ||
+            glyph_size - header_padding < 4U) {
+            return false;
+        }
+        glyph += header_padding;
+        glyph_size -= header_padding;
         const size_t short_count = glyph[1];
         const size_t long_count = readLe16(glyph + 2U);
         const size_t short_end = 4U + short_count * 2U;
@@ -2462,6 +2478,25 @@ struct Runtime::Impl {
         runtime->target = restored.target;
         runtime->clip = restored.clip;
         runtime->stencil = restored.stencil;
+        return 0;
+    }
+
+    static int cLockFocus(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(
+            luaL_checkudata(state, 1, kImageMetatable));
+        if (!image || !image->pixels) return 0;
+        runtime->target = image;
+        runtime->clip = {0, 0, image->width, image->height};
+        runtime->stencil = nullptr;
+        return 0;
+    }
+
+    static int cUnlockFocus(lua_State* state) {
+        Impl* runtime = self(state);
+        runtime->target = &runtime->screen;
+        runtime->clip = {0, 0, runtime->screen.width, runtime->screen.height};
+        runtime->stencil = nullptr;
         return 0;
     }
 
@@ -2846,9 +2881,10 @@ struct Runtime::Impl {
             return ok;
         }
 
-        // Formats 4 and 5 are Microsoft-style IMA ADPCM blocks.  Each channel
-        // starts with a 4-byte predictor/index header.  Stereo sample payloads
-        // then alternate four encoded bytes for left and four for right.
+        // Formats 4 and 5 use IMA ADPCM blocks. Each channel starts with a
+        // 4-byte predictor/index header. In Playdate stereo PDA data every
+        // following byte contains the left sample in its high nibble and the
+        // right sample in its low nibble.
         const bool stereo = format == 5U;
         const uint16_t channel_header_bytes = stereo ? 8U : 4U;
         uint8_t block_bytes[2]{};
@@ -2858,8 +2894,7 @@ struct Runtime::Impl {
         }
         const uint16_t block_align = readLe16(block_bytes);
         if (block_align <= channel_header_bytes || block_align > 4096U ||
-            (payload_size - 2U) % block_align != 0U ||
-            (stereo && (block_align - channel_header_bytes) % 8U != 0U)) {
+            (payload_size - 2U) % block_align != 0U) {
             std::fclose(file);
             return false;
         }
@@ -2930,26 +2965,16 @@ struct Runtime::Impl {
                 }
                 continue;
             }
-            for (uint16_t group = 8U; group < block_align; group += 8U) {
-                int16_t decoded[2][8]{};
-                for (int channel = 0; channel < 2; ++channel) {
-                    const uint16_t channel_start = static_cast<uint16_t>(
-                        group + channel * 4U);
-                    int sample_index = 0;
-                    for (uint16_t byte_index = channel_start;
-                         byte_index < channel_start + 4U; ++byte_index) {
-                        for (int shift : {0, 4}) {
-                            const int nibble = (block[byte_index] >> shift) & 0x0F;
-                            decoded[channel][sample_index++] = decodeNibble(
-                                nibble, predictor[channel], step_index[channel]);
-                        }
-                    }
-                }
-                for (int index = 0; index < 8; ++index) {
-                    samples[output++] = static_cast<int16_t>(
-                        (static_cast<int32_t>(decoded[0][index]) +
-                         static_cast<int32_t>(decoded[1][index])) / 2);
-                }
+            for (uint16_t byte_index = 8U; byte_index < block_align;
+                 ++byte_index) {
+                const uint8_t encoded = block[byte_index];
+                const int16_t left = decodeNibble(
+                    (encoded >> 4U) & 0x0FU, predictor[0], step_index[0]);
+                const int16_t right = decodeNibble(
+                    encoded & 0x0FU, predictor[1], step_index[1]);
+                samples[output++] = static_cast<int16_t>(
+                    (static_cast<int32_t>(left) +
+                     static_cast<int32_t>(right)) / 2);
             }
         }
         heap_caps_free(block);
@@ -4248,7 +4273,10 @@ struct Runtime::Impl {
         setFunction(graphics,"setFontFamily",cSetFontFamily);
         setFunction(graphics,"getSystemFont",cGetSystemFont);
         setFunction(graphics,"pushContext",cPushContext);
-        setFunction(graphics,"popContext",cPopContext);setFunction(graphics,"setClipRect",cSetClipRect);
+        setFunction(graphics,"popContext",cPopContext);
+        setFunction(graphics,"lockFocus",cLockFocus);
+        setFunction(graphics,"unlockFocus",cUnlockFocus);
+        setFunction(graphics,"setClipRect",cSetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
         setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
         lua_newtable(lua);setFunction(-1,"new",cFontNew);
@@ -4359,7 +4387,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.1: getSystemFont + getFont + setFontFamily");
+                 "PogoDate API STEP11.6.2: lockFocus + aligned PFT + stereo PDA");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;

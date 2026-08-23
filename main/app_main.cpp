@@ -248,6 +248,7 @@ void os_task(void*) {
     int64_t last_us = esp_timer_get_time();
     uint32_t dt_remainder_us = 0;
     TickType_t wake = xTaskGetTickCount();
+    const TickType_t loop_period = pdMS_TO_TICKS(8);
     uint32_t settings_dirty_ms = 0;
 
     g_app_manager.registerApp(g_launcher_app, true);
@@ -304,7 +305,16 @@ void os_task(void*) {
 
         g_system_state.buttons_port.store(g_input.rawPort());
         g_system_state.buttons_ok.store(g_input.ok());
-        vTaskDelayUntil(&wake, pdMS_TO_TICKS(8));
+        const TickType_t now_tick = xTaskGetTickCount();
+        if (now_tick - wake >= loop_period) {
+            // vTaskDelayUntil() returns immediately forever after a long Lua
+            // frame leaves its wake time behind. Let IDLE0 run so a slow PDX
+            // cannot starve the task watchdog, then restart the schedule.
+            vTaskDelay(1);
+            wake = xTaskGetTickCount();
+        } else {
+            vTaskDelayUntil(&wake, loop_period);
+        }
     }
 }
 
@@ -316,7 +326,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.1 POGODATE NOBLE FONT API");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.2 POGODATE FOCUS AUDIO FONT");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -347,5 +357,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.6.1 ready: general PDX + Noble system-font API");
+    ESP_LOGI(TAG, "STEP11.6.2 ready: lockFocus + aligned PFT + stereo PDA");
 }

@@ -61,7 +61,8 @@ above.
 - display size, scale, offset, inversion and per-package refresh rate;
 - buttons, just-pressed/released state and input-handler stack;
 - images, image tables, PFT fonts, draw modes, patterns, clipping, contexts,
-  primitives, text, system/current-font lookup and rotated/faded drawing;
+  focus locking, primitives, text, system/current-font lookup and
+  rotated/faded drawing;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, visibility, image/center/scale/rotation/clip state,

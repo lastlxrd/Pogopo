@@ -75,6 +75,9 @@ data with maximum glyph width, maximum glyph height, tracking and a 512-page
 presence bitmap. Cumulative page offsets lead to per-page 256-glyph presence
 maps and cumulative glyph offsets. Each glyph stores its advance, short/long
 kerning pairs and a PDI-style bitmap cell with optional transparency mask.
+Glyph headers are aligned to four bytes in the complete unpacked font stream;
+padding at the start of a glyph is therefore calculated from its absolute PFT
+offset rather than from the glyph record alone.
 
 PogoDate resolves UTF-8 codepoints through those packed maps, applies tracking
 and kerning against the next character, restores trimmed cell offsets and
@@ -96,9 +99,9 @@ little-endian 24-bit sample rate and byte 15 identifies the sample format:
   followed by ordinary IMA blocks (predictor, step index, reserved byte,
   low-nibble-first samples);
 - `5`: stereo IMA ADPCM. Each block starts with a four-byte predictor/index
-  header per channel, followed by alternating four-byte left/right nibble
-  groups. PogoDate decodes both channels in sample order and averages them to
-  mono.
+  header per channel. In every following byte, the high nibble advances the
+  left channel and the low nibble advances the right channel. PogoDate decodes
+  both channels in sample order and averages them to mono.
 
 Pogopo's speaker path is mono, so stereo PCM and IMA are averaged to mono while
 decoding. The decoded sample count is capped before allocation and malformed
