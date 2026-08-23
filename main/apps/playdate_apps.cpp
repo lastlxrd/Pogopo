@@ -161,12 +161,14 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
 
         // BMI270 is mounted with sensor +Y pointing toward the top of the
         // display. Playdate's public coordinate system uses +Y toward the
-        // bottom, while +X and +Z already match the Pogopo board. A short
+        // bottom. Pogopo's BMI270 also reports gravity with the opposite Z
+        // sign: a console lying flat on its back reads roughly -1 g, while
+        // Playdate specifies +1 g for that pose. A short
         // one-sample IIR removes 50 Hz sensor chatter without the sluggish
         // 170 ms visual filtering used by Motion Lab.
         const float mapped_x = std::clamp(motion.ax, -2.0f, 2.0f);
         const float mapped_y = std::clamp(-motion.ay, -2.0f, 2.0f);
-        const float mapped_z = std::clamp(motion.az, -2.0f, 2.0f);
+        const float mapped_z = std::clamp(-motion.az, -2.0f, 2.0f);
         constexpr float alpha = 0.60f;
         if (!accelerometer_initialized_) {
             accelerometer_x_ = mapped_x;

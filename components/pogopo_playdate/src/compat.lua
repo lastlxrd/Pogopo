@@ -142,6 +142,8 @@ function Sprite:init(image)
 	self.clipRect = nil
 	self.groups = {}
 	self.collidesWithGroups = {}
+	self.groupMask = 0
+	self.collidesWithGroupsMask = 0
 	self.tag = 0
 	self._sequence = 0
 end
@@ -212,8 +214,42 @@ function Sprite:updatesEnabled() return self._updatesEnabled end
 function Sprite:setImageDrawMode(value) self.imageDrawMode = value end
 function Sprite:setTag(value) self.tag = math.max(0, math.min(255, value or 0)) end
 function Sprite:getTag() return self.tag end
-function Sprite:setGroups(value) self.groups = value or {} end
-function Sprite:setCollidesWithGroups(value) self.collidesWithGroups = value or {} end
+local function maskFromGroups(value)
+	if value == nil then return 0 end
+	if type(value) == "number" then
+		local group = math.floor(value)
+		if group < 1 or group > 32 then return 0 end
+		return 1 << (group - 1)
+	end
+	local mask = 0
+	for i=1,#value do
+		local group = math.floor(value[i] or 0)
+		if group >= 1 and group <= 32 then
+			mask = mask | (1 << (group - 1))
+		end
+	end
+	return mask
+end
+function Sprite:setGroups(value)
+	self.groups = value or {}
+	self.groupMask = maskFromGroups(value)
+end
+function Sprite:setCollidesWithGroups(value)
+	self.collidesWithGroups = value or {}
+	self.collidesWithGroupsMask = maskFromGroups(value)
+end
+function Sprite:setGroupMask(mask) self.groupMask = math.tointeger(mask) or 0 end
+function Sprite:getGroupMask() return self.groupMask or 0 end
+function Sprite:resetGroupMask() self.groupMask, self.groups = 0, {} end
+function Sprite:setCollidesWithGroupsMask(mask)
+	self.collidesWithGroupsMask = math.tointeger(mask) or 0
+end
+function Sprite:getCollidesWithGroupsMask()
+	return self.collidesWithGroupsMask or 0
+end
+function Sprite:resetCollidesWithGroupsMask()
+	self.collidesWithGroupsMask, self.collidesWithGroups = 0, {}
+end
 function Sprite:setCollisionsEnabled(value) self._collisionsEnabled = value == true end
 function Sprite:collisionsEnabled() return self._collisionsEnabled end
 
@@ -257,6 +293,10 @@ function Sprite:add()
 	if self.rotation == nil then self.rotation = 0 end
 	if self.groups == nil then self.groups = {} end
 	if self.collidesWithGroups == nil then self.collidesWithGroups = {} end
+	if self.groupMask == nil then self.groupMask = maskFromGroups(self.groups) end
+	if self.collidesWithGroupsMask == nil then
+		self.collidesWithGroupsMask = maskFromGroups(self.collidesWithGroups)
+	end
 	self.added = true
 	if not self._listed then
 		sprite_sequence = sprite_sequence + 1
@@ -386,40 +426,19 @@ local function overlaps(ax, ay, aw, ah, bx, by, bw, bh)
 	return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 end
 
-local function hasGroup(groups, wanted)
-	if groups == nil then return false end
-	if type(groups) == "number" then return groups == wanted end
-	for i=1,#groups do if groups[i] == wanted then return true end end
-	return false
-end
-
-local function groupsEmpty(groups)
-	return groups == nil or (type(groups) == "table" and #groups == 0)
-end
-
 local function groupsAllow(left, right)
-	if groupsEmpty(left.collidesWithGroups) and groupsEmpty(right.collidesWithGroups) then
-		return true
-	end
-	if type(right.groups) == "number" then
-		if hasGroup(left.collidesWithGroups, right.groups) then return true end
-	else
-		for i=1,#right.groups do
-			if hasGroup(left.collidesWithGroups, right.groups[i]) then return true end
-		end
-	end
-	if type(left.groups) == "number" then
-		if hasGroup(right.collidesWithGroups, left.groups) then return true end
-	else
-		for i=1,#left.groups do
-			if hasGroup(right.collidesWithGroups, left.groups[i]) then return true end
-		end
-	end
-	return false
+	local collides = left.collidesWithGroupsMask
+	if collides == nil then collides = maskFromGroups(left.collidesWithGroups) end
+	local groups = right.groupMask
+	if groups == nil then groups = maskFromGroups(right.groups) end
+	return (collides == 0 and groups == 0) or ((collides & groups) ~= 0)
 end
 
 function Sprite:checkCollisions(goalX, goalY)
 	local previousX, previousY = self.x, self.y
+	if not self.added or not self._collisionsEnabled or not self.collideRect then
+		return goalX, goalY, {}, 0
+	end
 	self.x, self.y = goalX, goalY
 	local sx, sy, sw, sh = spriteBounds(self)
 	local collisions = {}
@@ -477,7 +496,7 @@ function Sprite:moveWithCollisions(goalX, goalY)
 			else normalY = 1 end
 		end
 		local response = self.collisionResponse and
-			self:collisionResponse(collision.other) or Sprite.kCollisionTypeSlide
+			self:collisionResponse(collision.other) or Sprite.kCollisionTypeFreeze
 		collision.normal = {x=normalX, y=normalY, dx=normalX, dy=normalY}
 		collision.move = {x=moveX, y=moveY}
 		collision.touch = {x=actualX, y=actualY}
@@ -533,7 +552,7 @@ function Sprite.querySpritesInRect(x, y, width, height)
 			if cell then
 				for i=1,#cell do
 					local item = cell[i]
-					if item.added and item._collisionsEnabled and
+					if item.added and item.collideRect and
 						item._query_stamp ~= stamp then
 						local sx, sy, sw, sh = spriteBounds(item)
 						if overlaps(x,y,width,height,sx,sy,sw,sh) then
@@ -547,7 +566,7 @@ function Sprite.querySpritesInRect(x, y, width, height)
 	end
 	for i=1,#collision_sprites do
 		local item = collision_sprites[i]
-		if item.added and item._collisionsEnabled and item._query_stamp ~= stamp then
+		if item.added and item.collideRect and item._query_stamp ~= stamp then
 			local sx, sy, sw, sh = spriteBounds(item)
 			if overlaps(x,y,width,height,sx,sy,sw,sh) then
 				item._query_stamp = stamp
@@ -567,7 +586,7 @@ function Sprite:overlappingSprites()
 	local result = {}
 	for i=1,#candidates do
 		local other = candidates[i]
-		if other ~= self and other.added and other._collisionsEnabled and
+		if other ~= self and other.added and
 			other.collideRect and groupsAllow(self, other) then
 			local ox, oy, ow, oh = spriteBounds(other)
 			if overlaps(x, y, width, height, ox, oy, ow, oh) then
@@ -587,8 +606,7 @@ function Sprite.allOverlappingSprites()
 			for j=1,#overlapping do
 				local right = overlapping[j]
 				if (left._sequence or 0) < (right._sequence or 0) then
-					result[#result + 1] = left
-					result[#result + 1] = right
+					result[#result + 1] = {left, right}
 				end
 			end
 		end

@@ -44,14 +44,14 @@ Validated against the supplied 53-module Lua PDX without changing its package
 files. Maze exercises Noble Engine settings and scenes, system and compiled
 fonts, the package's exact bundled `CoreLibs/ui/gridview`, bundled
 easing/animation CoreLibs, image-table indexing,
-image masks, vector geometry, sprite collision metadata and accelerometer
-input. One scripted run opens LEVELS, draws and scrolls its multi-section grid
-for 540 frames; a second enters a live level, injects changing accelerometer
-data for 3,000 host ticks and produces 900 logical frames plus 11 audio starts.
-Both complete with zero Lua errors. Hardware maps the Pogopo-mounted BMI270 to
-Playdate's +X-right/+Y-down/+Z-through-display coordinates with a low-latency
-IIR filter and held-last-good-sample behavior. Directional feel and the game's
-own neutral calibration still require a play test after flashing.
+image scaling and draw modes, image masks, vector geometry, sprite collision
+metadata and accelerometer input. One scripted run opens LEVELS and scrolls
+its multi-section grid for 540 frames; a second drives a live level for 900
+frames; a third drops the ball into a hole and runs through `LevelComplete`
+for 780 frames. All complete with zero Lua errors. Hardware maps the
+Pogopo-mounted BMI270 to Playdate's +X-right/+Y-down/+Z-through-display
+coordinates with a low-latency IIR filter and held-last-good-sample behavior.
+Maze's saved neutral calibration must be recreated after flashing STEP11.6.6.
 
 ### Duel Of Shadows
 
@@ -60,9 +60,12 @@ or assets. It exercises JSON and LDtk loading, source-name to compiled-resource
 mapping, a real PFT font, tilemap sprites, timer overloads and callbacks,
 easing, overlap queries, subclass sprite defaults, draw-offset screen shake,
 large sample handling and stereo IMA ADPCM music. A scripted run leaves the
-title, uses the A-button dash to cross the tutorial portal, renders and plays the boss fight, then
-survives the player-death save/return path. It produces 1,800 logical frames
-and 50 audio starts with zero Lua errors. A second synthetic package keeps only
+title, uses the A-button dash to cross the tutorial portal, renders and plays
+the boss fight, then survives the player-death save/return path. Sprite area
+queries detect added sprites geometrically even while a game has disabled
+their physical collision response, which is how the dash portal senses the
+player. The long run produces 1,800 logical frames and 56 audio starts with
+zero Lua errors. A second synthetic package keeps only
 `main` in `main.pdz` and resolves the remaining modules from separate nested
 `.pdz` archives, verifying that path independently.
 
@@ -77,15 +80,17 @@ above.
 
 - display size, scale, offset, inversion and per-package refresh rate;
 - buttons, just-pressed/released state and input-handler stack;
-- images, image tables with `table[index]` access, image masks, PFT fonts, draw
-  modes, bitmap and ordered-dither patterns, clipping, contexts, focus
+- images with fractional drawing and generated scaling, image tables with
+  `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
+  draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
   locking, primitives, text,
   system/current-font lookup and rotated/faded drawing;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, subclass defaults, visibility, image/center/scale/rotation/
-  clip state, object `isa()`, overlap queries, collision normals, group
-  filters, tilemap-backed sprites and tilemap walls;
+  clip state, object `isa()`, geometric area/overlap queries, collision
+  normals, group and collides-with bitmasks, tilemap-backed sprites and tilemap
+  walls;
 - display offset and graphics draw offset, including draw-offset screen shake;
 - callback/value millisecond timers; callback/value frame timers with easing,
   repeats and reverses; bundled easing, animation and animator CoreLibs plus
@@ -108,9 +113,9 @@ above.
   used by the validated games and returns normal/move/touch metadata. It is not
   yet a complete swept Playdate solver, and bounce fidelity remains limited.
 - Crank input, networking, microphone and SDK extensions are not emulated by
-  this step. Accelerometer axes and filtering are implemented for the BMI270
-  orientation used by Pogopo, but still require on-device direction and
-  calibration validation.
+  this step. Accelerometer axes and filtering are implemented for Pogopo's
+  BMI270 orientation, but Maze's saved neutral point must be recalibrated on
+  the device after the Z-axis correction.
 - Audio playback supports the package formats and basic controls used by the
   test set, not every Playdate synth/effect/sequence API. File-player seeking,
   true streamed decoding and loop subranges are not implemented yet; long PDA

@@ -67,10 +67,13 @@ enum PlaydateColor : lua_Integer {
 
 enum DrawMode : int {
     Copy = 0,
-    FillWhite = 1,
-    FillBlack = 2,
-    Inverted = 3,
-    Nxor = 4,
+    WhiteTransparent = 1,
+    BlackTransparent = 2,
+    FillWhite = 3,
+    FillBlack = 4,
+    DrawXor = 5,
+    Nxor = 6,
+    Inverted = 7,
 };
 
 enum Flip : int {
@@ -978,9 +981,20 @@ struct Runtime::Impl {
             return targetPixel(destination_x, destination_y) == Black
                 ? White : Black;
         }
+        if (draw_mode == WhiteTransparent) {
+            return source == White ? static_cast<uint8_t>(Clear) : source;
+        }
+        if (draw_mode == BlackTransparent) {
+            return source == Black ? static_cast<uint8_t>(Clear) : source;
+        }
         if (draw_mode == FillWhite) return White;
         if (draw_mode == FillBlack) return Black;
         if (draw_mode == Inverted) return source == Black ? White : Black;
+        if (draw_mode == DrawXor) {
+            if (source != White) return Clear;
+            return targetPixel(destination_x, destination_y) == Black
+                ? White : Black;
+        }
         if (draw_mode == Nxor) {
             if (source != Black) return Clear;
             return targetPixel(destination_x, destination_y) == Black ? White : Black;
@@ -1014,7 +1028,10 @@ struct Runtime::Impl {
         // instead of routing every pixel through the generic scaled path.
         if (scale == 1 && fade >= 0.999f && image.pixels && !image.inverted &&
             !image.mask &&
-            !stencil && draw_mode != Nxor && target && target->pixels) {
+            !stencil &&
+            (draw_mode == Copy || draw_mode == FillWhite ||
+             draw_mode == FillBlack || draw_mode == Inverted) &&
+            target && target->pixels) {
             const int start_x = std::max(0, std::max(clip.x - x, -x));
             const int start_y = std::max(0, std::max(clip.y - y, -y));
             const int end_x = std::min(image.width,
@@ -1098,6 +1115,50 @@ struct Runtime::Impl {
                         putLogicalPixel(x + sx * scale + dx,
                                         y + sy * scale + dy, value);
                     }
+                }
+            }
+        }
+    }
+
+    static int scaledExtent(int source_extent, float scale) {
+        if (source_extent <= 0 || !std::isfinite(scale) || scale < 0.0f) {
+            return 0;
+        }
+        // A positive scale smaller than one source pixel still produces a
+        // valid one-pixel image.  Maze animates its marble all the way down
+        // to zero while falling into a hole and expects scaledImage() to keep
+        // returning an image until the animator reports that it has ended.
+        return std::clamp(static_cast<int>(std::lround(
+            static_cast<float>(source_extent) * scale)), 1, 1024);
+    }
+
+    uint8_t scaledImagePixel(const Image& image, int destination_x,
+                             int destination_y, int destination_width,
+                             int destination_height) const {
+        const int source_x = std::min(image.width - 1,
+            (destination_x * image.width) / destination_width);
+        const int source_y = std::min(image.height - 1,
+            (destination_y * image.height) / destination_height);
+        if (image.mask && imagePixel(*image.mask, source_x, source_y) != White) {
+            return Clear;
+        }
+        return imagePixel(image, source_x, source_y);
+    }
+
+    void drawImageScaled(const Image& image, int x, int y,
+                         float scale_x, float scale_y) {
+        const int destination_width = scaledExtent(image.width, scale_x);
+        const int destination_height = scaledExtent(image.height, scale_y);
+        if (destination_width <= 0 || destination_height <= 0) return;
+        for (int destination_y = 0; destination_y < destination_height;
+             ++destination_y) {
+            for (int destination_x = 0; destination_x < destination_width;
+                 ++destination_x) {
+                const uint8_t value = scaledImagePixel(
+                    image, destination_x, destination_y,
+                    destination_width, destination_height);
+                if (value != Clear) {
+                    putLogicalPixel(x + destination_x, y + destination_y, value);
                 }
             }
         }
@@ -1645,9 +1706,41 @@ struct Runtime::Impl {
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         const int x = static_cast<int>(luaL_checknumber(state, 2));
         const int y = static_cast<int>(luaL_checknumber(state, 3));
-        const int scale = std::max(1, static_cast<int>(std::lround(luaL_checknumber(state, 4))));
-        if (image) runtime->drawImage(*image, x, y, Unflipped, scale);
+        const float scale_x = static_cast<float>(luaL_checknumber(state, 4));
+        const float scale_y = static_cast<float>(luaL_optnumber(
+            state, 5, scale_x));
+        if (image) runtime->drawImageScaled(*image, x, y, scale_x, scale_y);
         return 0;
+    }
+
+    static int cImageScaledImage(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* source = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        const float scale_x = static_cast<float>(luaL_checknumber(state, 2));
+        const float scale_y = static_cast<float>(luaL_optnumber(
+            state, 3, scale_x));
+        if (!source) {
+            lua_pushnil(state);
+            return 1;
+        }
+        const int destination_width = scaledExtent(source->width, scale_x);
+        const int destination_height = scaledExtent(source->height, scale_y);
+        if (destination_width <= 0 || destination_height <= 0) {
+            lua_pushnil(state);
+            return 1;
+        }
+        Image* scaled = runtime->pushDynamicImage(
+            destination_width, destination_height, Clear);
+        if (!scaled) return 1;
+        for (int y = 0; y < destination_height; ++y) {
+            for (int x = 0; x < destination_width; ++x) {
+                scaled->pixels[static_cast<size_t>(y) * scaled->stride + x] =
+                    runtime->scaledImagePixel(*source, x, y,
+                        destination_width, destination_height);
+            }
+        }
+        return 1;
     }
 
     static int cImageDrawRotated(lua_State* state) {
@@ -1709,6 +1802,67 @@ struct Runtime::Impl {
         return 2;
     }
 
+    static int cImageSample(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        const int x = static_cast<int>(luaL_checkinteger(state, 2));
+        const int y = static_cast<int>(luaL_checkinteger(state, 3));
+        uint8_t pixel = image ? runtime->imagePixel(*image, x, y)
+                              : static_cast<uint8_t>(Clear);
+        if (image && image->mask &&
+            runtime->imagePixel(*image->mask, x, y) != White) {
+            pixel = Clear;
+        }
+        lua_pushinteger(state, pixel == Black ? PdColorBlack :
+            (pixel == White ? PdColorWhite : PdColorClear));
+        return 1;
+    }
+
+    static int cImageAddMask(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        if (!image || image->mask) return 0;
+        const bool opaque = lua_isnoneornil(state, 2) ||
+            lua_toboolean(state, 2) != 0;
+        Image* mask = runtime->pushDynamicImage(
+            image->width, image->height, opaque ? White : Black);
+        if (!mask) return 0;
+        image->mask = mask;
+        lua_pushvalue(state, -1);
+        lua_setiuservalue(state, 1, 1);
+        return 0;
+    }
+
+    static int cImageRemoveMask(lua_State* state) {
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        if (image) image->mask = nullptr;
+        lua_pushnil(state);
+        lua_setiuservalue(state, 1, 1);
+        return 0;
+    }
+
+    static int cImageHasMask(lua_State* state) {
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        lua_pushboolean(state, image && image->mask);
+        return 1;
+    }
+
+    static int cImageClearMask(lua_State* state) {
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, 1, kImageMetatable));
+        const bool opaque = lua_isnoneornil(state, 2) ||
+            lua_toboolean(state, 2) != 0;
+        if (image && image->mask && image->mask->pixels) {
+            std::memset(image->mask->pixels, opaque ? White : Black,
+                static_cast<size_t>(image->mask->stride) * image->mask->height);
+        }
+        return 0;
+    }
+
     static int cImageClear(lua_State* state) {
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         const uint8_t color = checkPlaydateColor(state, 2, Clear);
@@ -1739,8 +1893,12 @@ struct Runtime::Impl {
         if (!source) { lua_pushnil(state); return 1; }
         Image* copy = runtime->pushDynamicImage(source->width, source->height, Clear);
         if (!copy) return 1;
-        for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x)
-            copy->pixels[y * copy->stride + x] = runtime->imagePixel(*source, x, y);
+        for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x) {
+            copy->pixels[y * copy->stride + x] = source->mask &&
+                runtime->imagePixel(*source->mask, x, y) != White
+                ? static_cast<uint8_t>(Clear)
+                : runtime->imagePixel(*source, x, y);
+        }
         return 1;
     }
 
@@ -1752,8 +1910,10 @@ struct Runtime::Impl {
         if (!copy) return 1;
         for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x) {
             const uint8_t value = runtime->imagePixel(*source, x, y);
-            copy->pixels[y * copy->stride + x] = value == Black ? White :
-                (value == White ? Black : Clear);
+            copy->pixels[y * copy->stride + x] = source->mask &&
+                runtime->imagePixel(*source->mask, x, y) != White
+                ? Clear : (value == Black ? White :
+                    (value == White ? Black : Clear));
         }
         return 1;
     }
@@ -1769,7 +1929,10 @@ struct Runtime::Impl {
         const int threshold = std::clamp(static_cast<int>(alpha * 16.0f), 0, 16);
         for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x) {
             if (bayer[(y & 3) * 4 + (x & 3)] < threshold)
-                copy->pixels[y * copy->stride + x] = runtime->imagePixel(*source, x, y);
+                copy->pixels[y * copy->stride + x] = source->mask &&
+                    runtime->imagePixel(*source->mask, x, y) != White
+                    ? static_cast<uint8_t>(Clear)
+                    : runtime->imagePixel(*source, x, y);
         }
         return 1;
     }
@@ -1842,6 +2005,40 @@ struct Runtime::Impl {
         lua_rawseti(state, -3, index);
         lua_remove(state, -2);
         return 1;
+    }
+
+    static int cImageTableDrawImage(lua_State* state) {
+        Impl* runtime = self(state);
+        const int x = static_cast<int>(luaL_checknumber(state, 3));
+        const int y = static_cast<int>(luaL_checknumber(state, 4));
+        const int flip = static_cast<int>(luaL_optinteger(
+            state, 5, Unflipped));
+        cImageTableGetImage(state);
+        auto* image = static_cast<Image*>(luaL_testudata(
+            state, -1, kImageMetatable));
+        if (image) runtime->drawImage(*image, x, y, flip);
+        return 0;
+    }
+
+    static int cImageTableGetLength(lua_State* state) {
+        auto* table = static_cast<ImageTable*>(luaL_checkudata(
+            state, 1, kImageTableMetatable));
+        const int count = table ? (table->asset
+            ? table->asset->frame_count : table->frame_count) : 0;
+        lua_pushinteger(state, count);
+        return 1;
+    }
+
+    static int cImageTableGetSize(lua_State* state) {
+        auto* table = static_cast<ImageTable*>(luaL_checkudata(
+            state, 1, kImageTableMetatable));
+        const int count = table ? (table->asset
+            ? table->asset->frame_count : table->frame_count) : 0;
+        // Sequential tables are the form supported by the current PDX
+        // decoder.  Report their documented one-row cell layout.
+        lua_pushinteger(state, count);
+        lua_pushinteger(state, count > 0 ? 1 : 0);
+        return 2;
     }
 
     static int cImageTableIndex(lua_State* state) {
@@ -2031,7 +2228,27 @@ struct Runtime::Impl {
     }
 
     static int cSetDrawMode(lua_State* state) {
-        self(state)->draw_mode = static_cast<int>(luaL_checkinteger(state, 1));
+        int mode = Copy;
+        if (lua_type(state, 1) == LUA_TSTRING) {
+            const char* value = lua_tostring(state, 1);
+            if (std::strcmp(value, "copy") == 0) mode = Copy;
+            else if (std::strcmp(value, "whiteTransparent") == 0)
+                mode = WhiteTransparent;
+            else if (std::strcmp(value, "blackTransparent") == 0)
+                mode = BlackTransparent;
+            else if (std::strcmp(value, "fillWhite") == 0) mode = FillWhite;
+            else if (std::strcmp(value, "fillBlack") == 0) mode = FillBlack;
+            else if (std::strcmp(value, "XOR") == 0) mode = DrawXor;
+            else if (std::strcmp(value, "NXOR") == 0) mode = Nxor;
+            else if (std::strcmp(value, "inverted") == 0) mode = Inverted;
+            else return luaL_argerror(state, 1, "unknown image draw mode");
+        } else {
+            mode = static_cast<int>(luaL_checkinteger(state, 1));
+            if (mode < Copy || mode > Inverted) {
+                return luaL_argerror(state, 1, "invalid image draw mode");
+            }
+        }
+        self(state)->draw_mode = mode;
         return 0;
     }
 
@@ -4625,10 +4842,16 @@ struct Runtime::Impl {
             setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawCentered",cImageDrawCentered);
             setFunction(-1,"drawIgnoringOffset",cImageDrawIgnoringOffset);
             setFunction(-1,"drawScaled",cImageDrawScaled);
+            setFunction(-1,"scaledImage",cImageScaledImage);
             setFunction(-1,"drawRotated",cImageDrawRotated);
             setFunction(-1,"drawFaded",cImageDrawFaded);setFunction(-1,"getSize",cImageGetSize);
+            setFunction(-1,"sample",cImageSample);
             setFunction(-1,"setMaskImage",cImageSetMaskImage);
             setFunction(-1,"getMaskImage",cImageGetMaskImage);
+            setFunction(-1,"addMask",cImageAddMask);
+            setFunction(-1,"removeMask",cImageRemoveMask);
+            setFunction(-1,"hasMask",cImageHasMask);
+            setFunction(-1,"clearMask",cImageClearMask);
             setFunction(-1,"clear",cImageClear);setFunction(-1,"copy",cImageCopy);
             setFunction(-1,"setInverted",cImageSetInverted);
             setFunction(-1,"invertedImage",cImageInverted);setFunction(-1,"fadedImage",cImageFaded);
@@ -4636,6 +4859,9 @@ struct Runtime::Impl {
         if(luaL_newmetatable(lua,kImageTableMetatable)){
             pushFunction(cImageTableIndex);lua_setfield(lua,-2,"__index");
             setFunction(-1,"getImage",cImageTableGetImage);
+            setFunction(-1,"drawImage",cImageTableDrawImage);
+            setFunction(-1,"getLength",cImageTableGetLength);
+            setFunction(-1,"getSize",cImageTableGetSize);
             pushFunction(cImageTableLen);lua_setfield(lua,-2,"__len");
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kSoundMetatable)){
@@ -4729,9 +4955,15 @@ struct Runtime::Impl {
         setInteger(graphics,"kColorWhite",PdColorWhite);
         setInteger(graphics,"kColorClear",PdColorClear);
         setInteger(graphics,"kColorXOR",PdColorXor);
-        setInteger(graphics,"kDrawModeCopy",Copy);setInteger(graphics,"kDrawModeFillWhite",FillWhite);
-        setInteger(graphics,"kDrawModeFillBlack",FillBlack);setInteger(graphics,"kDrawModeInverted",Inverted);
-        setInteger(graphics,"kDrawModeNXOR",Nxor);setInteger(graphics,"kImageUnflipped",Unflipped);
+        setInteger(graphics,"kDrawModeCopy",Copy);
+        setInteger(graphics,"kDrawModeWhiteTransparent",WhiteTransparent);
+        setInteger(graphics,"kDrawModeBlackTransparent",BlackTransparent);
+        setInteger(graphics,"kDrawModeFillWhite",FillWhite);
+        setInteger(graphics,"kDrawModeFillBlack",FillBlack);
+        setInteger(graphics,"kDrawModeXOR",DrawXor);
+        setInteger(graphics,"kDrawModeNXOR",Nxor);
+        setInteger(graphics,"kDrawModeInverted",Inverted);
+        setInteger(graphics,"kImageUnflipped",Unflipped);
         setInteger(graphics,"kImageFlippedX",FlippedX);setInteger(graphics,"kImageFlippedY",FlippedY);
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
@@ -4890,7 +5122,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.5: bundled Gridview + Playdate-axis BMI270");
+                 "PogoDate API STEP11.6.6: scaled images + full draw modes + overlap masks");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
