@@ -566,7 +566,11 @@ struct Runtime::Impl {
         size_t capacity = 0;
         bool in_use = false;
     };
-    static constexpr size_t kLargeImageThreshold = 64U * 1024U;
+    // Maze's LevelComplete animation creates a fresh 324x137 (44,388-byte)
+    // render target every frame. The previous 64 KiB cutoff missed it, so the
+    // buffer lived inside Lua userdata and repeatedly forced long collections
+    // on ESP32-S3. Pool render targets from 32 KiB upward in PSRAM instead.
+    static constexpr size_t kLargeImageThreshold = 32U * 1024U;
     std::array<LargeImageSlot, 6> large_image_pool{};
 
     size_t allocated_bytes = 0;
@@ -5363,7 +5367,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.8: stable input + pooled frames + native tilemaps");
+                 "PogoDate API STEP11.6.9: Maze input + 32K frame pool");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

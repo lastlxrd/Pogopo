@@ -15,7 +15,8 @@ namespace {
 constexpr char TAG[] = "pogodate_app";
 constexpr uint32_t LCD_FRAME_MS = 20;
 
-input::ButtonMask playdateButtons(input::ButtonMask raw) {
+constexpr input::ButtonMask playdateButtons(input::ButtonMask raw,
+                                            bool swap_horizontal) {
     constexpr input::ButtonMask supported =
         input::mask(input::Button::Top) |
         input::mask(input::Button::Down) |
@@ -24,6 +25,22 @@ input::ButtonMask playdateButtons(input::ButtonMask raw) {
         input::mask(input::Button::A) |
         input::mask(input::Button::B);
     input::ButtonMask translated = raw & supported;
+    // Maze 1.1.0's horizontal menu handlers are reversed on Pogopo even
+    // though the shared physical mapping is correct for the other PDX games.
+    // Keep this compatibility quirk package-scoped: the STEP11.6.7 global
+    // swap mirrored every game's controls.
+    if (swap_horizontal) {
+        constexpr input::ButtonMask left = input::mask(input::Button::Left);
+        constexpr input::ButtonMask right = input::mask(input::Button::Right);
+        translated = static_cast<input::ButtonMask>(
+            translated & ~(left | right));
+        if (raw & left) {
+            translated = static_cast<input::ButtonMask>(translated | right);
+        }
+        if (raw & right) {
+            translated = static_cast<input::ButtonMask>(translated | left);
+        }
+    }
     // Pogopo has an extra START key while Playdate games only know A/B.
     // Treat START as an A alias so title screens that say "Press A" also
     // behave naturally on Pogopo, without inventing a seventh Playdate bit.
@@ -32,6 +49,15 @@ input::ButtonMask playdateButtons(input::ButtonMask raw) {
     }
     return translated;
 }
+
+static_assert(playdateButtons(input::mask(input::Button::Left), false) ==
+              input::mask(input::Button::Left));
+static_assert(playdateButtons(input::mask(input::Button::Right), false) ==
+              input::mask(input::Button::Right));
+static_assert(playdateButtons(input::mask(input::Button::Left), true) ==
+              input::mask(input::Button::Right));
+static_assert(playdateButtons(input::mask(input::Button::Right), true) ==
+              input::mask(input::Button::Left));
 
 bool navigationEvent(const input::Event& event) {
     return event.type == input::EventType::Pressed ||
@@ -155,6 +181,9 @@ void PogoDateApp::onEvent(AppContext& context, const input::Event& event) {
 void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     if (start_error_ != ESP_OK || !runtime_.running()) return;
 
+    const bool maze_package =
+        std::strcmp(package_.bundle_id, "de.WuffderHundeheld.Maze") == 0;
+
     const imu::Sample motion = context.imu.sample();
     if (motion.valid && motion.sequence != accelerometer_sequence_) {
         accelerometer_sequence_ = motion.sequence;
@@ -170,7 +199,12 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         // on one title's observed direction, but that global experiment
         // inverted motion for every PDX and invalidated existing calibration.
         const float mapped_x = std::clamp(motion.ax, -2.0f, 2.0f);
-        const float mapped_y = std::clamp(-motion.ay, -2.0f, 2.0f);
+        // Maze interprets its pitch in the opposite direction from the other
+        // validated packages. Correct only its Y input so lowering the bottom
+        // edge rolls the marble down without changing Godspeed, Duel, Celeste
+        // or future PDX controls.
+        const float mapped_y = std::clamp(
+            maze_package ? motion.ay : -motion.ay, -2.0f, 2.0f);
         const float mapped_z = std::clamp(-motion.az, -2.0f, 2.0f);
         constexpr float alpha = 0.60f;
         if (!accelerometer_initialized_) {
@@ -186,8 +220,8 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     }
     runtime_.setAccelerometer(accelerometer_x_, accelerometer_y_,
                               accelerometer_z_, accelerometer_initialized_);
-    runtime_.setInput(playdateButtons(context.input.heldMask()),
-                      playdateButtons(queued_pressed_));
+    runtime_.setInput(playdateButtons(context.input.heldMask(), maze_package),
+                      playdateButtons(queued_pressed_, maze_package));
     const uint32_t produced = runtime_.update(dt_ms);
     if (produced > 0) {
         queued_pressed_ = 0;

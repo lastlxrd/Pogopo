@@ -51,12 +51,12 @@ frames; a third drops the ball into a hole and runs through `LevelComplete`
 for 780 frames. All complete with zero Lua errors. Hardware maps the
 Pogopo-mounted BMI270 to Playdate's +X-right/+Y-down/+Z-through-display
 coordinates with a low-latency IIR filter and held-last-good-sample behavior.
-Physical left/right buttons use the common Pogopo mapping without a
-title-specific or global mirror. The BMI270 uses the established Pogopo board
-transform, and Maze's saved neutral calibration must be recreated after
-flashing STEP11.6.8. Its 400x240 completion frames use a
-reusable large-image pool, and the scripted result-screen button returns to
-the menu without an error.
+Physical left/right buttons use the common Pogopo mapping. Maze 1.1.0 has a
+bundle-scoped horizontal-menu quirk and a bundle-scoped accelerometer Y
+correction; neither changes any other PDX. Maze's saved neutral calibration
+must be recreated after flashing STEP11.6.9. Its 324x137 completion render
+targets use the reusable PSRAM image pool, and the scripted result-screen
+button returns to the menu without an error.
 
 ### Duel Of Shadows
 
@@ -85,7 +85,8 @@ above.
 
 - display size, scale, offset, inversion and per-package refresh rate;
 - buttons, just-pressed/released state and input-handler stack, using the
-  same physical left/right mapping as PogopoOS;
+  same physical left/right mapping as PogopoOS plus a bundle-scoped Maze
+  menu-direction quirk;
 - images with fractional drawing and generated scaling, image tables with
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
@@ -122,7 +123,7 @@ above.
 - Crank input, networking, microphone and SDK extensions are not emulated by
   this step. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.8.
+  the device after flashing STEP11.6.9.
 - Audio playback supports the package formats and basic controls used by the
   test set, not every Playdate synth/effect/sequence API. File-player seeking,
   true streamed decoding and loop subranges are not implemented yet; long PDA
