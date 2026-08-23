@@ -129,6 +129,7 @@ function Sprite:init(image)
 	self.x, self.y = 0, 0
 	self.centerX, self.centerY = 0.5, 0.5
 	self.width, self.height = 0, 0
+	self._sizeExplicit = false
 	if image then self.width, self.height = image:getSize() end
 	self.zIndex = 0
 	self.visible = true
@@ -155,10 +156,9 @@ function Sprite.new(image) return Sprite(image) end
 function Sprite:setImage(image, flip, xScale, yScale)
 	if self.image ~= image then
 		self.image = image
-		if image then
+		if image and not self._sizeExplicit then
 			local width, height = image:getSize()
-			if self.width == 0 then self.width = width end
-			if self.height == 0 then self.height = height end
+			self.width, self.height = width, height
 		end
 	end
 	self.flip = flip or gfx.kImageUnflipped
@@ -176,7 +176,10 @@ function Sprite:setTilemap(tilemap)
 		self.width, self.height = tilemap:getPixelSize()
 	end
 end
-function Sprite:setSize(width, height) self.width, self.height = width, height end
+function Sprite:setSize(width, height)
+	self.width, self.height = width, height
+	self._sizeExplicit = true
+end
 function Sprite:getSize() return self.width, self.height end
 function Sprite:setCenter(x, y) self.centerX, self.centerY = x, y end
 function Sprite:getCenter() return self.centerX, self.centerY end
@@ -212,6 +215,22 @@ function Sprite:isVisible() return self.visible end
 function Sprite:setUpdatesEnabled(value) self._updatesEnabled = value == true end
 function Sprite:updatesEnabled() return self._updatesEnabled end
 function Sprite:setImageDrawMode(value) self.imageDrawMode = value end
+function Sprite:setImageFlip(value, flipCollideRect)
+	local nextFlip = value or gfx.kImageUnflipped
+	if flipCollideRect and self.collideRect then
+		local changed = (self.flip or gfx.kImageUnflipped) ~ nextFlip
+		if (changed & gfx.kImageFlippedX) ~= 0 then
+			self.collideRect.x = self.width - self.collideRect.x -
+				self.collideRect.width
+		end
+		if (changed & gfx.kImageFlippedY) ~= 0 then
+			self.collideRect.y = self.height - self.collideRect.y -
+				self.collideRect.height
+		end
+	end
+	self.flip = nextFlip
+end
+function Sprite:getImageFlip() return self.flip or gfx.kImageUnflipped end
 function Sprite:setTag(value) self.tag = math.max(0, math.min(255, value or 0)) end
 function Sprite:getTag() return self.tag end
 local function maskFromGroups(value)
@@ -285,6 +304,7 @@ function Sprite:add()
 	if self.centerY == nil then self.centerY = 0.5 end
 	if self.width == nil then self.width = 0 end
 	if self.height == nil then self.height = 0 end
+	if self._sizeExplicit == nil then self._sizeExplicit = false end
 	if self.zIndex == nil then self.zIndex = 0 end
 	if self.imageDrawMode == nil then self.imageDrawMode = gfx.kDrawModeCopy end
 	if self.flip == nil then self.flip = gfx.kImageUnflipped end
@@ -377,7 +397,12 @@ function Sprite:update()
 						item.width * item.xScale * item.centerX)
 					local y = math.floor(item.y -
 						item.height * item.yScale * item.centerY)
-					item.image:drawScaled(x, y, item.xScale, item.yScale)
+					-- The public image API has no flip argument, but sprite:setImage
+					-- combines flip and scale.  The native compatibility method accepts
+					-- this private fifth argument so scaled AnimatedSprite states keep
+					-- their facing direction.
+					item.image:drawScaled(x, y, item.xScale, item.yScale,
+						item.flip)
 				else
 					local x = math.floor(item.x - item.width * item.centerX)
 					local y = math.floor(item.y - item.height * item.centerY)
@@ -437,87 +462,156 @@ local function groupsAllow(left, right)
 	return (collides == 0 and groups == 0) or ((collides & groups) ~= 0)
 end
 
-function Sprite:checkCollisions(goalX, goalY)
+local function sweptRect(sx, sy, sw, sh, moveX, moveY, ox, oy, ow, oh)
+	if overlaps(sx, sy, sw, sh, ox, oy, ow, oh) then
+		local left = sx + sw - ox
+		local right = ox + ow - sx
+		local top = sy + sh - oy
+		local bottom = oy + oh - sy
+		local minimum = math.min(left, right, top, bottom)
+		local normalX, normalY = 0, 0
+		if minimum == left then normalX = -1
+		elseif minimum == right then normalX = 1
+		elseif minimum == top then normalY = -1
+		else normalY = 1 end
+		return 0, normalX, normalY, true
+	end
+
+	local xEntry, xExit
+	if moveX > 0 then
+		xEntry = (ox - (sx + sw)) / moveX
+		xExit = ((ox + ow) - sx) / moveX
+	elseif moveX < 0 then
+		xEntry = ((ox + ow) - sx) / moveX
+		xExit = (ox - (sx + sw)) / moveX
+	elseif sx + sw <= ox or sx >= ox + ow then
+		return nil
+	else
+		xEntry, xExit = -math.huge, math.huge
+	end
+
+	local yEntry, yExit
+	if moveY > 0 then
+		yEntry = (oy - (sy + sh)) / moveY
+		yExit = ((oy + oh) - sy) / moveY
+	elseif moveY < 0 then
+		yEntry = ((oy + oh) - sy) / moveY
+		yExit = (oy - (sy + sh)) / moveY
+	elseif sy + sh <= oy or sy >= oy + oh then
+		return nil
+	else
+		yEntry, yExit = -math.huge, math.huge
+	end
+
+	local entry = math.max(xEntry, yEntry)
+	local exit = math.min(xExit, yExit)
+	if entry > exit or entry < 0 or entry > 1 then return nil end
+	local normalX, normalY = 0, 0
+	if xEntry > yEntry then normalX = moveX > 0 and -1 or 1
+	else normalY = moveY > 0 and -1 or 1 end
+	return entry, normalX, normalY, false
+end
+
+local function solveCollisions(self, goalX, goalY)
 	local previousX, previousY = self.x, self.y
 	if not self.added or not self._collisionsEnabled or not self.collideRect then
 		return goalX, goalY, {}, 0
 	end
-	self.x, self.y = goalX, goalY
 	local sx, sy, sw, sh = spriteBounds(self)
+	local moveX, moveY = goalX - previousX, goalY - previousY
+	local broadX = math.min(sx, sx + moveX)
+	local broadY = math.min(sy, sy + moveY)
+	local broadWidth = sw + math.abs(moveX)
+	local broadHeight = sh + math.abs(moveY)
+	local candidates = Sprite.querySpritesInRect(
+		broadX, broadY, broadWidth, broadHeight)
 	local collisions = {}
-	-- Celeste's rooms contain hundreds of 8 x 8 wall sprites. The Playdate
-	-- SDK spatially indexes these; doing the equivalent lookup here avoids a
-	-- full Lua scan for every horizontal and vertical player move.
-	local candidates = Sprite.querySpritesInRect(sx, sy, sw, sh)
 	for i=1,#candidates do
 		local other = candidates[i]
 		if other ~= self and other.added and other._collisionsEnabled and
-			groupsAllow(self, other) and
-			other.collideRect and self.collideRect then
+			other.collideRect and groupsAllow(self, other) then
 			local ox, oy, ow, oh = spriteBounds(other)
-			if overlaps(sx,sy,sw,sh,ox,oy,ow,oh) then
-				table.insert(collisions, {
-					sprite=self, other=other,
-					spriteRect={x=sx,y=sy,width=sw,height=sh},
+			local ti, normalX, normalY, startedOverlapping =
+				sweptRect(sx, sy, sw, sh, moveX, moveY, ox, oy, ow, oh)
+			if ti then
+				local touchX = previousX + moveX * ti
+				local touchY = previousY + moveY * ti
+				local collisionHandler = self.collisionResponse
+				local response = Sprite.kCollisionTypeFreeze
+				if type(collisionHandler) == "function" then
+					response = collisionHandler(self, other) or response
+				elseif type(collisionHandler) == "string" then
+					-- Playdate also supports assigning the response constant
+					-- directly instead of implementing a callback method.
+					response = collisionHandler
+				end
+				collisions[#collisions + 1] = {
+					sprite=self, other=other, type=response,
+					overlaps=startedOverlapping, ti=ti,
+					move={x=moveX * ti, y=moveY * ti},
+					normal={x=normalX, y=normalY, dx=normalX, dy=normalY},
+					touch={x=touchX, y=touchY},
+					spriteRect={x=sx + moveX * ti, y=sy + moveY * ti,
+						width=sw, height=sh},
 					otherRect={x=ox,y=oy,width=ow,height=oh},
-				})
+				}
 			end
 		end
 	end
-	self.x, self.y = previousX, previousY
-	return goalX, goalY, collisions, #collisions
+	table.sort(collisions, function(a, b)
+		if a.ti == b.ti then
+			return (a.other._sequence or 0) < (b.other._sequence or 0)
+		end
+		return a.ti < b.ti
+	end)
+
+	local actualX, actualY = goalX, goalY
+	local blockedX, blockedY = false, false
+	for i=1,#collisions do
+		local collision = collisions[i]
+		if collision.type ~= Sprite.kCollisionTypeOverlap then
+			local touchX, touchY = collision.touch.x, collision.touch.y
+			if collision.overlaps then
+				-- Never eject an already-overlapping body to an arbitrary far edge.
+				-- That old depenetration is what made Duel fighters visibly teleport.
+				actualX, actualY = previousX, previousY
+				blockedX, blockedY = true, true
+			elseif collision.type == Sprite.kCollisionTypeFreeze then
+				actualX, actualY = touchX, touchY
+				blockedX, blockedY = true, true
+			elseif collision.type == Sprite.kCollisionTypeBounce then
+				local remainingX, remainingY = goalX - touchX, goalY - touchY
+				local bounceX = touchX +
+					(collision.normal.x ~= 0 and -remainingX or remainingX)
+				local bounceY = touchY +
+					(collision.normal.y ~= 0 and -remainingY or remainingY)
+				collision.bounce = {x=bounceX, y=bounceY}
+				actualX, actualY = bounceX, bounceY
+				blockedX = blockedX or collision.normal.x ~= 0
+				blockedY = blockedY or collision.normal.y ~= 0
+			else
+				local slideX = collision.normal.x ~= 0 and touchX or goalX
+				local slideY = collision.normal.y ~= 0 and touchY or goalY
+				collision.slide = {x=slideX, y=slideY}
+				if collision.normal.x ~= 0 and not blockedX then
+					actualX, blockedX = touchX, true
+				end
+				if collision.normal.y ~= 0 and not blockedY then
+					actualY, blockedY = touchY, true
+				end
+			end
+		end
+	end
+	return actualX, actualY, collisions, #collisions
+end
+
+function Sprite:checkCollisions(goalX, goalY)
+	return solveCollisions(self, goalX, goalY)
 end
 
 function Sprite:moveWithCollisions(goalX, goalY)
-	local previousX, previousY = self.x, self.y
-	local actualX, actualY, collisions, length = self:checkCollisions(goalX, goalY)
-	local moveX, moveY = goalX - previousX, goalY - previousY
-	for i=1,length do
-		local collision = collisions[i]
-		local sx, sy, sw, sh = collision.spriteRect.x, collision.spriteRect.y,
-			collision.spriteRect.width, collision.spriteRect.height
-		local ox, oy, ow, oh = collision.otherRect.x, collision.otherRect.y,
-			collision.otherRect.width, collision.otherRect.height
-		local previousLeft = sx - moveX
-		local previousTop = sy - moveY
-		local normalX, normalY = 0, 0
-		if moveX > 0 and previousLeft + sw <= ox then normalX = -1
-		elseif moveX < 0 and previousLeft >= ox + ow then normalX = 1 end
-		if moveY > 0 and previousTop + sh <= oy then normalY = -1
-		elseif moveY < 0 and previousTop >= oy + oh then normalY = 1 end
-		if normalX ~= 0 and normalY ~= 0 then
-			local penetrationX = normalX < 0 and (sx + sw - ox) or (ox + ow - sx)
-			local penetrationY = normalY < 0 and (sy + sh - oy) or (oy + oh - sy)
-			if penetrationX < penetrationY then normalY = 0 else normalX = 0 end
-		elseif normalX == 0 and normalY == 0 then
-			local left, right = sx + sw - ox, ox + ow - sx
-			local top, bottom = sy + sh - oy, oy + oh - sy
-			local minimum = math.min(left, right, top, bottom)
-			if minimum == left then normalX = -1
-			elseif minimum == right then normalX = 1
-			elseif minimum == top then normalY = -1
-			else normalY = 1 end
-		end
-		local response = self.collisionResponse and
-			self:collisionResponse(collision.other) or Sprite.kCollisionTypeFreeze
-		collision.normal = {x=normalX, y=normalY, dx=normalX, dy=normalY}
-		collision.move = {x=moveX, y=moveY}
-		collision.touch = {x=actualX, y=actualY}
-		collision.type = response
-		collision.overlaps = false
-		collision.ti = 0
-		if response ~= Sprite.kCollisionTypeOverlap then
-			if response == Sprite.kCollisionTypeFreeze then
-				actualX, actualY = previousX, previousY
-			elseif normalX ~= 0 then
-				local desiredLeft = normalX < 0 and (ox - sw) or (ox + ow)
-				actualX = actualX + desiredLeft - sx
-			elseif normalY ~= 0 then
-				local desiredTop = normalY < 0 and (oy - sh) or (oy + oh)
-				actualY = actualY + desiredTop - sy
-			end
-		end
-	end
+	local actualX, actualY, collisions, length =
+		solveCollisions(self, goalX, goalY)
 	self:moveTo(actualX, actualY)
 	return actualX, actualY, collisions, length
 end

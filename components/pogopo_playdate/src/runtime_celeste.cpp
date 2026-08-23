@@ -94,6 +94,19 @@ struct Image {
     bool inverted = false;
     Image* mask = nullptr;
     int8_t pooled_slot = -1;
+    // Compiled Playdate images keep their canvas-sized coordinates even when
+    // only a small rectangle contains pixels.  Retaining that rectangle lets
+    // the renderer skip transparent margins without changing image anchors.
+    bool content_bounds_valid = false;
+    int16_t content_left = 0;
+    int16_t content_top = 0;
+    int16_t content_right = 0;
+    int16_t content_bottom = 0;
+    bool black_bounds_valid = false;
+    int16_t black_left = 0;
+    int16_t black_top = 0;
+    int16_t black_right = 0;
+    int16_t black_bottom = 0;
 };
 
 struct ImageTable {
@@ -547,6 +560,8 @@ struct Runtime::Impl {
     PdFont* current_font = nullptr;
     int current_font_ref = LUA_NOREF;
     int system_font_ref = LUA_NOREF;
+    int maze_completion_image_ref = LUA_NOREF;
+    bool maze_completion_reuse_logged = false;
     ClipRect clip{};
     struct Context {
         Image* target = nullptr;
@@ -869,6 +884,7 @@ struct Runtime::Impl {
         image.owns_pixels = true;
         image.asset = nullptr;
         image.frame = 0;
+        setSolidImageBounds(image, color);
         return true;
     }
 
@@ -916,6 +932,124 @@ struct Runtime::Impl {
         luaL_getmetatable(lua, kImageMetatable);
         lua_setmetatable(lua, -2);
         return image;
+    }
+
+    static void setContentBounds(Image& image, int right, int bottom,
+                                 int left = 0, int top = 0) {
+        image.content_bounds_valid = true;
+        image.content_left = static_cast<int16_t>(
+            std::clamp(left, 0, image.width));
+        image.content_top = static_cast<int16_t>(
+            std::clamp(top, 0, image.height));
+        image.content_right = static_cast<int16_t>(
+            std::clamp(right, static_cast<int>(image.content_left),
+                       image.width));
+        image.content_bottom = static_cast<int16_t>(
+            std::clamp(bottom, static_cast<int>(image.content_top),
+                       image.height));
+    }
+
+    static void expandContentBounds(Image& image, int left, int top,
+                                    int right, int bottom) {
+        left = std::clamp(left, 0, image.width);
+        top = std::clamp(top, 0, image.height);
+        right = std::clamp(right, left, image.width);
+        bottom = std::clamp(bottom, top, image.height);
+        if (left >= right || top >= bottom) return;
+        if (!image.content_bounds_valid ||
+            image.content_left >= image.content_right ||
+            image.content_top >= image.content_bottom) {
+            setContentBounds(image, right, bottom, left, top);
+            return;
+        }
+        image.content_left = static_cast<int16_t>(
+            std::min<int>(image.content_left, left));
+        image.content_top = static_cast<int16_t>(
+            std::min<int>(image.content_top, top));
+        image.content_right = static_cast<int16_t>(
+            std::max<int>(image.content_right, right));
+        image.content_bottom = static_cast<int16_t>(
+            std::max<int>(image.content_bottom, bottom));
+    }
+
+    static void setBlackBounds(Image& image, int right, int bottom,
+                               int left = 0, int top = 0) {
+        image.black_bounds_valid = true;
+        image.black_left = static_cast<int16_t>(
+            std::clamp(left, 0, image.width));
+        image.black_top = static_cast<int16_t>(
+            std::clamp(top, 0, image.height));
+        image.black_right = static_cast<int16_t>(
+            std::clamp(right, static_cast<int>(image.black_left),
+                       image.width));
+        image.black_bottom = static_cast<int16_t>(
+            std::clamp(bottom, static_cast<int>(image.black_top),
+                       image.height));
+    }
+
+    static void expandBlackBounds(Image& image, int left, int top,
+                                  int right, int bottom) {
+        left = std::clamp(left, 0, image.width);
+        top = std::clamp(top, 0, image.height);
+        right = std::clamp(right, left, image.width);
+        bottom = std::clamp(bottom, top, image.height);
+        if (left >= right || top >= bottom) return;
+        if (!image.black_bounds_valid || image.black_left >= image.black_right ||
+            image.black_top >= image.black_bottom) {
+            setBlackBounds(image, right, bottom, left, top);
+            return;
+        }
+        image.black_left = static_cast<int16_t>(
+            std::min<int>(image.black_left, left));
+        image.black_top = static_cast<int16_t>(
+            std::min<int>(image.black_top, top));
+        image.black_right = static_cast<int16_t>(
+            std::max<int>(image.black_right, right));
+        image.black_bottom = static_cast<int16_t>(
+            std::max<int>(image.black_bottom, bottom));
+    }
+
+    static void setSolidImageBounds(Image& image, uint8_t color) {
+        setContentBounds(image, color == Clear ? 0 : image.width,
+                         color == Clear ? 0 : image.height);
+        if (color == Black) {
+            setBlackBounds(image, image.width, image.height);
+        } else if (color == White || color == Clear) {
+            setBlackBounds(image, 0, 0);
+        } else {
+            image.black_bounds_valid = false;
+        }
+    }
+
+    static void logicalContentBounds(const Image& image, int flip,
+                                     int& left, int& top,
+                                     int& right, int& bottom,
+                                     bool black_only = false) {
+        if (black_only && image.black_bounds_valid) {
+            left = image.black_left;
+            top = image.black_top;
+            right = image.black_right;
+            bottom = image.black_bottom;
+        } else if (image.content_bounds_valid) {
+            left = image.content_left;
+            top = image.content_top;
+            right = image.content_right;
+            bottom = image.content_bottom;
+        } else {
+            left = top = 0;
+            right = image.width;
+            bottom = image.height;
+        }
+        if (flip & FlippedX) {
+            const int old_left = left;
+            left = image.width - right;
+            right = image.width - old_left;
+        }
+        if (flip & FlippedY) {
+            const int old_top = top;
+            top = image.height - bottom;
+            bottom = image.height - old_top;
+        }
     }
 
     Image* pushDynamicImage(int width, int height, uint8_t color) {
@@ -967,6 +1101,7 @@ struct Runtime::Impl {
                     image->pooled_slot = static_cast<int8_t>(slot_index);
                     slot.in_use = true;
                     std::memset(image->pixels, color, bytes);
+                    setSolidImageBounds(*image, color);
                     return image;
                 }
             }
@@ -980,6 +1115,7 @@ struct Runtime::Impl {
         image->pixels = reinterpret_cast<uint8_t*>(image + 1);
         image->owns_pixels = false;
         std::memset(image->pixels, color, bytes);
+        setSolidImageBounds(*image, color);
         luaL_getmetatable(lua, kImageMetatable);
         lua_setmetatable(lua, -2);
         return image;
@@ -1034,6 +1170,12 @@ struct Runtime::Impl {
         if (!target || !target->pixels || x < 0 || y < 0 ||
             x >= target->width || y >= target->height) return;
         target->pixels[static_cast<size_t>(y) * target->stride + x] = color;
+        if (target != &screen && color != Clear) {
+            expandContentBounds(*target, x, y, x + 1, y + 1);
+            if (color == Black) {
+                expandBlackBounds(*target, x, y, x + 1, y + 1);
+            }
+        }
     }
 
     uint8_t mappedColor(uint8_t source, int destination_x, int destination_y) const {
@@ -1103,6 +1245,15 @@ struct Runtime::Impl {
     void drawImage(const Image& image, int x, int y, int flip,
                    int scale = 1, float fade = 1.0f) {
         scale = std::max(1, scale);
+        int content_left = 0, content_top = 0;
+        int content_right = image.width, content_bottom = image.height;
+        logicalContentBounds(image, flip, content_left, content_top,
+                             content_right, content_bottom,
+                             draw_mode == WhiteTransparent ||
+                                 draw_mode == Nxor);
+        if (content_left >= content_right || content_top >= content_bottom) {
+            return;
+        }
         // Celeste composites several persistent 128x128 layer images every
         // frame. Copy their byte pixels row-wise into the logical framebuffer
         // instead of routing every pixel through the generic scaled path.
@@ -1112,12 +1263,18 @@ struct Runtime::Impl {
             (draw_mode == Copy || draw_mode == FillWhite ||
              draw_mode == FillBlack || draw_mode == Inverted) &&
             target && target->pixels) {
-            const int start_x = std::max(0, std::max(clip.x - x, -x));
-            const int start_y = std::max(0, std::max(clip.y - y, -y));
-            const int end_x = std::min(image.width,
+            const int start_x = std::max(content_left,
+                std::max(clip.x - x, -x));
+            const int start_y = std::max(content_top,
+                std::max(clip.y - y, -y));
+            const int end_x = std::min(content_right,
                 std::min(clip.x + clip.w - x, target->width - x));
-            const int end_y = std::min(image.height,
+            const int end_y = std::min(content_bottom,
                 std::min(clip.y + clip.h - y, target->height - y));
+            if (target != &screen && start_x < end_x && start_y < end_y) {
+                expandContentBounds(*target, x + start_x, y + start_y,
+                                    x + end_x, y + end_y);
+            }
             for (int dy = start_y; dy < end_y; ++dy) {
                 const int source_y = (flip & FlippedY)
                     ? image.height - 1 - dy : dy;
@@ -1181,8 +1338,8 @@ struct Runtime::Impl {
             3, 11, 1, 9, 15, 7, 13, 5,
         };
         const int threshold = std::clamp(static_cast<int>(fade * 16.0f), 0, 16);
-        for (int sy = 0; sy < image.height; ++sy) {
-            for (int sx = 0; sx < image.width; ++sx) {
+        for (int sy = content_top; sy < content_bottom; ++sy) {
+            for (int sx = content_left; sx < content_right; ++sx) {
                 if (bayer[((y + sy) & 3) * 4 + ((x + sx) & 3)] >= threshold) continue;
                 const int source_x = (flip & FlippedX) ? image.width - 1 - sx : sx;
                 const int source_y = (flip & FlippedY) ? image.height - 1 - sy : sy;
@@ -1214,11 +1371,14 @@ struct Runtime::Impl {
 
     uint8_t scaledImagePixel(const Image& image, int destination_x,
                              int destination_y, int destination_width,
-                             int destination_height) const {
-        const int source_x = std::min(image.width - 1,
+                             int destination_height,
+                             int flip = Unflipped) const {
+        int source_x = std::min(image.width - 1,
             (destination_x * image.width) / destination_width);
-        const int source_y = std::min(image.height - 1,
+        int source_y = std::min(image.height - 1,
             (destination_y * image.height) / destination_height);
+        if (flip & FlippedX) source_x = image.width - 1 - source_x;
+        if (flip & FlippedY) source_y = image.height - 1 - source_y;
         if (image.mask && imagePixel(*image.mask, source_x, source_y) != White) {
             return Clear;
         }
@@ -1226,17 +1386,108 @@ struct Runtime::Impl {
     }
 
     void drawImageScaled(const Image& image, int x, int y,
-                         float scale_x, float scale_y) {
+                         float scale_x, float scale_y,
+                         int flip = Unflipped) {
         const int destination_width = scaledExtent(image.width, scale_x);
         const int destination_height = scaledExtent(image.height, scale_y);
         if (destination_width <= 0 || destination_height <= 0) return;
-        for (int destination_y = 0; destination_y < destination_height;
+        int content_left = 0, content_top = 0;
+        int content_right = image.width, content_bottom = image.height;
+        logicalContentBounds(image, flip, content_left, content_top,
+                             content_right, content_bottom,
+                             draw_mode == WhiteTransparent ||
+                                 draw_mode == Nxor);
+        if (content_left >= content_right || content_top >= content_bottom) {
+            return;
+        }
+
+        // Scaled Duel sprites are almost always enlarged (1.5x/1.75x).  The
+        // destination-driven path below rereads a PSRAM-backed source pixel
+        // two to four times in that case.  Walk the source once and expand
+        // each nearest-neighbour cell instead.  The ceil-divided ranges are
+        // exactly the inverse of floor(dst * source / destination), so this
+        // is pixel-identical to the Playdate-style nearest-neighbour result.
+        const int64_t destination_area =
+            static_cast<int64_t>(destination_width) * destination_height;
+        const int64_t source_area =
+            static_cast<int64_t>(image.width) * image.height;
+        if (destination_area >= source_area) {
+            const auto ceilDivide = [](int64_t numerator, int denominator) {
+                return static_cast<int>((numerator + denominator - 1) /
+                                        denominator);
+            };
+            for (int logical_source_y = content_top;
+                 logical_source_y < content_bottom;
+                 ++logical_source_y) {
+                const int destination_y_begin = ceilDivide(
+                    static_cast<int64_t>(logical_source_y) *
+                        destination_height,
+                    image.height);
+                const int destination_y_end = ceilDivide(
+                    static_cast<int64_t>(logical_source_y + 1) *
+                        destination_height,
+                    image.height);
+                const int source_y = (flip & FlippedY)
+                    ? image.height - 1 - logical_source_y
+                    : logical_source_y;
+                for (int logical_source_x = content_left;
+                     logical_source_x < content_right;
+                     ++logical_source_x) {
+                    const int destination_x_begin = ceilDivide(
+                        static_cast<int64_t>(logical_source_x) *
+                            destination_width,
+                        image.width);
+                    const int destination_x_end = ceilDivide(
+                        static_cast<int64_t>(logical_source_x + 1) *
+                            destination_width,
+                        image.width);
+                    const int source_x = (flip & FlippedX)
+                        ? image.width - 1 - logical_source_x
+                        : logical_source_x;
+                    if (image.mask &&
+                        imagePixel(*image.mask, source_x, source_y) != White) {
+                        continue;
+                    }
+                    const uint8_t value = imagePixel(image, source_x, source_y);
+                    if (value == Clear) continue;
+                    for (int destination_y = destination_y_begin;
+                         destination_y < destination_y_end; ++destination_y) {
+                        for (int destination_x = destination_x_begin;
+                             destination_x < destination_x_end;
+                             ++destination_x) {
+                            putLogicalPixel(x + destination_x,
+                                            y + destination_y, value);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        const auto ceilDivide = [](int64_t numerator, int denominator) {
+            return static_cast<int>((numerator + denominator - 1) /
+                                    denominator);
+        };
+        const int destination_left = ceilDivide(
+            static_cast<int64_t>(content_left) * destination_width,
+            image.width);
+        const int destination_top = ceilDivide(
+            static_cast<int64_t>(content_top) * destination_height,
+            image.height);
+        const int destination_right = ceilDivide(
+            static_cast<int64_t>(content_right) * destination_width,
+            image.width);
+        const int destination_bottom = ceilDivide(
+            static_cast<int64_t>(content_bottom) * destination_height,
+            image.height);
+        for (int destination_y = destination_top;
+             destination_y < destination_bottom;
              ++destination_y) {
-            for (int destination_x = 0; destination_x < destination_width;
+            for (int destination_x = destination_left;
+                 destination_x < destination_right;
                  ++destination_x) {
                 const uint8_t value = scaledImagePixel(
                     image, destination_x, destination_y,
-                    destination_width, destination_height);
+                    destination_width, destination_height, flip);
                 if (value != Clear) {
                     putLogicalPixel(x + destination_x, y + destination_y, value);
                 }
@@ -1259,6 +1510,24 @@ struct Runtime::Impl {
         // matrix already has the required clockwise visual direction.
         float normalized = std::fmod(angle_degrees, 360.0f);
         if (normalized < 0.0f) normalized += 360.0f;
+        // Several animation helpers call drawRotated(..., 0, scale) even
+        // though no rotation is requested.  Avoid the inverse-transform path
+        // for that common case; on ESP32-S3 this is especially important for
+        // Duel's scaled boss and VFX sprites.
+        if ((normalized < 0.0001f ||
+             std::fabs(normalized - 360.0f) < 0.0001f) &&
+            scale_x > 0.0f && scale_y > 0.0f) {
+            const int destination_width = scaledExtent(image.width, scale_x);
+            const int destination_height = scaledExtent(image.height, scale_y);
+            if (destination_width > 0 && destination_height > 0) {
+                const int left = static_cast<int>(std::floor(
+                    center_x - static_cast<float>(destination_width) * 0.5f));
+                const int top = static_cast<int>(std::floor(
+                    center_y - static_cast<float>(destination_height) * 0.5f));
+                drawImageScaled(image, left, top, scale_x, scale_y);
+            }
+            return;
+        }
         const float quadrant = std::round(normalized / 90.0f);
         float cosine = 0.0f;
         float sine = 0.0f;
@@ -1423,6 +1692,7 @@ struct Runtime::Impl {
         }
         std::memset(target->pixels, color,
                     static_cast<size_t>(target->stride) * target->height);
+        setSolidImageBounds(*target, color);
     }
 
     void resetTargetToScreen() {
@@ -1623,15 +1893,42 @@ struct Runtime::Impl {
         const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
         std::memset(image.pixels, Clear,
                     static_cast<size_t>(image.stride) * image.height);
+        int content_left = full_width;
+        int content_top = full_height;
+        int content_right = 0;
+        int content_bottom = 0;
+        int black_left = full_width;
+        int black_top = full_height;
+        int black_right = 0;
+        int black_bottom = 0;
         for (uint16_t y = 0; y < stored_height; ++y) {
             for (uint16_t x = 0; x < stored_width; ++x) {
                 const uint8_t bit = static_cast<uint8_t>(0x80U >> (x & 7U));
                 const size_t index = static_cast<size_t>(y) * row_bytes + (x >> 3U);
                 if (mask && !(mask[index] & bit)) continue;
-                image.pixels[static_cast<size_t>(top + y) * image.stride + left + x] =
-                    (bitmap[index] & bit) ? White : Black;
+                const int destination_x = left + x;
+                const int destination_y = top + y;
+                const uint8_t value = (bitmap[index] & bit) ? White : Black;
+                image.pixels[static_cast<size_t>(destination_y) *
+                    image.stride + destination_x] = value;
+                content_left = std::min(content_left, destination_x);
+                content_top = std::min(content_top, destination_y);
+                content_right = std::max(content_right, destination_x + 1);
+                content_bottom = std::max(content_bottom, destination_y + 1);
+                if (value == Black) {
+                    black_left = std::min(black_left, destination_x);
+                    black_top = std::min(black_top, destination_y);
+                    black_right = std::max(black_right, destination_x + 1);
+                    black_bottom = std::max(black_bottom, destination_y + 1);
+                }
             }
         }
+        setContentBounds(image, content_right, content_bottom,
+                         content_left == full_width ? 0 : content_left,
+                         content_top == full_height ? 0 : content_top);
+        setBlackBounds(image, black_right, black_bottom,
+                       black_left == full_width ? 0 : black_left,
+                       black_top == full_height ? 0 : black_top);
         return true;
     }
 
@@ -1724,6 +2021,8 @@ struct Runtime::Impl {
                     image->pixels[5 * image->stride + 6] = White;
                     image->pixels[5 * image->stride + 10] = White;
                 }
+                setContentBounds(*image, image->width, image->height);
+                setBlackBounds(*image, image->width, image->height);
                 return 1;
             }
             lua_pushnil(state);
@@ -1738,7 +2037,50 @@ struct Runtime::Impl {
         const int height = static_cast<int>(std::lround(
             luaL_checknumber(state, 2)));
         const uint8_t color = checkPlaydateColor(state, 3, Clear);
+        // Maze's LevelComplete object creates an identically-sized transparent
+        // render target every update and immediately replaces the previous
+        // sprite image.  A PSRAM plane pool avoids the 44 KiB pixel allocation,
+        // but still creates one userdata and advances the collector per frame.
+        // Pin and clear this exact package-owned target instead.  The game
+        // redraws all of its letters after pushContext(), so reusing the object
+        // is equivalent to a fresh transparent image without per-frame GC.
+        const bool maze_completion_target =
+            runtime->package_mode && color == Clear && width == 324 &&
+            height == 137 &&
+            std::strcmp(runtime->package_info.bundle_id,
+                        "de.WuffderHundeheld.Maze") == 0;
+        if (maze_completion_target &&
+            runtime->maze_completion_image_ref != LUA_NOREF) {
+            lua_rawgeti(state, LUA_REGISTRYINDEX,
+                        runtime->maze_completion_image_ref);
+            auto* image = static_cast<Image*>(luaL_testudata(
+                state, -1, kImageMetatable));
+            if (image && image->pixels && image->width == width &&
+                image->height == height) {
+                std::memset(image->pixels, Clear,
+                            static_cast<size_t>(image->stride) * image->height);
+                image->inverted = false;
+                image->mask = nullptr;
+                setSolidImageBounds(*image, Clear);
+                return 1;
+            }
+            lua_pop(state, 1);
+            luaL_unref(state, LUA_REGISTRYINDEX,
+                       runtime->maze_completion_image_ref);
+            runtime->maze_completion_image_ref = LUA_NOREF;
+        }
         runtime->pushDynamicImage(width, height, color);
+        if (maze_completion_target &&
+            luaL_testudata(state, -1, kImageMetatable)) {
+            lua_pushvalue(state, -1);
+            runtime->maze_completion_image_ref = luaL_ref(
+                state, LUA_REGISTRYINDEX);
+            if (!runtime->maze_completion_reuse_logged) {
+                ESP_LOGI(TAG,
+                    "Maze LevelComplete: pinned reusable 324x137 render target");
+                runtime->maze_completion_reuse_logged = true;
+            }
+        }
         return 1;
     }
 
@@ -1789,7 +2131,11 @@ struct Runtime::Impl {
         const float scale_x = static_cast<float>(luaL_checknumber(state, 4));
         const float scale_y = static_cast<float>(luaL_optnumber(
             state, 5, scale_x));
-        if (image) runtime->drawImageScaled(*image, x, y, scale_x, scale_y);
+        const int flip = static_cast<int>(luaL_optinteger(
+            state, 6, Unflipped));
+        if (image) {
+            runtime->drawImageScaled(*image, x, y, scale_x, scale_y, flip);
+        }
         return 0;
     }
 
@@ -1819,6 +2165,40 @@ struct Runtime::Impl {
                     runtime->scaledImagePixel(*source, x, y,
                         destination_width, destination_height);
             }
+        }
+        int source_left = 0, source_top = 0;
+        int source_right = source->width, source_bottom = source->height;
+        logicalContentBounds(*source, Unflipped, source_left, source_top,
+                             source_right, source_bottom);
+        const auto ceilDivide = [](int64_t numerator, int denominator) {
+            return static_cast<int>((numerator + denominator - 1) /
+                                    denominator);
+        };
+        setContentBounds(*scaled,
+            ceilDivide(static_cast<int64_t>(source_right) * destination_width,
+                       source->width),
+            ceilDivide(static_cast<int64_t>(source_bottom) * destination_height,
+                       source->height),
+            ceilDivide(static_cast<int64_t>(source_left) * destination_width,
+                       source->width),
+            ceilDivide(static_cast<int64_t>(source_top) * destination_height,
+                       source->height));
+        if (source->black_bounds_valid) {
+            setBlackBounds(*scaled,
+                ceilDivide(static_cast<int64_t>(source->black_right) *
+                               destination_width,
+                           source->width),
+                ceilDivide(static_cast<int64_t>(source->black_bottom) *
+                               destination_height,
+                           source->height),
+                ceilDivide(static_cast<int64_t>(source->black_left) *
+                               destination_width,
+                           source->width),
+                ceilDivide(static_cast<int64_t>(source->black_top) *
+                               destination_height,
+                           source->height));
+        } else {
+            scaled->black_bounds_valid = false;
         }
         return 1;
     }
@@ -1957,6 +2337,9 @@ struct Runtime::Impl {
             } else {
                 std::memset(image->pixels, color, pixels);
             }
+            if (color != Xor) {
+                setSolidImageBounds(*image, color);
+            }
         }
         return 0;
     }
@@ -1979,6 +2362,15 @@ struct Runtime::Impl {
                 ? static_cast<uint8_t>(Clear)
                 : runtime->imagePixel(*source, x, y);
         }
+        int left = 0, top = 0, right = source->width, bottom = source->height;
+        logicalContentBounds(*source, Unflipped, left, top, right, bottom);
+        setContentBounds(*copy, right, bottom, left, top);
+        if (source->black_bounds_valid) {
+            setBlackBounds(*copy, source->black_right, source->black_bottom,
+                           source->black_left, source->black_top);
+        } else {
+            copy->black_bounds_valid = false;
+        }
         return 1;
     }
 
@@ -1995,6 +2387,10 @@ struct Runtime::Impl {
                 ? Clear : (value == Black ? White :
                     (value == White ? Black : Clear));
         }
+        int left = 0, top = 0, right = source->width, bottom = source->height;
+        logicalContentBounds(*source, Unflipped, left, top, right, bottom);
+        setContentBounds(*copy, right, bottom, left, top);
+        copy->black_bounds_valid = false;
         return 1;
     }
 
@@ -2013,6 +2409,15 @@ struct Runtime::Impl {
                     runtime->imagePixel(*source->mask, x, y) != White
                     ? static_cast<uint8_t>(Clear)
                     : runtime->imagePixel(*source, x, y);
+        }
+        int left = 0, top = 0, right = source->width, bottom = source->height;
+        logicalContentBounds(*source, Unflipped, left, top, right, bottom);
+        setContentBounds(*copy, right, bottom, left, top);
+        if (source->black_bounds_valid) {
+            setBlackBounds(*copy, source->black_right, source->black_bottom,
+                           source->black_left, source->black_top);
+        } else {
+            copy->black_bounds_valid = false;
         }
         return 1;
     }
@@ -2260,6 +2665,8 @@ struct Runtime::Impl {
         const size_t bytes = static_cast<size_t>(runtime->screen.width) *
             runtime->screen.height;
         std::memcpy(copy->pixels, runtime->screen.pixels, bytes);
+        setContentBounds(*copy, copy->width, copy->height);
+        copy->black_bounds_valid = false;
         return 1;
     }
 
@@ -2449,6 +2856,12 @@ struct Runtime::Impl {
                 std::memset(target->pixels +
                     static_cast<size_t>(row) * target->stride + left,
                     value, span);
+            }
+            if (target != &screen && value != Clear) {
+                expandContentBounds(*target, left, top, right, bottom);
+                if (value == Black) {
+                    expandBlackBounds(*target, left, top, right, bottom);
+                }
             }
             return;
         }
@@ -5362,12 +5775,14 @@ struct Runtime::Impl {
         draw_pattern_pixels.fill(Clear);draw_pattern_uses_image=false;
         pattern_offset_x=pattern_offset_y=0;current_font=nullptr;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
+        maze_completion_image_ref=LUA_NOREF;
+        maze_completion_reuse_logged=false;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.9: Maze input + 32K frame pool");
+                 "PogoDate API STEP11.6.10: sparse images + scaled sprite fidelity");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -5412,6 +5827,8 @@ struct Runtime::Impl {
         releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
+        maze_completion_image_ref=LUA_NOREF;
+        maze_completion_reuse_logged=false;
         canvas=nullptr;audio=nullptr;storage=nullptr;
     }
 
@@ -5479,5 +5896,11 @@ uint32_t Runtime::update(uint32_t dt_ms){return impl_?impl_->update(dt_ms):0;}
 bool Runtime::running()const{return impl_&&impl_->is_running;}
 const char* Runtime::error()const{return impl_&&impl_->last_error[0]?impl_->last_error:"";}
 Stats Runtime::stats()const{return impl_?impl_->runtime_stats:Stats{};}
+#ifdef PD_HOST_TEST
+bool Runtime::evalForTest(const char* source){
+    return impl_&&impl_->lua&&source&&
+        impl_->loadBuffer("PogoDate host regression",source,std::strlen(source));
+}
+#endif
 
 } // namespace pogopo::playdate

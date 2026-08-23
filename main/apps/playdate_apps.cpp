@@ -16,7 +16,8 @@ constexpr char TAG[] = "pogodate_app";
 constexpr uint32_t LCD_FRAME_MS = 20;
 
 constexpr input::ButtonMask playdateButtons(input::ButtonMask raw,
-                                            bool swap_horizontal) {
+                                            bool swap_horizontal,
+                                            bool start_alias) {
     constexpr input::ButtonMask supported =
         input::mask(input::Button::Top) |
         input::mask(input::Button::Down) |
@@ -44,20 +45,24 @@ constexpr input::ButtonMask playdateButtons(input::ButtonMask raw,
     // Pogopo has an extra START key while Playdate games only know A/B.
     // Treat START as an A alias so title screens that say "Press A" also
     // behave naturally on Pogopo, without inventing a seventh Playdate bit.
-    if (raw & input::mask(input::Button::Start)) {
+    if (start_alias && (raw & input::mask(input::Button::Start))) {
         translated |= input::mask(input::Button::A);
     }
     return translated;
 }
 
-static_assert(playdateButtons(input::mask(input::Button::Left), false) ==
+static_assert(playdateButtons(input::mask(input::Button::Left), false, true) ==
               input::mask(input::Button::Left));
-static_assert(playdateButtons(input::mask(input::Button::Right), false) ==
+static_assert(playdateButtons(input::mask(input::Button::Right), false, true) ==
               input::mask(input::Button::Right));
-static_assert(playdateButtons(input::mask(input::Button::Left), true) ==
+static_assert(playdateButtons(input::mask(input::Button::Left), true, true) ==
               input::mask(input::Button::Right));
-static_assert(playdateButtons(input::mask(input::Button::Right), true) ==
+static_assert(playdateButtons(input::mask(input::Button::Right), true, true) ==
               input::mask(input::Button::Left));
+static_assert(playdateButtons(input::mask(input::Button::Start), false, true) ==
+              input::mask(input::Button::A));
+static_assert(playdateButtons(input::mask(input::Button::Start), false, false) ==
+              0);
 
 bool navigationEvent(const input::Event& event) {
     return event.type == input::EventType::Pressed ||
@@ -220,8 +225,14 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     }
     runtime_.setAccelerometer(accelerometer_x_, accelerometer_y_,
                               accelerometer_z_, accelerometer_initialized_);
-    runtime_.setInput(playdateButtons(context.input.heldMask(), maze_package),
-                      playdateButtons(queued_pressed_, maze_package));
+    // Maze uses A for all confirmations.  START was only a Pogopo convenience
+    // alias, but on the expensive completion scene it could queue a second A
+    // and immediately activate the next screen.  Keep the alias for the other
+    // validated packages and let Maze receive only its real A button.
+    const bool start_alias = !maze_package;
+    runtime_.setInput(
+        playdateButtons(context.input.heldMask(), maze_package, start_alias),
+        playdateButtons(queued_pressed_, maze_package, start_alias));
     const uint32_t produced = runtime_.update(dt_ms);
     if (produced > 0) {
         queued_pressed_ = 0;

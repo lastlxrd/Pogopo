@@ -80,6 +80,12 @@ public:
     const char* error() const;
     Stats stats() const;
 
+#ifdef PD_HOST_TEST
+    // Host-only regression hook. Firmware builds do not expose arbitrary Lua
+    // evaluation; native tests use this to enter otherwise distant scenes.
+    bool evalForTest(const char* source);
+#endif
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;

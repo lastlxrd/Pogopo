@@ -54,9 +54,13 @@ coordinates with a low-latency IIR filter and held-last-good-sample behavior.
 Physical left/right buttons use the common Pogopo mapping. Maze 1.1.0 has a
 bundle-scoped horizontal-menu quirk and a bundle-scoped accelerometer Y
 correction; neither changes any other PDX. Maze's saved neutral calibration
-must be recreated after flashing STEP11.6.9. Its 324x137 completion render
-targets use the reusable PSRAM image pool, and the scripted result-screen
-button returns to the menu without an error.
+must be recreated after flashing STEP11.6.10. Its 324x137 completion render
+target is pinned and reused, while decoded sparse image-table frames retain
+their real content bounds so transparent canvas pixels are not scanned on every
+draw. The exact 600-frame animation stays pixel-identical to STEP11.6.9 and is
+about 8.1x faster in the host regression. Maze also opts out of Pogopo's
+START-to-A convenience alias, preventing an extra START press from confirming a
+result-screen choice.
 
 ### Duel Of Shadows
 
@@ -69,8 +73,13 @@ title, uses the A-button dash to cross the tutorial portal, renders and plays
 the boss fight, then survives the player-death save/return path. Sprite area
 queries detect added sprites geometrically even while a game has disabled
 their physical collision response, which is how the dash portal senses the
-player. The long run produces 1,800 logical frames and 56 audio starts with
-zero Lua errors. A second synthetic package keeps only
+player. Scaled sprites preserve horizontal image flips, automatically follow
+new animation-frame dimensions unless the game explicitly called `setSize()`,
+and use a source-driven nearest-neighbor scaler. Swept rectangle contacts avoid
+the previous far-edge ejection when actors start a frame overlapping. The long
+run produces 1,800 logical frames and 56 audio starts with zero Lua errors; a
+second direct boss-room regression produces 1,800 frames and 71 audio starts.
+A separate synthetic package keeps only
 `main` in `main.pdz` and resolves the remaining modules from separate nested
 `.pdz` archives, verifying that path independently.
 
@@ -87,7 +96,8 @@ above.
 - buttons, just-pressed/released state and input-handler stack, using the
   same physical left/right mapping as PogopoOS plus a bundle-scoped Maze
   menu-direction quirk;
-- images with fractional drawing and generated scaling, image tables with
+- images with fractional drawing, sparse content bounds and generated scaling,
+  image tables with
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
   locking, primitives, text,
@@ -96,16 +106,17 @@ above.
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, subclass defaults, visibility, image/center/scale/rotation/
-  clip state, object `isa()`, geometric area/overlap queries, collision
-  normals, group and collides-with bitmasks, tilemap-backed sprites and tilemap
-  walls;
+  flip/clip state, automatic animation-frame sizing, object `isa()`, geometric
+  area/overlap queries, swept collision contacts and normals, group and
+  collides-with bitmasks, tilemap-backed sprites and tilemap walls;
 - display offset and graphics draw offset, including draw-offset screen shake;
 - callback/value millisecond timers; callback/value frame timers with easing,
   repeats and reverses; bundled easing, animation and animator CoreLibs plus
   elapsed-time helpers;
 - Playdate date/time conversion forms and cycle-safe table copy helpers;
 - accelerometer start/stop/state/read APIs, fed by Pogopo's BMI270 on hardware;
-- Pogopo START-to-Playdate-A translation while a PDX owns input;
+- Pogopo START-to-Playdate-A translation while a PDX owns input, except for the
+  Maze bundle where START must remain independent of result-screen A actions;
 - sandboxed files and datastore under each package bundle ID;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
@@ -117,13 +128,14 @@ above.
 - API coverage is intentionally incomplete. A new Lua game can still stop on
   the first unimplemented Playdate function or on CoreLib behavior beyond this
   compatibility layer.
-- Sprite collision response now covers the overlap, slide and freeze behavior
-  used by the validated games and returns normal/move/touch metadata. It is not
-  yet a complete swept Playdate solver, and bounce fidelity remains limited.
+- Sprite collision response covers overlap, slide, freeze and basic bounce,
+  accepts callback and direct-string response forms, and returns swept
+  normal/move/touch metadata. It is not yet a byte-for-byte replacement for
+  every edge case in Playdate's native solver.
 - Crank input, networking, microphone and SDK extensions are not emulated by
   this step. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.9.
+  the device after flashing STEP11.6.10.
 - Audio playback supports the package formats and basic controls used by the
   test set, not every Playdate synth/effect/sequence API. File-player seeking,
   true streamed decoding and loop subranges are not implemented yet; long PDA
