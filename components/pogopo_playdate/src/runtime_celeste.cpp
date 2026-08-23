@@ -528,6 +528,7 @@ struct Runtime::Impl {
     Image* stencil = nullptr;
     PdFont* current_font = nullptr;
     int current_font_ref = LUA_NOREF;
+    int system_font_ref = LUA_NOREF;
     ClipRect clip{};
     struct Context {
         Image* target = nullptr;
@@ -2345,6 +2346,37 @@ struct Runtime::Impl {
         const char* text = luaL_checklstring(state, 2, &length);
         lua_pushinteger(state, runtime->textWidthForFont(font, text, length));
         return 1;
+    }
+
+    int pushSystemFont() {
+        if (system_font_ref != LUA_NOREF) {
+            lua_rawgeti(lua, LUA_REGISTRYINDEX, system_font_ref);
+            return 1;
+        }
+        auto* font = static_cast<PdFont*>(lua_newuserdatauv(
+            lua, sizeof(PdFont), 0));
+        new (font) PdFont{};
+        font->scale = 1;
+        luaL_getmetatable(lua, kFontMetatable);
+        lua_setmetatable(lua, -2);
+        lua_pushvalue(lua, -1);
+        system_font_ref = luaL_ref(lua, LUA_REGISTRYINDEX);
+        return 1;
+    }
+
+    static int cGetSystemFont(lua_State* state) {
+        // Pogopo has one built-in 5x7 system face. The optional normal/bold/
+        // italic variant is accepted; all variants resolve to that same face.
+        return self(state)->pushSystemFont();
+    }
+
+    static int cGetFont(lua_State* state) {
+        Impl* runtime = self(state);
+        if (runtime->current_font_ref != LUA_NOREF) {
+            lua_rawgeti(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+            return 1;
+        }
+        return runtime->pushSystemFont();
     }
 
     static int cSetFont(lua_State* state) {
@@ -4212,7 +4244,9 @@ struct Runtime::Impl {
         setFunction(graphics,"fillCircleInRect",cFillCircleInRect);setFunction(graphics,"drawCircleInRect",cDrawCircleInRect);
         setFunction(graphics,"drawText",cDrawText);setFunction(graphics,"drawTextInRect",cDrawTextInRect);
         setFunction(graphics,"drawTextAligned",cDrawTextAligned);
-        setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"setFontFamily",cSetFontFamily);
+        setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"getFont",cGetFont);
+        setFunction(graphics,"setFontFamily",cSetFontFamily);
+        setFunction(graphics,"getSystemFont",cGetSystemFont);
         setFunction(graphics,"pushContext",cPushContext);
         setFunction(graphics,"popContext",cPopContext);setFunction(graphics,"setClipRect",cSetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
@@ -4319,11 +4353,13 @@ struct Runtime::Impl {
         held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
         inverted_display=false;background_color=White;current_font=nullptr;
-        current_font_ref=LUA_NOREF;
+        current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
+        ESP_LOGI(TAG, "%s",
+                 "PogoDate API STEP11.6.1: getSystemFont + getFont + setFontFamily");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -4353,7 +4389,8 @@ struct Runtime::Impl {
         loaded_external_count=0;external_import_depth=0;
         releaseImage(screen);
         target=nullptr;stencil=nullptr;current_font=nullptr;
-        current_font_ref=LUA_NOREF;canvas=nullptr;audio=nullptr;storage=nullptr;
+        current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
+        canvas=nullptr;audio=nullptr;storage=nullptr;
     }
 
     uint32_t update(uint32_t dt_ms) {
