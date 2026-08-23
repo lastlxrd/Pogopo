@@ -553,6 +553,7 @@ struct Runtime::Impl {
     uint32_t frame_dt_ms = 20;
     uint32_t now_ms = 0;
     uint32_t elapsed_reset_ms = 0;
+    uint32_t sound_time_reset_ms = 0;
     uint8_t held_buttons = 0;
     uint8_t pressed_buttons = 0;
     uint8_t previous_held_buttons = 0;
@@ -2120,6 +2121,42 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cImageDrawTiled(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* image = static_cast<Image*>(
+            luaL_checkudata(state, 1, kImageMetatable));
+        int x = 0, y = 0, width = 0, height = 0;
+        runtime->readRect(state, 2, x, y, width, height);
+        const int flip_index = lua_istable(state, 2) ? 3 : 6;
+        const int flip = static_cast<int>(
+            luaL_optinteger(state, flip_index, Unflipped));
+        if (!image || image->width <= 0 || image->height <= 0 ||
+            width <= 0 || height <= 0) {
+            return 0;
+        }
+
+        // Clip the tile loop before calling the regular image compositor. Pulp
+        // uses this path for small cached tiles, so avoiding off-screen tiles
+        // is important on the ESP32-S3 even though drawImage() also clips its
+        // pixels internally.
+        const int left = std::max({x, runtime->clip.x, 0});
+        const int top = std::max({y, runtime->clip.y, 0});
+        const int right = std::min({x + width,
+            runtime->clip.x + runtime->clip.w, runtime->target->width});
+        const int bottom = std::min({y + height,
+            runtime->clip.y + runtime->clip.h, runtime->target->height});
+        if (left >= right || top >= bottom) return 0;
+
+        const int first_x = x + ((left - x) / image->width) * image->width;
+        const int first_y = y + ((top - y) / image->height) * image->height;
+        for (int tile_y = first_y; tile_y < bottom; tile_y += image->height) {
+            for (int tile_x = first_x; tile_x < right; tile_x += image->width) {
+                runtime->drawImage(*image, tile_x, tile_y, flip);
+            }
+        }
+        return 0;
+    }
+
     static int cImageDrawIgnoringOffset(lua_State* state) {
         Impl* runtime = self(state);
         auto* image = static_cast<Image*>(
@@ -2903,6 +2940,14 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         int x, y, w, h; runtime->readRect(state, 1, x, y, w, h);
         runtime->fillRect(x, y, w, h, runtime->draw_color);
+        return 0;
+    }
+
+    static int cDrawPixel(lua_State* state) {
+        Impl* runtime = self(state);
+        const int x = static_cast<int>(std::lround(luaL_checknumber(state, 1)));
+        const int y = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
+        runtime->putLogicalPixel(x, y, runtime->draw_color);
         return 0;
     }
 
@@ -4971,8 +5016,15 @@ struct Runtime::Impl {
     }
 
     static int cSoundGetCurrentTime(lua_State* state) {
-        lua_pushnumber(state, static_cast<lua_Number>(self(state)->now_ms) / 1000.0);
+        Impl* runtime = self(state);
+        const uint32_t elapsed = runtime->now_ms - runtime->sound_time_reset_ms;
+        lua_pushnumber(state, static_cast<lua_Number>(elapsed) / 1000.0);
         return 1;
+    }
+
+    static int cSoundResetTime(lua_State* state) {
+        self(state)->sound_time_reset_ms = self(state)->now_ms;
+        return 0;
     }
 
     void pushTimerRegistry() { lua_rawgetp(lua, LUA_REGISTRYINDEX, &kTimerRegistryKey); }
@@ -6015,6 +6067,7 @@ struct Runtime::Impl {
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             pushFunction(cImageGc);lua_setfield(lua,-2,"__gc");
             setFunction(-1,"draw",cImageDraw);setFunction(-1,"drawCentered",cImageDrawCentered);
+            setFunction(-1,"drawTiled",cImageDrawTiled);
             setFunction(-1,"drawIgnoringOffset",cImageDrawIgnoringOffset);
             setFunction(-1,"drawScaled",cImageDrawScaled);
             setFunction(-1,"scaledImage",cImageScaledImage);
@@ -6195,6 +6248,7 @@ struct Runtime::Impl {
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
         setFunction(graphics,"setStrokeLocation",cSetStrokeLocation);setFunction(graphics,"fillRect",cFillRect);
         setFunction(graphics,"drawRect",cDrawRect);
+        setFunction(graphics,"drawPixel",cDrawPixel);
         setFunction(graphics,"fillRoundRect",cFillRoundRect);
         setFunction(graphics,"drawRoundRect",cDrawRoundRect);
         setFunction(graphics,"drawLine",cDrawLine);
@@ -6220,6 +6274,14 @@ struct Runtime::Impl {
         lua_pushliteral(lua,"italic");lua_setfield(lua,-2,"kVariantItalic");
         lua_setfield(lua,graphics,"font");
         lua_newtable(lua);setFunction(-1,"new",cImageNew);
+        // The Playdate image type exposes methods both through userdata and
+        // through its class table. The stripped Pulp runtime caches these
+        // class functions as locals (image.draw, image.drawTiled, image.clear)
+        // and calls them with the image object as the first argument.
+        setFunction(-1,"draw",cImageDraw);
+        setFunction(-1,"drawTiled",cImageDrawTiled);
+        setFunction(-1,"clear",cImageClear);
+        setFunction(-1,"setInverted",cImageSetInverted);
         setInteger(-1,"kDitherTypeNone",0);
         setInteger(-1,"kDitherTypeDiagonalLine",1);
         setInteger(-1,"kDitherTypeVerticalLine",2);
@@ -6245,6 +6307,7 @@ struct Runtime::Impl {
         setInteger(sound,"kWavePODigital",6);
         setInteger(sound,"kWavePOVosim",7);
         setFunction(sound,"getCurrentTime",cSoundGetCurrentTime);
+        setFunction(sound,"resetTime",cSoundResetTime);
         lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,sound,"sample");
         lua_newtable(lua);setFunction(-1,"new",cSoundNew);lua_setfield(lua,sound,"sampleplayer");
         lua_newtable(lua);setFunction(-1,"new",cFilePlayerNew);lua_setfield(lua,sound,"fileplayer");
@@ -6366,6 +6429,7 @@ struct Runtime::Impl {
         accelerometer_x=accelerometer_y=0.0f;accelerometer_z=1.0f;
         accelerometer_valid=false;accelerometer_running=false;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
+        sound_time_reset_ms=0;
         draw_offset_x=draw_offset_y=0;
         inverted_display=false;background_color=White;
         draw_color=solid_draw_color=draw_pattern_color=Black;
@@ -6380,7 +6444,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.13: external PDZ load + run");
+                 "PogoDate API STEP11.6.14: Pulp image + pixel + audio clock");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

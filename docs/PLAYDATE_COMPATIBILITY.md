@@ -152,6 +152,8 @@ same deferred-load boundary after its one Lua module starts successfully.
 - sandboxed files and datastore under each package bundle ID;
 - deferred standalone PDZ loading/running through `playdate.file.load()` and
   `playdate.file.run()`, including optional custom `_ENV` tables;
+- the standard Pulp runtime's class-style image draw/clear/tiled calls,
+  pixel drawing and resettable audio clock;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
@@ -165,9 +167,10 @@ same deferred-load boundary after its one Lua module starts successfully.
 - API coverage is intentionally incomplete. A new Lua game can still stop on
   the first unimplemented Playdate function or on CoreLib behavior beyond this
   compatibility layer.
-- Pulp's runtime can now load its separate `data.pdz`, but a Pulp game can
-  still reveal another unsupported graphics, sound, input or persistence call
-  after that data begins executing.
+- Pulp's runtime can load its separate `data.pdz`, cache its image tables and
+  enter gameplay. PulpScript game logic is covered by the same runtime rather
+  than by package-name workarounds, but less common SDK calls can still expose
+  another unsupported API in a future package.
 - Sprite collision response covers overlap, slide, freeze and basic bounce,
   accepts callback and direct-string response forms, and returns swept
   normal/move/touch metadata. It is not yet a byte-for-byte replacement for
@@ -177,7 +180,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.13.
+  the device after flashing STEP11.6.14.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
