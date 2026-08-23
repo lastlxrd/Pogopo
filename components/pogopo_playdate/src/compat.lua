@@ -617,6 +617,8 @@ end
 -- updateTimers(), not milliseconds.  This keeps frame-authored animation and
 -- difficulty pacing stable when a package requests a non-default refresh rate.
 local frameTimers = {}
+local pendingFrameTimers = {}
+local updatingFrameTimers = false
 local FrameTimer = {}
 FrameTimer.__index = FrameTimer
 
@@ -624,23 +626,61 @@ function FrameTimer:pause() self.paused = true end
 function FrameTimer:start() self.paused = false end
 function FrameTimer:reset()
 	self.frame = 0
+	self.value = self.startValue
+	self._reversed = false
+	self._delayRemaining = math.max(0, math.floor(self.delay or 0))
 	self.paused = false
 	self.removed = false
 end
 function FrameTimer:remove() self.removed = true end
 
+local function frameTimerLinear(t, b, c, d)
+	return b + c * (t / d)
+end
+
+local function frameTimerCall(callback, arguments, timer)
+	if type(callback) ~= "function" then return end
+	local count = arguments and (arguments.n or #arguments) or 0
+	if count > 0 then
+		callback(table.unpack(arguments, 1, count))
+	else
+		callback(timer)
+	end
+end
+
 playdate.frameTimer = {}
-function playdate.frameTimer.new(duration, callback)
+function playdate.frameTimer.new(duration, second, ...)
+	local arguments = table.pack(...)
+	local callback = type(second) == "function" and second or nil
+	local startValue = callback and 0 or (tonumber(second) or 0)
+	local endValue = callback and 0 or (tonumber(arguments[1]) or 0)
+	local easingFunction = not callback and type(arguments[2]) == "function"
+		and arguments[2] or frameTimerLinear
 	local timer = setmetatable({
 		duration=math.max(1, math.floor(duration or 1)),
-		callback=callback,
+		startValue=startValue,
+		endValue=endValue,
+		value=startValue,
+		easingFunction=easingFunction,
 		frame=0,
+		delay=0,
+		_reversed=false,
+		_completionCallback=callback,
+		_callbackArguments=callback and arguments or nil,
 		paused=false,
 		removed=false,
 		repeats=false,
+		reverses=false,
+		discardOnCompletion=true,
 	}, FrameTimer)
-	frameTimers[#frameTimers + 1] = timer
+	local destination = updatingFrameTimers and pendingFrameTimers or frameTimers
+	destination[#destination + 1] = timer
 	return timer
+end
+
+function playdate.frameTimer.performAfterDelay(delay, callback, ...)
+	assert(type(callback) == "function", "frameTimer callback must be a function")
+	return playdate.frameTimer.new(delay, callback, ...)
 end
 
 function playdate.frameTimer.allTimers()
@@ -653,18 +693,63 @@ end
 
 function playdate.frameTimer.updateTimers()
 	local active = {}
+	updatingFrameTimers = true
 	for i=1,#frameTimers do
 		local timer = frameTimers[i]
 		if not timer.removed then
 			if not timer.paused then
-				timer.frame = timer.frame + 1
-				if timer.frame >= timer.duration then
-					if timer.callback then timer.callback() end
-					if timer.repeats then timer.frame = 0 else timer.removed = true end
+				if timer._delayRemaining == nil then
+					timer._delayRemaining = math.max(0, math.floor(timer.delay or 0))
+				end
+				if timer._delayRemaining > 0 then
+					timer._delayRemaining = timer._delayRemaining - 1
+				else
+					timer.frame = math.min(timer.duration, timer.frame + 1)
+					local reversed = timer._reversed == true
+					local from = reversed and timer.endValue or timer.startValue
+					local to = reversed and timer.startValue or timer.endValue
+					local easing = reversed and timer.reverseEasingFunction
+						or timer.easingFunction or frameTimerLinear
+					timer.value = easing(timer.frame, from, to - from,
+						timer.duration, timer.easingAmplitude, timer.easingPeriod)
+					frameTimerCall(timer.updateCallback,
+						timer._callbackArguments, timer)
+
+					if timer.frame >= timer.duration then
+						local cycleComplete = true
+						if timer.reverses and not reversed then
+							timer._reversed = true
+							timer.frame = 0
+							cycleComplete = false
+						elseif timer.repeats then
+							timer._reversed = false
+							timer.frame = 0
+						else
+							if timer.discardOnCompletion == false then
+								timer.paused = true
+							else
+								timer.removed = true
+							end
+						end
+
+						if cycleComplete then
+							frameTimerCall(timer._completionCallback,
+								timer._callbackArguments, timer)
+							frameTimerCall(timer.timerEndedCallback,
+								timer.timerEndedArgs, timer)
+						end
+					end
 				end
 			end
 			if not timer.removed then active[#active + 1] = timer end
 		end
 	end
+	updatingFrameTimers = false
+	for i=1,#pendingFrameTimers do
+		if not pendingFrameTimers[i].removed then
+			active[#active + 1] = pendingFrameTimers[i]
+		end
+	end
+	pendingFrameTimers = {}
 	frameTimers = active
 end

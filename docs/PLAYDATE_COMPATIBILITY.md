@@ -60,15 +60,15 @@ above.
 
 - display size, scale, offset, inversion and per-package refresh rate;
 - buttons, just-pressed/released state and input-handler stack;
-- images, image tables, PFT fonts, draw modes, patterns, clipping, contexts,
-  focus locking, primitives, text, system/current-font lookup and
-  rotated/faded drawing;
+- images, image tables, PFT fonts, draw modes, bitmap and ordered-dither
+  patterns, clipping, contexts, focus locking, primitives, text,
+  system/current-font lookup and rotated/faded drawing;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, visibility, image/center/scale/rotation/clip state,
   overlap queries, group filters, tilemap-backed sprites and tilemap walls;
-- callback/value millisecond timers, frame timers, bundled easing functions
-  and elapsed-time helpers;
+- callback/value millisecond timers; callback/value frame timers with easing,
+  repeats and reverses; bundled easing functions and elapsed-time helpers;
 - sandboxed files and datastore under each package bundle ID;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,

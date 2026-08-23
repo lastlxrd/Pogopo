@@ -495,6 +495,9 @@ struct Runtime::Impl {
     bool is_running = false;
     bool inverted_display = false;
     uint8_t draw_color = Black;
+    uint8_t solid_draw_color = Black;
+    uint8_t draw_pattern_color = Black;
+    bool draw_pattern_transparent = false;
     std::array<uint8_t, 8> draw_pattern{{0xff, 0xff, 0xff, 0xff,
                                          0xff, 0xff, 0xff, 0xff}};
     int pattern_offset_x = 0;
@@ -931,8 +934,14 @@ struct Runtime::Impl {
                 destination_y - pattern_offset_y) & 7U;
             const unsigned column = static_cast<unsigned>(
                 destination_x - pattern_offset_x) & 7U;
-            source = (draw_pattern[row] & (0x80U >> column)) != 0U
-                ? Black : White;
+            const bool set =
+                (draw_pattern[row] & (0x80U >> column)) != 0U;
+            if (draw_pattern_transparent) {
+                if (set) source = draw_pattern_color;
+                else source = Clear;
+            } else {
+                source = set ? Black : White;
+            }
         }
         if (source == Xor) {
             return targetPixel(destination_x, destination_y) == Black
@@ -1244,6 +1253,7 @@ struct Runtime::Impl {
         resetTargetToScreen();
         draw_mode = Copy;
         draw_color = Black;
+        solid_draw_color = Black;
         fillTarget(background_color);
     }
 
@@ -1788,7 +1798,9 @@ struct Runtime::Impl {
     }
 
     static int cSetColor(lua_State* state) {
-        self(state)->draw_color = checkPlaydateColor(state, 1, Black);
+        Impl* runtime = self(state);
+        runtime->solid_draw_color = checkPlaydateColor(state, 1, Black);
+        runtime->draw_color = runtime->solid_draw_color;
         return 0;
     }
 
@@ -1811,6 +1823,73 @@ struct Runtime::Impl {
             luaL_optinteger(state, 2, 0));
         runtime->pattern_offset_y = static_cast<int>(
             luaL_optinteger(state, 3, 0));
+        runtime->draw_pattern_transparent = false;
+        runtime->draw_color = Pattern;
+        return 0;
+    }
+
+    static int cSetDitherPattern(lua_State* state) {
+        Impl* runtime = self(state);
+        const float alpha = std::clamp(
+            static_cast<float>(luaL_checknumber(state, 1)), 0.0f, 1.0f);
+        const int dither_type = static_cast<int>(
+            luaL_optinteger(state, 2, 7)); // kDitherTypeBayer8x8
+
+        static constexpr uint8_t bayer2[2][2] = {
+            {0, 2}, {3, 1},
+        };
+        static constexpr uint8_t bayer4[4][4] = {
+            {0, 8, 2, 10}, {12, 4, 14, 6},
+            {3, 11, 1, 9}, {15, 7, 13, 5},
+        };
+        static constexpr uint8_t bayer8[8][8] = {
+            {0,32,8,40,2,34,10,42}, {48,16,56,24,50,18,58,26},
+            {12,44,4,36,14,46,6,38}, {60,28,52,20,62,30,54,22},
+            {3,35,11,43,1,33,9,41}, {51,19,59,27,49,17,57,25},
+            {15,47,7,39,13,45,5,37}, {63,31,55,23,61,29,53,21},
+        };
+
+        // Playdate's white dither pattern has its documented inverted-alpha
+        // behavior. Black (the normal Noble use) maps 0 to transparent and 1
+        // to opaque; white deliberately does the reverse.
+        const bool white = runtime->solid_draw_color == White;
+        const float density = white ? 1.0f - alpha : alpha;
+        runtime->draw_pattern.fill(0U);
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                int threshold = 0;
+                int levels = 64;
+                switch (dither_type) {
+                    case 0: // none
+                        threshold = 0; levels = 2; break;
+                    case 1: // diagonal line
+                        threshold = (x + y) & 7; levels = 8; break;
+                    case 2: // vertical line
+                        threshold = x; levels = 8; break;
+                    case 3: // horizontal line
+                        threshold = y; levels = 8; break;
+                    case 4: // screen
+                        threshold = ((x + y * 3) & 7); levels = 8; break;
+                    case 5: // Bayer 2x2
+                        threshold = bayer2[y & 1][x & 1]; levels = 4; break;
+                    case 6: // Bayer 4x4
+                        threshold = bayer4[y & 3][x & 3]; levels = 16; break;
+                    default: // Bayer 8x8 and deterministic fallbacks
+                        threshold = bayer8[y][x]; levels = 64; break;
+                }
+                const bool set = dither_type == 0
+                    ? density >= 0.5f
+                    : static_cast<float>(threshold) < density * levels;
+                if (set) {
+                    runtime->draw_pattern[static_cast<size_t>(y)] |=
+                        static_cast<uint8_t>(0x80U >> x);
+                }
+            }
+        }
+        runtime->draw_pattern_color = white ? White : Black;
+        runtime->draw_pattern_transparent = true;
+        runtime->pattern_offset_x = 0;
+        runtime->pattern_offset_y = 0;
         runtime->draw_color = Pattern;
         return 0;
     }
@@ -4262,6 +4341,7 @@ struct Runtime::Impl {
         setFunction(graphics,"getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"clear",cGraphicsClear);setFunction(graphics,"setColor",cSetColor);
         setFunction(graphics,"setPattern",cSetPattern);
+        setFunction(graphics,"setDitherPattern",cSetDitherPattern);
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
         setFunction(graphics,"setStrokeLocation",cSetStrokeLocation);setFunction(graphics,"fillRect",cFillRect);
         setFunction(graphics,"drawRect",cDrawRect);setFunction(graphics,"drawLine",cDrawLine);
@@ -4285,7 +4365,17 @@ struct Runtime::Impl {
         lua_pushliteral(lua,"italic");lua_setfield(lua,-2,"kVariantItalic");
         lua_setfield(lua,graphics,"font");
         lua_newtable(lua);setFunction(-1,"new",cImageNew);
-        setInteger(-1,"kDitherTypeBayer2x2",0);setInteger(-1,"kDitherTypeHorizontalLine",1);setInteger(-1,"kDitherTypeDiagonalLine",2);
+        setInteger(-1,"kDitherTypeNone",0);
+        setInteger(-1,"kDitherTypeDiagonalLine",1);
+        setInteger(-1,"kDitherTypeVerticalLine",2);
+        setInteger(-1,"kDitherTypeHorizontalLine",3);
+        setInteger(-1,"kDitherTypeScreen",4);
+        setInteger(-1,"kDitherTypeBayer2x2",5);
+        setInteger(-1,"kDitherTypeBayer4x4",6);
+        setInteger(-1,"kDitherTypeBayer8x8",7);
+        setInteger(-1,"kDitherTypeFloydSteinberg",8);
+        setInteger(-1,"kDitherTypeBurkes",9);
+        setInteger(-1,"kDitherTypeAtkinson",10);
         lua_setfield(lua,graphics,"image");
         lua_newtable(lua);setFunction(-1,"new",cImageTableNew);lua_setfield(lua,graphics,"imagetable");
         lua_setfield(lua,playdate,"graphics");
@@ -4380,14 +4470,17 @@ struct Runtime::Impl {
         frame_accumulator_units=0;now_ms=0;elapsed_reset_ms=0;
         held_buttons=pressed_buttons=previous_held_buttons=0;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
-        inverted_display=false;background_color=White;current_font=nullptr;
+        inverted_display=false;background_color=White;
+        draw_color=solid_draw_color=draw_pattern_color=Black;
+        draw_pattern_transparent=false;draw_pattern.fill(0xffU);
+        pattern_offset_x=pattern_offset_y=0;current_font=nullptr;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
         resetTargetToScreen();
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.2: lockFocus + aligned PFT + stereo PDA");
+                 "PogoDate API STEP11.6.3: dither pattern + full frameTimer forms");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size) || !importModule("main")){
             lua_close(lua);lua=nullptr;releaseImage(screen);clearSoundCache();return ESP_FAIL;
