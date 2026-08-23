@@ -70,6 +70,10 @@ public:
     void stop();
 
     void setInput(uint8_t held_mask, uint8_t pressed_mask);
+    // Supplies a future physical/module crank source. Pogopo currently has no
+    // built-in crank, so a runtime that never calls this remains at the safe
+    // neutral Playdate state: 0 degrees, extended, and no movement.
+    void setCrank(float position_degrees, bool docked, bool valid = true);
     // Supplies the latest normalized accelerometer sample in g. Games opt in
     // through playdate.startAccelerometer()/readAccelerometer().
     void setAccelerometer(float x, float y, float z, bool valid = true);

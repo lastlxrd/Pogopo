@@ -556,6 +556,16 @@ struct Runtime::Impl {
     uint8_t held_buttons = 0;
     uint8_t pressed_buttons = 0;
     uint8_t previous_held_buttons = 0;
+    float crank_position = 0.0f;
+    double crank_unwrapped_position = 0.0;
+    double crank_tick_previous_position = 0.0;
+    float crank_pending_change = 0.0f;
+    float crank_pending_accelerated_change = 0.0f;
+    uint32_t crank_sample_ms = 0;
+    bool crank_initialized = false;
+    bool crank_docked = false;
+    int8_t crank_dock_event = 0;
+    bool crank_sounds_disabled = false;
     float accelerometer_x = 0.0f;
     float accelerometer_y = 0.0f;
     float accelerometer_z = 1.0f;
@@ -4055,7 +4065,48 @@ struct Runtime::Impl {
     }
 
     static int cGetReduceFlashing(lua_State* state) { lua_pushboolean(state, 1); return 1; }
-    static int cGetCrankTicks(lua_State* state) { lua_pushinteger(state, 0); return 1; }
+    static int cIsCrankDocked(lua_State* state) {
+        lua_pushboolean(state, self(state)->crank_docked);
+        return 1;
+    }
+    static int cGetCrankPosition(lua_State* state) {
+        lua_pushnumber(state, self(state)->crank_position);
+        return 1;
+    }
+    static int cGetCrankChange(lua_State* state) {
+        Impl* runtime = self(state);
+        lua_pushnumber(state, runtime->crank_pending_change);
+        lua_pushnumber(state, runtime->crank_pending_accelerated_change);
+        runtime->crank_pending_change = 0.0f;
+        runtime->crank_pending_accelerated_change = 0.0f;
+        return 2;
+    }
+    static int cGetCrankTicks(lua_State* state) {
+        Impl* runtime = self(state);
+        const lua_Integer ticks_per_revolution = luaL_checkinteger(state, 1);
+        if (ticks_per_revolution <= 0 || ticks_per_revolution > 100000) {
+            return luaL_argerror(state, 1,
+                "ticks per revolution must be between 1 and 100000");
+        }
+        const double scale = static_cast<double>(ticks_per_revolution) / 360.0;
+        const double previous = runtime->crank_tick_previous_position * scale;
+        const double current = runtime->crank_unwrapped_position * scale;
+        const int64_t previous_tick = static_cast<int64_t>(std::floor(previous));
+        const int64_t current_tick = static_cast<int64_t>(std::floor(current));
+        const int64_t difference = current_tick - previous_tick;
+        runtime->crank_tick_previous_position = runtime->crank_unwrapped_position;
+        lua_pushinteger(state, static_cast<lua_Integer>(std::clamp<int64_t>(
+            difference, std::numeric_limits<lua_Integer>::min(),
+            std::numeric_limits<lua_Integer>::max())));
+        return 1;
+    }
+    static int cSetCrankSoundsDisabled(lua_State* state) {
+        Impl* runtime = self(state);
+        const bool previous = runtime->crank_sounds_disabled;
+        runtime->crank_sounds_disabled = lua_toboolean(state, 1) != 0;
+        lua_pushboolean(state, previous);
+        return 1;
+    }
     static int cNoop(lua_State*) { return 0; }
     static int cDrawFps(lua_State*) { return 0; }
     static int cSetMenuImage(lua_State*) { return 0; }
@@ -5932,8 +5983,12 @@ struct Runtime::Impl {
         setFunction(playdate,"epochFromGMTTime",cEpochFromGmtTime);
         setFunction(playdate,"timeFromEpoch",cTimeFromEpoch);
         setFunction(playdate,"GMTTimeFromEpoch",cGmtTimeFromEpoch);
-        setFunction(playdate,"getReduceFlashing",cGetReduceFlashing);setFunction(playdate,"getCrankTicks",cGetCrankTicks);
-        setFunction(playdate,"setCrankSoundsDisabled",cNoop);
+        setFunction(playdate,"getReduceFlashing",cGetReduceFlashing);
+        setFunction(playdate,"isCrankDocked",cIsCrankDocked);
+        setFunction(playdate,"getCrankPosition",cGetCrankPosition);
+        setFunction(playdate,"getCrankChange",cGetCrankChange);
+        setFunction(playdate,"getCrankTicks",cGetCrankTicks);
+        setFunction(playdate,"setCrankSoundsDisabled",cSetCrankSoundsDisabled);
         setFunction(playdate,"setAutoLockDisabled",cNoop);
         setFunction(playdate,"startAccelerometer",cStartAccelerometer);
         setFunction(playdate,"stopAccelerometer",cStopAccelerometer);
@@ -6088,6 +6143,29 @@ struct Runtime::Impl {
         lua_settop(lua,top);return true;
     }
 
+    bool dispatchCrank(bool& consumed) {
+        consumed = false;
+        if (crank_pending_change == 0.0f && crank_dock_event == 0) return true;
+        const int top = lua_gettop(lua);
+        lua_getglobal(lua, "_pogodate_dispatch_crank");
+        if (!lua_isfunction(lua, -1)) {
+            lua_settop(lua, top);
+            return true;
+        }
+        lua_pushnumber(lua, crank_pending_change);
+        lua_pushnumber(lua, crank_pending_accelerated_change);
+        lua_pushinteger(lua, crank_dock_event);
+        if (lua_pcall(lua, 3, 1, 0) != LUA_OK) {
+            const bool result = takeLuaError("crank input");
+            lua_settop(lua, top);
+            return result;
+        }
+        consumed = lua_toboolean(lua, -1) != 0;
+        crank_dock_event = 0;
+        lua_settop(lua, top);
+        return true;
+    }
+
     esp_err_t start(gfx::Canvas& target_canvas,audio::Audio& target_audio,
                     storage::Storage& target_storage,Game selected_game,
                     const char* package_path = nullptr) {
@@ -6131,6 +6209,11 @@ struct Runtime::Impl {
         refresh_rate=30;runtime_stats.requested_fps=refresh_rate;
         frame_accumulator_units=0;now_ms=0;elapsed_reset_ms=0;
         held_buttons=pressed_buttons=previous_held_buttons=0;
+        crank_position=0.0f;crank_unwrapped_position=0.0;
+        crank_tick_previous_position=0.0;crank_pending_change=0.0f;
+        crank_pending_accelerated_change=0.0f;crank_sample_ms=0;
+        crank_initialized=false;crank_docked=false;crank_dock_event=0;
+        crank_sounds_disabled=false;
         accelerometer_x=accelerometer_y=0.0f;accelerometer_z=1.0f;
         accelerometer_valid=false;accelerometer_running=false;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
@@ -6148,7 +6231,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.11: managed synth voices");
+                 "PogoDate API STEP11.6.12: complete Lua crank surface");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -6217,9 +6300,15 @@ struct Runtime::Impl {
             frame_dt_ms=(1000U+refresh_rate/2U)/std::max<uint32_t>(1U,refresh_rate);
             const uint8_t released=static_cast<uint8_t>(previous_held_buttons&~held_buttons);
             const int64_t started=esp_timer_get_time();
-            if(!dispatchInput(pressed_buttons,released)||!callGlobal("playdate","update")){
+            bool crank_consumed=false;
+            if(!dispatchInput(pressed_buttons,released)||
+               !dispatchCrank(crank_consumed)||!callGlobal("playdate","update")){
                 is_running=false;
                 return 0;
+            }
+            if(crank_consumed){
+                crank_pending_change=0.0f;
+                crank_pending_accelerated_change=0.0f;
             }
             const int64_t logic_finished=esp_timer_get_time();
             flushScreen();previous_held_buttons=held_buttons;
@@ -6253,6 +6342,36 @@ esp_err_t Runtime::startPackage(gfx::Canvas& canvas,audio::Audio& audio,
 }
 void Runtime::stop(){if(impl_)impl_->stop();}
 void Runtime::setInput(uint8_t held_mask,uint8_t pressed_mask){if(!impl_)return;impl_->held_buttons=held_mask;impl_->pressed_buttons=static_cast<uint8_t>(impl_->pressed_buttons|pressed_mask);}
+void Runtime::setCrank(float position_degrees,bool docked,bool valid){
+    if(!impl_)return;
+    if(!valid){position_degrees=0.0f;docked=false;}
+    if(!std::isfinite(position_degrees))position_degrees=0.0f;
+    position_degrees=std::fmod(position_degrees,360.0f);
+    if(position_degrees<0.0f)position_degrees+=360.0f;
+    if(!impl_->crank_initialized){
+        impl_->crank_position=position_degrees;
+        impl_->crank_unwrapped_position=position_degrees;
+        impl_->crank_tick_previous_position=position_degrees;
+        impl_->crank_sample_ms=impl_->now_ms;
+        impl_->crank_initialized=true;
+    }else{
+        float change=position_degrees-impl_->crank_position;
+        if(change>180.0f)change-=360.0f;
+        else if(change<=-180.0f)change+=360.0f;
+        const uint32_t elapsed=std::max<uint32_t>(1U,impl_->now_ms-impl_->crank_sample_ms);
+        const float degrees_per_second=std::fabs(change)*1000.0f/static_cast<float>(elapsed);
+        const float acceleration=1.0f+std::min(4.0f,degrees_per_second/180.0f);
+        impl_->crank_pending_change+=change;
+        impl_->crank_pending_accelerated_change+=change*acceleration;
+        impl_->crank_unwrapped_position+=change;
+        impl_->crank_position=position_degrees;
+        impl_->crank_sample_ms=impl_->now_ms;
+    }
+    if(impl_->crank_docked!=docked){
+        impl_->crank_docked=docked;
+        impl_->crank_dock_event=docked?1:-1;
+    }
+}
 void Runtime::setAccelerometer(float x,float y,float z,bool valid){
     if(!impl_)return;
     impl_->accelerometer_x=x;impl_->accelerometer_y=y;impl_->accelerometer_z=z;

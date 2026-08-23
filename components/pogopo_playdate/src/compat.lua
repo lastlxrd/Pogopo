@@ -883,6 +883,41 @@ function _pogodate_dispatch_input(pressed, released)
 	end
 end
 
+-- Crank events use the same responder stack as Playdate. The first handler
+-- that implements cranked() receives movement; an exclusive handler masks the
+-- handlers below it even when it does not implement the callback. If no stack
+-- entry handles movement, the playdate.cranked callback is the final responder.
+function _pogodate_dispatch_crank(change, acceleratedChange, dockEvent)
+	local consumed = false
+	if change ~= 0 then
+		local stack = playdate.inputHandlers.stack
+		local masked = false
+		for index=#stack,1,-1 do
+			local entry = stack[index]
+			local callback = entry.handler.cranked
+			if callback then
+				callback(change, acceleratedChange)
+				consumed = true
+				break
+			end
+			if entry.exclusive then
+				masked = true
+				break
+			end
+		end
+		if not consumed and not masked and type(playdate.cranked) == "function" then
+			playdate.cranked(change, acceleratedChange)
+			consumed = true
+		end
+	end
+	if dockEvent > 0 and type(playdate.crankDocked) == "function" then
+		playdate.crankDocked()
+	elseif dockEvent < 0 and type(playdate.crankUndocked) == "function" then
+		playdate.crankUndocked()
+	end
+	return consumed
+end
+
 local Gridview = {}
 Gridview.__index = Gridview
 function Gridview.new(cellWidth, cellHeight)
@@ -975,7 +1010,28 @@ function Gridview:drawInRect(x, y, width, height)
 	end
 	self.needsdisplay = false
 end
-playdate.ui = {gridview=Gridview}
+local CrankIndicator = {
+	clockwise=true,
+	_frame=0,
+}
+function CrankIndicator:draw(xOffset, yOffset)
+	xOffset, yOffset = xOffset or 0, yOffset or 0
+	self._frame = (self._frame + 1) % 42
+	local x, y = 344 + xOffset, 182 + yOffset
+	local centerX, centerY = x + 26, y + 30
+	local direction = self.clockwise == false and -1 or 1
+	local angle = math.rad((self._frame * direction * 360 / 42) - 90)
+	local handleX = math.floor(centerX + math.cos(angle) * 14 + 0.5)
+	local handleY = math.floor(centerY + math.sin(angle) * 14 + 0.5)
+	playdate.graphics.drawText("CRANK", x + 2, y)
+	playdate.graphics.drawCircleAtPoint(centerX, centerY, 16)
+	playdate.graphics.drawLine(centerX, centerY, handleX, handleY)
+	playdate.graphics.fillCircleAtPoint(handleX, handleY, 3)
+end
+function CrankIndicator:resetAnimation() self._frame = 0 end
+function CrankIndicator:getBounds() return 344, 182, 56, 58 end
+
+playdate.ui = {gridview=Gridview, crankIndicator=CrankIndicator}
 
 kTextAlignment = {left=0, center=1, right=2}
 

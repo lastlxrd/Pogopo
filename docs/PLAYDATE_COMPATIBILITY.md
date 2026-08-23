@@ -99,12 +99,26 @@ waveforms and transpose, applies ADSR/volume/parameters, then exercises
 `noteOff()` and `stop()`. The 300-frame run produces four managed tones with
 zero Lua errors. The user's separate game is not redistributed with the test.
 
+### Crank API probe
+
+A one-module Lua probe covers every documented crank query, sound-setting,
+callback, input-handler and standard indicator entry point. A host-only input
+source advances the absolute angle through three 30-degree steps, verifies
+positive ticks and both accelerated/non-accelerated change values, routes one
+movement through the global callback and one through an exclusive input
+handler, then checks dock and undock callbacks. The 300-frame run completes
+with zero Lua errors. Pogopo hardware without a crank module stays at the
+neutral extended/0-degree/no-movement state.
+
 ## Currently implemented API areas
 
 - display size, scale, offset, inversion and per-package refresh rate;
 - buttons, just-pressed/released state and input-handler stack, using the
   same physical left/right mapping as PogopoOS plus a bundle-scoped Maze
   menu-direction quirk;
+- all documented crank queries and callbacks, crank input-handler routing,
+  sound-disable state and the shared UI crank indicator; hardware without a
+  crank module reports an extended crank at 0 degrees with zero movement;
 - images with fractional drawing, sparse content bounds and generated scaling,
   image tables with
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
@@ -144,10 +158,12 @@ zero Lua errors. The user's separate game is not redistributed with the test.
   accepts callback and direct-string response forms, and returns swept
   normal/move/touch metadata. It is not yet a byte-for-byte replacement for
   every edge case in Playdate's native solver.
-- Crank input, networking, microphone and SDK extensions are not emulated by
-  this step. Accelerometer axes and filtering are implemented for Pogopo's
+- Networking, microphone and SDK extensions are not emulated by this step.
+  The Lua crank API is implemented, but Pogopo has no built-in physical crank;
+  crank-driven gameplay therefore remains stationary until an expansion
+  module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.11.
+  the device after flashing STEP11.6.12.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
