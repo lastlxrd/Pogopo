@@ -3438,6 +3438,14 @@ struct Runtime::Impl {
             font = static_cast<PdFont*>(lua_touserdata(state, 2));
         } else if (lua_gettop(state) >= 2 && lua_istable(state, 2)) {
             lua_getfield(state, 2, "normal");
+            if (lua_isnil(state, -1)) {
+                lua_pop(state, 1);
+                lua_rawgeti(state, 2, 0);
+            }
+            if (lua_isnil(state, -1)) {
+                lua_pop(state, 1);
+                lua_rawgeti(state, 2, 1);
+            }
             if (auto* family_font = static_cast<PdFont*>(
                     luaL_testudata(state, -1, kFontMetatable))) {
                 font = family_font;
@@ -6546,9 +6554,9 @@ struct Runtime::Impl {
         setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
         setFunction(graphics,"getBackgroundColor",cGetBackgroundColor);
         lua_newtable(lua);setFunction(-1,"new",cFontNew);
-        lua_pushliteral(lua,"normal");lua_setfield(lua,-2,"kVariantNormal");
-        lua_pushliteral(lua,"bold");lua_setfield(lua,-2,"kVariantBold");
-        lua_pushliteral(lua,"italic");lua_setfield(lua,-2,"kVariantItalic");
+        setInteger(-1,"kVariantNormal",0);
+        setInteger(-1,"kVariantBold",1);
+        setInteger(-1,"kVariantItalic",2);
         lua_setfield(lua,graphics,"font");
         lua_newtable(lua);setFunction(-1,"new",cImageNew);
         // The Playdate image type exposes methods both through userdata and
@@ -6722,7 +6730,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.19: font-family compatibility");
+                 "PogoDate API STEP11.6.20: CoreLibs object/scene compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

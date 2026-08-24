@@ -25,6 +25,12 @@ tracking/leading, global tracking, font-object drawing/alignment, glyph image
 extraction and bounded text sizing. These are generic runtime APIs rather than
 Hillslide-specific substitutions.
 
+STEP11.6.20 aligns PogoDate's Lua class system with `CoreLibs/object.lua`:
+property-backed and namespaced classes, class metadata, parent allocation,
+concrete class links on instances, `isa`, inherited metamethods and callable
+scene reconstruction are supported. This fixes class-driven scene managers
+without making arbitrary Lua tables callable.
+
 ## Validated games
 
 ### Onebit Frogger
@@ -200,7 +206,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.19.
+  the device after flashing STEP11.6.20.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not

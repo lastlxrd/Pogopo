@@ -4,7 +4,10 @@
 
 Object = Object or {}
 Object.__index = Object
+Object.class = Object
+Object.className = "Object"
 function Object:init() end
+function Object.baseObject() return {} end
 
 local function objectIsA(value, candidate)
 	if type(candidate) == "string" then candidate = _G[candidate] end
@@ -17,37 +20,86 @@ local function objectIsA(value, candidate)
 	return false
 end
 
-function Object:isa(candidate) return objectIsA(self, candidate) end
+function Object:isa(candidate)
+	if type(candidate)=="string" then candidate=_G[candidate] end
+	local current=self
+	while type(current)=="table" do
+		if current==candidate then return true end
+		current=rawget(current,"super")
+	end
+	return false
+end
+function Object:tableDump(indent,source)
+	indent=indent or 0; source=source or self
+	for key,value in pairs(source) do
+		if key~="__index" and key~="class" and key~="super" then
+			print(string.rep("  ",indent)..tostring(key)..": "..tostring(value))
+		end
+	end
+	local parent=rawget(source,"super")
+	if type(parent)=="table" and parent.className~="Object" then
+		parent:tableDump(indent+1,parent)
+	end
+end
+function printTable(...)
+	local seen={}
+	local function render(value,indent)
+		if type(value)~="table" then return tostring(value) end
+		if seen[value] then return "<table reference>" end
+		seen[value]=true
+		local rows={"{"}
+		for key,nested in pairs(value) do
+			rows[#rows+1]=string.rep("\t",indent+1).."["..tostring(key).."] = "..
+				render(nested,indent+1).."," 
+		end
+		rows[#rows+1]=string.rep("\t",indent).."}"
+		return table.concat(rows,"\n")
+	end
+	local values={...}
+	for index=1,#values do values[index]=render(values[index],0) end
+	print(table.unpack(values))
+end
 setmetatable(Object, {
 	__call = function(cls, ...)
-		local value = setmetatable({}, cls)
-		if value.init then value:init(...) end
+		local value = cls.baseObject()
+		setmetatable(value,cls)
+		value.super=cls
+		cls.init(value,...)
 		return value
 	end,
 })
 
-function class(name)
-	local cls = {}
-	cls.__index = cls
-	local mt = {
-		__call = function(class_table, ...)
-			local value = setmetatable({}, class_table)
-			if value.init then value:init(...) end
-			return value
-		end,
-	}
-	setmetatable(cls, mt)
-	_G[name] = cls
-	return {
-		extends = function(parent)
-			if type(parent) == "string" then parent = _G[parent] end
-			parent = parent or Object
-			cls.super = parent
-			mt.__index = parent
-			setmetatable(cls, mt)
-			return cls
-		end,
-	}
+function class(name,properties,namespace)
+	return { extends=function(parent)
+		if type(parent)=="string" then parent=_G[parent] end
+		parent=parent or Object
+		local child=properties or {}
+		child.__index=child
+		child.class=child
+		child.className=name
+		child.super=parent
+		-- Metamethod lookup does not follow the class inheritance chain.
+		-- Match CoreLibs/Object.lua by copying the parent's operators.
+		for _,key in ipairs({"__gc","__newindex","__mode","__tostring",
+			"__len","__unm","__add","__sub","__mul","__div","__mod",
+			"__pow","__concat","__eq","__lt","__le"}) do
+			child[key]=parent[key]
+		end
+		setmetatable(child,{
+			__index=parent,
+			__call=function(_, ...)
+				local value=child.baseObject()
+				setmetatable(value,child)
+				-- CoreLibs stores the concrete class on each instance. Code
+				-- which queues scene instances commonly calls this class later.
+				value.super=child
+				child.init(value,...)
+				return value
+			end,
+		})
+		if namespace~=nil then namespace[name]=child else _G[name]=child end
+		-- The SDK's extends() intentionally has no return value.
+	end }
 end
 
 -- CoreLibs/utilities table additions.  Newer Noble Engine releases use
@@ -116,6 +168,9 @@ local query_sequence = 0
 local spriteBounds
 local Sprite = {}
 Sprite.__index = Sprite
+Sprite.class = Sprite
+Sprite.className = "playdate.graphics.sprite"
+Sprite.baseObject = Object.baseObject
 setmetatable(Sprite, {
 	__call = function(cls, image)
 		local value = setmetatable({}, cls)
@@ -1910,20 +1965,20 @@ function gfx.font.newFamily(fontPaths)
 	end
 	return family
 end
-function gfx.getTextSizeForMaxWidth(text,maxWidth,fontFamily,leadingAdjustment)
+function gfx.getTextSizeForMaxWidth(text,maxWidth,leadingAdjustment,font)
 	text=tostring(text or "")
 	maxWidth=math.max(1,math.floor(tonumber(maxWidth) or 1))
-	local _,singleHeight=gfx.getTextSize("M",fontFamily)
+	local _,singleHeight=gfx.getTextSize("M",font)
 	local leading=math.floor(tonumber(leadingAdjustment) or 0)
 	local widest,lineWidth,lines=0,0,1
 	for token in text:gmatch("[^%s]+%s*") do
-		local tokenWidth=gfx.getTextSize(token,fontFamily)
+		local tokenWidth=gfx.getTextSize(token,font)
 		if lineWidth>0 and lineWidth+tokenWidth>maxWidth then
 			widest=math.max(widest,lineWidth); lineWidth=0; lines=lines+1
 		end
 		if tokenWidth>maxWidth then
 			for char in token:gmatch("[\1-\127\194-\244][\128-\191]*") do
-				local charWidth=gfx.getTextSize(char,fontFamily)
+				local charWidth=gfx.getTextSize(char,font)
 				if lineWidth>0 and lineWidth+charWidth>maxWidth then
 					widest=math.max(widest,lineWidth); lineWidth=0; lines=lines+1
 				end
