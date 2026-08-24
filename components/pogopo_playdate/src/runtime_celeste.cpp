@@ -109,15 +109,22 @@ struct Image {
     int16_t black_top = 0;
     int16_t black_right = 0;
     int16_t black_bottom = 0;
+    const uint8_t* serialized = nullptr;
+    uint32_t serialized_size = 0;
 };
 
 struct ImageTable {
     const CelesteAsset* asset = nullptr;
-    uint8_t* data = nullptr;
-    size_t data_size = 0;
+    uint8_t* packed = nullptr;
+    uint32_t packed_size = 0;
+    uint32_t unpacked_size = 0;
     uint16_t frame_width = 0;
     uint16_t frame_height = 0;
     uint16_t frame_count = 0;
+    uint16_t columns = 0;
+    uint8_t cache_cursor = 0;
+    uint16_t cached_indices[48]{};
+    char path[384]{};
 };
 
 struct PdFont {
@@ -1183,6 +1190,34 @@ struct Runtime::Impl {
             }
             return value;
         }
+        if (image.serialized && image.serialized_size >= 16U) {
+            const uint8_t* bytes = image.serialized;
+            const uint16_t stored_width = readLe16(bytes);
+            const uint16_t stored_height = readLe16(bytes + 2);
+            const uint16_t row_bytes = readLe16(bytes + 4);
+            const uint16_t left = readLe16(bytes + 6);
+            const uint16_t top = readLe16(bytes + 10);
+            const uint16_t flags = readLe16(bytes + 14);
+            if (x < left || y < top || x >= left + stored_width ||
+                y >= top + stored_height || row_bytes == 0) return Clear;
+            const size_t plane_size = static_cast<size_t>(row_bytes) * stored_height;
+            const bool has_mask = (flags & 0x03U) != 0U;
+            const size_t plane_count = has_mask ? 2U : 1U;
+            if (plane_size > (image.serialized_size - 16U) / plane_count) {
+                return Clear;
+            }
+            const unsigned local_x = static_cast<unsigned>(x - left);
+            const unsigned local_y = static_cast<unsigned>(y - top);
+            const size_t index = static_cast<size_t>(local_y) * row_bytes +
+                (local_x >> 3U);
+            const uint8_t bit = static_cast<uint8_t>(0x80U >> (local_x & 7U));
+            const uint8_t* bitmap = bytes + 16U;
+            const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
+            if (mask && !(mask[index] & bit)) return Clear;
+            value = (bitmap[index] & bit) ? White : Black;
+            if (image.inverted) value = value == Black ? White : Black;
+            return value;
+        }
         if (!image.asset) return Clear;
         const int columns = std::max(1, image.asset->sheet_width /
                                          image.asset->frame_width);
@@ -1845,6 +1880,31 @@ struct Runtime::Impl {
                            has_extension ? nullptr : extension);
     }
 
+    FILE* openResourceFile(char* path, size_t capacity) const {
+        FILE* file = std::fopen(path, "rb");
+        if (file) return file;
+        char* leaf = std::strrchr(path, '/');
+        if (!leaf || !leaf[1]) return nullptr;
+        *leaf = '\0';
+        DIR* directory = opendir(path);
+        if (!directory) return nullptr;
+        const char* wanted = leaf + 1;
+        while (dirent* entry = readdir(directory)) {
+            if (strcasecmp(entry->d_name, wanted) != 0) continue;
+            const size_t parent_length = std::strlen(path);
+            const size_t name_length = std::strlen(entry->d_name);
+            if (parent_length + 1U + name_length + 1U <= capacity) {
+                path[parent_length] = '/';
+                std::memcpy(path + parent_length + 1U, entry->d_name,
+                            name_length + 1U);
+                file = std::fopen(path, "rb");
+            }
+            break;
+        }
+        closedir(directory);
+        return file;
+    }
+
     bool loadCompiledResource(const char* requested, const char* extension,
                               const char* magic, uint8_t*& unpacked,
                               size_t& unpacked_size, uint32_t& width,
@@ -1852,33 +1912,9 @@ struct Runtime::Impl {
         unpacked = nullptr; unpacked_size = 0; width = height = count = 0;
         char path[384]{};
         if (!resourcePath(path, sizeof(path), requested, extension)) return false;
-        FILE* file = std::fopen(path, "rb");
         // Playdate package resource lookup is case-insensitive. SD cards may
-        // be mounted through a case-sensitive host filesystem during tests,
-        // and authored names such as avalanche can compile to Avalanche.pdt.
-        if (!file) {
-            char* leaf = std::strrchr(path, '/');
-            if (leaf && leaf[1]) {
-                *leaf = '\0';
-                DIR* directory = opendir(path);
-                if (directory) {
-                    const char* wanted = leaf + 1;
-                    while (dirent* entry = readdir(directory)) {
-                        if (strcasecmp(entry->d_name, wanted) != 0) continue;
-                        const size_t parent_length = std::strlen(path);
-                        const size_t name_length = std::strlen(entry->d_name);
-                        if (parent_length + 1U + name_length + 1U <= sizeof(path)) {
-                            path[parent_length] = '/';
-                            std::memcpy(path + parent_length + 1U, entry->d_name,
-                                        name_length + 1U);
-                            file = std::fopen(path, "rb");
-                        }
-                        break;
-                    }
-                    closedir(directory);
-                }
-            }
-        }
+        // be mounted through a case-sensitive host filesystem during tests.
+        FILE* file = openResourceFile(path, sizeof(path));
         if (!file) return false;
         std::fseek(file, 0, SEEK_END);
         const long length = std::ftell(file);
@@ -1994,6 +2030,36 @@ struct Runtime::Impl {
         return true;
     }
 
+    bool materializeImage(Image& image) {
+        if (image.pixels) return true;
+        if (!image.serialized || image.serialized_size < 16U ||
+            image.width <= 0 || image.height <= 0) return false;
+        const size_t bytes = static_cast<size_t>(image.width) * image.height;
+        uint8_t* pixels = static_cast<uint8_t*>(heap_caps_malloc(
+            bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!pixels && bytes < 128U * 1024U) {
+            pixels = static_cast<uint8_t*>(heap_caps_malloc(
+                bytes, MALLOC_CAP_8BIT));
+        }
+        if (!pixels) return false;
+        const uint8_t* serialized = image.serialized;
+        const uint32_t serialized_size = image.serialized_size;
+        image.pixels = pixels;
+        image.stride = image.width;
+        image.owns_pixels = true;
+        if (!decodeSerializedImage(image, serialized, serialized_size,
+                                   image.width, image.height)) {
+            heap_caps_free(pixels);
+            image.pixels = nullptr;
+            image.stride = 0;
+            image.owns_pixels = false;
+            return false;
+        }
+        image.serialized = nullptr;
+        image.serialized_size = 0;
+        return true;
+    }
+
     bool pushPdiImage(const char* path) {
         uint8_t* bytes = nullptr; size_t size = 0;
         uint32_t width = 0, height = 0, unused = 0;
@@ -2012,30 +2078,90 @@ struct Runtime::Impl {
     }
 
     bool pushPdtTable(const char* path) {
-        uint8_t* bytes = nullptr; size_t size = 0;
-        uint32_t width = 0, height = 0, count = 0;
-        if (!loadCompiledResource(path, ".pdt", "Playdate IMT", bytes, size,
-                                  width, height, count)) return false;
-        if (count == 0 || count > 2048U || size < 4U + count * 4U ||
-            readLe16(bytes) != count) {
-            heap_caps_free(bytes);
+        char resolved[384]{};
+        if (!resourcePath(resolved, sizeof(resolved), path, ".pdt")) return false;
+        FILE* file = openResourceFile(resolved, sizeof(resolved));
+        if (!file) return false;
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        uint8_t header[32]{};
+        if (length <= 32 ||
+            std::fread(header, 1, sizeof(header), file) != sizeof(header) ||
+            std::memcmp(header, "Playdate IMT", 12) != 0 ||
+            !(header[15] & 0x80U)) {
+            std::fclose(file);
             return false;
         }
+        const uint32_t unpacked_size = readLe32(header + 16);
+        const uint32_t width = readLe32(header + 20);
+        const uint32_t height = readLe32(header + 24);
+        const uint32_t count = readLe32(header + 28);
+        const size_t packed_size = static_cast<size_t>(length - 32);
+        if (unpacked_size < 4U + count * 4U ||
+            unpacked_size > 4U * 1024U * 1024U || packed_size == 0 ||
+            packed_size > 4U * 1024U * 1024U || width == 0 || height == 0 ||
+            width > 1024U || height > 1024U || count == 0 || count > 2048U) {
+            std::fclose(file);
+            return false;
+        }
+        uint8_t* packed = static_cast<uint8_t*>(heap_caps_malloc(
+            packed_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!packed && packed_size < 128U * 1024U) {
+            packed = static_cast<uint8_t*>(heap_caps_malloc(
+                packed_size, MALLOC_CAP_8BIT));
+        }
+        if (!packed || std::fread(packed, 1, packed_size, file) != packed_size) {
+            if (packed) heap_caps_free(packed);
+            std::fclose(file);
+            return false;
+        }
+        std::fclose(file);
+
+        uint8_t table_header[4]{};
+        z_stream stream{};
+        stream.next_in = packed;
+        stream.avail_in = static_cast<uInt>(packed_size);
+        stream.next_out = table_header;
+        stream.avail_out = sizeof(table_header);
+        const int init_result = inflateInit(&stream);
+        const int inflate_result = init_result == Z_OK
+            ? inflate(&stream, Z_NO_FLUSH) : Z_STREAM_ERROR;
+        const bool header_ok = init_result == Z_OK &&
+            (inflate_result == Z_OK || inflate_result == Z_STREAM_END ||
+             inflate_result == Z_BUF_ERROR) && stream.total_out == 4U;
+        if (init_result == Z_OK) inflateEnd(&stream);
+        const uint16_t columns = header_ok ? readLe16(table_header + 2) : 0;
+        if (!header_ok || readLe16(table_header) != count || columns == 0 ||
+            count % columns != 0) {
+            heap_caps_free(packed);
+            return false;
+        }
+
         auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
-            lua, sizeof(ImageTable) + size, 1));
+            lua, sizeof(ImageTable), 1));
         new (table) ImageTable{};
-        table->data = reinterpret_cast<uint8_t*>(table + 1);
-        table->data_size = size;
+        table->packed = packed;
+        table->packed_size = static_cast<uint32_t>(packed_size);
+        table->unpacked_size = unpacked_size;
         table->frame_width = static_cast<uint16_t>(width);
         table->frame_height = static_cast<uint16_t>(height);
         table->frame_count = static_cast<uint16_t>(count);
-        std::memcpy(table->data, bytes, size);
-        heap_caps_free(bytes);
+        table->columns = columns;
+        std::snprintf(table->path, sizeof(table->path), "%s", resolved);
         luaL_getmetatable(lua, kImageTableMetatable);
         lua_setmetatable(lua, -2);
         lua_newtable(lua);
         lua_setiuservalue(lua, -2, 1);
         return true;
+    }
+
+    static int cImageTableGc(lua_State* state) {
+        auto* table = static_cast<ImageTable*>(
+            luaL_checkudata(state, 1, kImageTableMetatable));
+        if (table && table->packed) heap_caps_free(table->packed);
+        if (table) *table = {};
+        return 0;
     }
 
     static int cImageNew(lua_State* state) {
@@ -2410,10 +2536,14 @@ struct Runtime::Impl {
     }
 
     static int cImageClearMask(lua_State* state) {
+        Impl* runtime = self(state);
         auto* image = static_cast<Image*>(luaL_checkudata(
             state, 1, kImageMetatable));
         const bool opaque = lua_isnoneornil(state, 2) ||
             lua_toboolean(state, 2) != 0;
+        if (image && image->mask && runtime) {
+            runtime->materializeImage(*image->mask);
+        }
         if (image && image->mask && image->mask->pixels) {
             std::memset(image->mask->pixels, opaque ? White : Black,
                 static_cast<size_t>(image->mask->stride) * image->mask->height);
@@ -2422,8 +2552,10 @@ struct Runtime::Impl {
     }
 
     static int cImageClear(lua_State* state) {
+        Impl* runtime = self(state);
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         const uint8_t color = checkPlaydateColor(state, 2, Clear);
+        if (image && runtime) runtime->materializeImage(*image);
         if (image && image->pixels) {
             const size_t pixels = static_cast<size_t>(image->stride) * image->height;
             if (color == Xor) {
@@ -2540,6 +2672,43 @@ struct Runtime::Impl {
         return 1;
     }
 
+    Image* pushSerializedImage(const uint8_t* bytes, size_t size,
+                               int full_width, int full_height) {
+        if (!bytes || size < 16U || full_width <= 0 || full_height <= 0) {
+            lua_pushnil(lua);
+            return nullptr;
+        }
+        const uint16_t stored_width = readLe16(bytes);
+        const uint16_t stored_height = readLe16(bytes + 2);
+        const uint16_t row_bytes = readLe16(bytes + 4);
+        const uint16_t left = readLe16(bytes + 6);
+        const uint16_t top = readLe16(bytes + 10);
+        const uint16_t flags = readLe16(bytes + 14);
+        const size_t plane_size = static_cast<size_t>(row_bytes) * stored_height;
+        const size_t plane_count = (flags & 0x03U) ? 2U : 1U;
+        if (stored_width == 0 || stored_height == 0 || row_bytes == 0 ||
+            stored_width > row_bytes * 8U || left + stored_width > full_width ||
+            top + stored_height > full_height ||
+            plane_size > (size - 16U) / plane_count) {
+            lua_pushnil(lua);
+            return nullptr;
+        }
+        auto* image = static_cast<Image*>(lua_newuserdatauv(
+            lua, sizeof(Image) + size, 1));
+        new (image) Image{};
+        image->width = full_width;
+        image->height = full_height;
+        image->serialized = reinterpret_cast<const uint8_t*>(image + 1);
+        image->serialized_size = static_cast<uint32_t>(size);
+        std::memcpy(const_cast<uint8_t*>(image->serialized), bytes, size);
+        setContentBounds(*image, left + stored_width, top + stored_height,
+                         left, top);
+        image->black_bounds_valid = false;
+        luaL_getmetatable(lua, kImageMetatable);
+        lua_setmetatable(lua, -2);
+        return image;
+    }
+
     bool pushImageTableFrame(lua_State* state, int table_index,
                              ImageTable* table, int index) {
         table_index = lua_absindex(state, table_index);
@@ -2562,24 +2731,59 @@ struct Runtime::Impl {
             image->asset = table->asset;
             image->frame = index - 1;
         } else {
+            if (!table->packed || table->packed_size == 0 ||
+                table->unpacked_size < 4U + table->frame_count * 4U) {
+                lua_pop(state, 1);
+                return false;
+            }
+            uint8_t* unpacked = static_cast<uint8_t*>(heap_caps_malloc(
+                table->unpacked_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!unpacked && table->unpacked_size < 128U * 1024U) {
+                unpacked = static_cast<uint8_t*>(heap_caps_malloc(
+                    table->unpacked_size, MALLOC_CAP_8BIT));
+            }
+            if (!unpacked) {
+                lua_pop(state, 1);
+                return false;
+            }
+            uLongf actual = table->unpacked_size;
+            const int zerr = uncompress(unpacked, &actual, table->packed,
+                                        table->packed_size);
+            if (zerr != Z_OK || actual != table->unpacked_size) {
+                heap_caps_free(unpacked);
+                lua_pop(state, 1);
+                return false;
+            }
             const size_t table_bytes = 4U + static_cast<size_t>(table->frame_count) * 4U;
             const uint32_t previous = index > 1
-                ? readLe32(table->data + 4U + static_cast<size_t>(index - 2) * 4U)
+                ? readLe32(unpacked + 4U + static_cast<size_t>(index - 2) * 4U)
                 : 0U;
-            const uint32_t end = readLe32(table->data + 4U + static_cast<size_t>(index - 1) * 4U);
-            if (table_bytes + end > table->data_size || previous >= end) {
+            const uint32_t end = readLe32(unpacked + 4U + static_cast<size_t>(index - 1) * 4U);
+            if (table_bytes + end > table->unpacked_size || previous >= end) {
+                heap_caps_free(unpacked);
                 lua_pop(state, 1);
                 return false;
             }
-            image = pushDynamicImage(table->frame_width,
-                                     table->frame_height, Clear);
-            if (!image || !decodeSerializedImage(
-                    *image, table->data + table_bytes + previous, end - previous,
-                    table->frame_width, table->frame_height)) {
-                if (image) lua_pop(state, 1);
-                lua_pop(state, 1);
+            image = pushSerializedImage(
+                unpacked + table_bytes + previous, end - previous,
+                table->frame_width, table->frame_height);
+            heap_caps_free(unpacked);
+            if (!image) {
+                lua_pop(state, 2);
                 return false;
             }
+        }
+        if (!table->asset) {
+            const size_t slot = table->cache_cursor %
+                (sizeof(table->cached_indices) / sizeof(table->cached_indices[0]));
+            const uint16_t previous_index = table->cached_indices[slot];
+            if (previous_index != 0 && previous_index != index) {
+                lua_pushnil(state);
+                lua_rawseti(state, -3, previous_index);
+            }
+            table->cached_indices[slot] = static_cast<uint16_t>(index);
+            table->cache_cursor = static_cast<uint8_t>((slot + 1U) %
+                (sizeof(table->cached_indices) / sizeof(table->cached_indices[0])));
         }
         lua_pushvalue(state, -1);
         lua_rawseti(state, -3, index);
@@ -2696,10 +2900,10 @@ struct Runtime::Impl {
             state, 1, kImageTableMetatable));
         const int count = table ? (table->asset
             ? table->asset->frame_count : table->frame_count) : 0;
-        // Sequential tables are the form supported by the current PDX
-        // decoder.  Report their documented one-row cell layout.
-        lua_pushinteger(state, count);
-        lua_pushinteger(state, count > 0 ? 1 : 0);
+        const int columns = table && !table->asset
+            ? table->columns : count;
+        lua_pushinteger(state, columns);
+        lua_pushinteger(state, columns > 0 ? count / columns : 0);
         return 2;
     }
 
@@ -3935,6 +4139,7 @@ struct Runtime::Impl {
     static int cPushContext(lua_State* state) {
         Impl* runtime = self(state);
         auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
+        if (image && runtime) runtime->materializeImage(*image);
         if (!image || !image->pixels || runtime->context_depth >= runtime->context_stack.size()) return 0;
         runtime->context_stack[runtime->context_depth++] =
             {runtime->target, runtime->clip, runtime->stencil};
@@ -3958,6 +4163,7 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* image = static_cast<Image*>(
             luaL_checkudata(state, 1, kImageMetatable));
+        if (image && runtime) runtime->materializeImage(*image);
         if (!image || !image->pixels) return 0;
         runtime->target = image;
         runtime->clip = {0, 0, image->width, image->height};
@@ -5466,6 +5672,7 @@ struct Runtime::Impl {
 
     int createTimer(lua_State* state, int duration_index, int callback_index,
                     bool callback_required = false) {
+        const int argument_top = lua_gettop(state);
         const lua_Number duration = std::max<lua_Number>(1, luaL_checknumber(state, duration_index));
         const bool has_callback = lua_isfunction(state, callback_index);
         if (callback_required && !has_callback) {
@@ -5492,6 +5699,15 @@ struct Runtime::Impl {
         if (has_callback) {
             lua_pushvalue(state, callback_index);
             lua_setfield(state, timer, "callback");
+            const int argument_count = argument_top - callback_index;
+            if (argument_count > 0) {
+                lua_createtable(state, argument_count, 0);
+                for (int index = 0; index < argument_count; ++index) {
+                    lua_pushvalue(state, callback_index + 1 + index);
+                    lua_rawseti(state, -2, index + 1);
+                }
+                lua_setfield(state, timer, "callbackArgs");
+            }
         } else if (lua_isfunction(state, callback_index + 2)) {
             lua_pushvalue(state, callback_index + 2);
             lua_setfield(state, timer, "easingFunction");
@@ -5587,8 +5803,21 @@ struct Runtime::Impl {
                 }
                 lua_getfield(lua, timer, "callback");
                 if (lua_isfunction(lua, -1)) {
-                    lua_pushvalue(lua, timer);
-                    if (lua_pcall(lua, 1, 0, 0) != LUA_OK) { takeLuaError("timer callback"); lua_settop(lua,top); return false; }
+                    int argument_count = 0;
+                    lua_getfield(lua, timer, "callbackArgs");
+                    if (lua_istable(lua, -1)) {
+                        argument_count = static_cast<int>(lua_rawlen(lua, -1));
+                        const int arguments = lua_gettop(lua);
+                        for (int index = 1; index <= argument_count; ++index) {
+                            lua_rawgeti(lua, arguments, index);
+                        }
+                        lua_remove(lua, arguments);
+                    } else {
+                        lua_pop(lua, 1);
+                        lua_pushvalue(lua, timer);
+                        argument_count = 1;
+                    }
+                    if (lua_pcall(lua, argument_count, 0, 0) != LUA_OK) { takeLuaError("timer callback"); lua_settop(lua,top); return false; }
                 } else lua_pop(lua,1);
                 lua_getfield(lua, timer, "timerEndedCallback");
                 if (lua_isfunction(lua, -1)) {
@@ -6505,6 +6734,7 @@ struct Runtime::Impl {
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kImageTableMetatable)){
             pushFunction(cImageTableIndex);lua_setfield(lua,-2,"__index");
+            pushFunction(cImageTableGc);lua_setfield(lua,-2,"__gc");
             setFunction(-1,"getImage",cImageTableGetImage);
             setFunction(-1,"drawImage",cImageTableDrawImage);
             setFunction(-1,"getLength",cImageTableGetLength);
@@ -6882,7 +7112,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.22: Hillslide complete API surface");
+                 "PogoDate API STEP11.6.23: timer args + compact PDT streaming");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
