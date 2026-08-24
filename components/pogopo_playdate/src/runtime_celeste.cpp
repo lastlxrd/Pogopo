@@ -13,6 +13,7 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 
@@ -141,6 +142,12 @@ struct Sound {
     bool loop = false;
     float volume = 1.0f;
     float rate = 1.0f;
+    float offset_seconds = 0.0f;
+    float loop_start_seconds = 0.0f;
+    float loop_end_seconds = -1.0f;
+    uint32_t started_at_ms = 0;
+    bool paused = false;
+    bool offset_pending = false;
     int16_t cache_index = -1;
     char path[160]{};
 };
@@ -1846,6 +1853,32 @@ struct Runtime::Impl {
         char path[384]{};
         if (!resourcePath(path, sizeof(path), requested, extension)) return false;
         FILE* file = std::fopen(path, "rb");
+        // Playdate package resource lookup is case-insensitive. SD cards may
+        // be mounted through a case-sensitive host filesystem during tests,
+        // and authored names such as avalanche can compile to Avalanche.pdt.
+        if (!file) {
+            char* leaf = std::strrchr(path, '/');
+            if (leaf && leaf[1]) {
+                *leaf = '\0';
+                DIR* directory = opendir(path);
+                if (directory) {
+                    const char* wanted = leaf + 1;
+                    while (dirent* entry = readdir(directory)) {
+                        if (strcasecmp(entry->d_name, wanted) != 0) continue;
+                        const size_t parent_length = std::strlen(path);
+                        const size_t name_length = std::strlen(entry->d_name);
+                        if (parent_length + 1U + name_length + 1U <= sizeof(path)) {
+                            path[parent_length] = '/';
+                            std::memcpy(path + parent_length + 1U, entry->d_name,
+                                        name_length + 1U);
+                            file = std::fopen(path, "rb");
+                        }
+                        break;
+                    }
+                    closedir(directory);
+                }
+            }
+        }
         if (!file) return false;
         std::fseek(file, 0, SEEK_END);
         const long length = std::ftell(file);
@@ -2493,6 +2526,7 @@ struct Runtime::Impl {
         if (runtime->pushPdtTable(path)) return 1;
         const CelesteAsset* asset = findCelesteAsset(path);
         if (!asset || asset->frame_count <= 1) {
+            ESP_LOGI(TAG, "Image table not found: %s", path ? path : "");
             lua_pushnil(state);
             return 1;
         }
@@ -4893,7 +4927,13 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         if (sound) {
+            if (!sound->paused && !sound->offset_pending) {
+                sound->offset_seconds = 0.0f;
+            }
+            sound->paused = false;
+            sound->offset_pending = false;
             sound->playing = true;
+            sound->started_at_ms = runtime->now_ms;
             int16_t* samples = nullptr;
             uint32_t frames = 0, sample_rate = 0;
             const bool loaded = runtime->audio && sound->path[0] &&
@@ -4931,14 +4971,58 @@ struct Runtime::Impl {
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         if (sound) {
             sound->playing = false;
+            sound->paused = false;
+            sound->offset_pending = false;
+            sound->offset_seconds = 0.0f;
             if (sound->music && runtime->audio) runtime->audio->stopMusicPcm();
         }
         return 0;
     }
 
-    static int cSoundPause(lua_State* state) { return cSoundStop(state); }
+    float soundOffsetSeconds(Sound& sound) const {
+        float offset = sound.offset_seconds;
+        if (sound.playing) {
+            offset += static_cast<float>(now_ms - sound.started_at_ms) *
+                0.001f * std::max(0.01f, sound.rate);
+        }
+        float duration = 0.0f;
+        if (!pdaDuration(sound.path, duration) || duration <= 0.0f) {
+            return std::max(0.0f, offset);
+        }
+        const float loop_end = sound.loop_end_seconds > sound.loop_start_seconds
+            ? std::min(duration, sound.loop_end_seconds) : duration;
+        if (sound.loop && loop_end > sound.loop_start_seconds &&
+            offset >= loop_end) {
+            offset = sound.loop_start_seconds + std::fmod(
+                offset - sound.loop_start_seconds,
+                loop_end - sound.loop_start_seconds);
+        }
+        return std::clamp(offset, 0.0f, duration);
+    }
+
+    static int cSoundPause(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound && sound->playing) {
+            sound->offset_seconds = runtime->soundOffsetSeconds(*sound);
+            sound->playing = false;
+            sound->paused = true;
+            if (sound->music && runtime->audio) runtime->audio->stopMusicPcm();
+        }
+        return 0;
+    }
     static int cSoundIsPlaying(lua_State* state) {
+        Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound && sound->playing && !sound->loop) {
+            float duration = 0.0f;
+            if (runtime->pdaDuration(sound->path, duration) && duration > 0.0f &&
+                runtime->soundOffsetSeconds(*sound) >= duration) {
+                sound->playing = false;
+                sound->offset_seconds = duration;
+            }
+        }
         lua_pushboolean(state, sound && sound->playing);
         return 1;
     }
@@ -4949,6 +5033,53 @@ struct Runtime::Impl {
             sound->volume = static_cast<float>(std::clamp<lua_Number>(
                 luaL_checknumber(state, 2), static_cast<lua_Number>(0),
                 static_cast<lua_Number>(1)));
+        }
+        return 0;
+    }
+
+    static int cSoundGetVolume(lua_State* state) {
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        const lua_Number volume = sound ? sound->volume : 0.0;
+        lua_pushnumber(state, volume);
+        lua_pushnumber(state, volume);
+        return 2;
+    }
+
+    static int cSoundGetOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        lua_pushnumber(state, sound ? runtime->soundOffsetSeconds(*sound) : 0.0f);
+        return 1;
+    }
+
+    static int cSoundSetOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound) {
+            float duration = 0.0f;
+            runtime->pdaDuration(sound->path, duration);
+            sound->offset_seconds = static_cast<float>(std::clamp<lua_Number>(
+                luaL_checknumber(state, 2), 0.0,
+                duration > 0.0f ? duration : 86400.0f));
+            sound->started_at_ms = runtime->now_ms;
+            sound->offset_pending = !sound->playing;
+        }
+        return 0;
+    }
+
+    static int cSoundSetLoopRange(lua_State* state) {
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound) {
+            sound->loop_start_seconds = static_cast<float>(
+                std::max<lua_Number>(0.0, luaL_checknumber(state, 2)));
+            sound->loop_end_seconds = lua_isnoneornil(state, 3) ? -1.0f
+                : static_cast<float>(std::max<lua_Number>(
+                    sound->loop_start_seconds, luaL_checknumber(state, 3)));
+            sound->loop = true;
         }
         return 0;
     }
@@ -6384,9 +6515,11 @@ struct Runtime::Impl {
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             setFunction(-1,"play",cSoundPlay);setFunction(-1,"stop",cSoundStop);
             setFunction(-1,"pause",cSoundPause);setFunction(-1,"isPlaying",cSoundIsPlaying);
-            setFunction(-1,"setVolume",cSoundSetVolume);setFunction(-1,"setSample",cSoundSetSample);
+            setFunction(-1,"setVolume",cSoundSetVolume);setFunction(-1,"getVolume",cSoundGetVolume);
+            setFunction(-1,"setSample",cSoundSetSample);
             setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"getLength",cSoundGetLength);
-            setFunction(-1,"setLoopRange",cNoop);
+            setFunction(-1,"getOffset",cSoundGetOffset);setFunction(-1,"setOffset",cSoundSetOffset);
+            setFunction(-1,"setLoopRange",cSoundSetLoopRange);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kSynthMetatable)){
@@ -6569,7 +6702,8 @@ struct Runtime::Impl {
         setFunction(graphics,"setClipRect",cSetClipRect);
         setFunction(graphics,"getClipRect",cGetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
-        setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
+        setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"clearStencilImage",cClearStencil);
+        setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
         setFunction(graphics,"getBackgroundColor",cGetBackgroundColor);
         lua_newtable(lua);setFunction(-1,"new",cFontNew);
         setInteger(-1,"kVariantNormal",0);
@@ -6748,7 +6882,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.21: key repeat and system glyph fallback");
+                 "PogoDate API STEP11.6.22: Hillslide complete API surface");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

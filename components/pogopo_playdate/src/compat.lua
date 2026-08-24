@@ -2024,6 +2024,34 @@ end
 function systemMenu:removeAllMenuItems() self.items={} end
 function playdate.getSystemMenu() return systemMenu end
 
+-- Scoreboard calls are network-backed on Playdate. Pogopo keeps gameplay
+-- deterministic and offline while preserving the asynchronous callback
+-- shapes used by Lua games.
+playdate.scoreboards = playdate.scoreboards or {}
+local function finishScoreboardRequest(callback, result)
+	if type(callback) ~= "function" then return end
+	playdate.timer.performAfterDelay(1, function() callback(true, result) end)
+end
+function playdate.scoreboards.addScore(boardID, value, callback)
+	local result={boardID=tostring(boardID or ""),value=tonumber(value) or 0,
+		rank=0,player={name="Pogopo"}}
+	finishScoreboardRequest(callback,result)
+	return true
+end
+function playdate.scoreboards.getScores(boardID, callback)
+	finishScoreboardRequest(callback,{boardID=tostring(boardID or ""),scores={}})
+	return true
+end
+function playdate.scoreboards.getPersonalBest(boardID, callback)
+	finishScoreboardRequest(callback,{boardID=tostring(boardID or ""),rank=0,
+		value=0,player={name="Pogopo"}})
+	return true
+end
+function playdate.scoreboards.getScoreboards(callback)
+	finishScoreboardRequest(callback,{scoreboards={}})
+	return true
+end
+
 -- json.decode remains native; the encoder is deliberately pure Lua so it is
 -- available to packages and datastore utilities without growing firmware.
 json=json or {}

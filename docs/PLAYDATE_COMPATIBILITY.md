@@ -37,6 +37,13 @@ Playdate's system-font fallback when a custom PFT lacks an ASCII decoration or
 common directional symbol, preventing menu arrows and brackets from becoming
 question marks.
 
+STEP11.6.22 completes every API symbol statically referenced by Hillslide's 35
+Lua modules. Sample/file players expose playback offset and volume, one-shot
+players finish according to PDA duration, stencil clearing accepts the SDK's
+`clearStencilImage()` name, scoreboards preserve asynchronous callbacks with
+offline results, and compiled image resources recover filename-only case
+differences such as `avalanche` versus `Avalanche.pdt`.
+
 ## Validated games
 
 ### Onebit Frogger
@@ -107,6 +114,16 @@ PDSnake and both the embedded-source and SD-PDX versions of Celeste Classic
 remain in the regression set. This matters because their tilemap, collision,
 Pico-8 font, persistent image layers and timer usage differ from the two games
 above.
+
+### Hillslide
+
+Validated against the supplied 35-module Lua PDX without modifying its package
+or redistributing it. The host suite opens all nine scenes and exercises menu
+SFX reuse, three PFT fonts, gridview, QR CoreLibs, scene classes, Training,
+main gameplay, avalanche resources, Recap and score submission. A dedicated
+probe validates playback offsets, volume, one-shot completion, looping music,
+stencil clearing and asynchronous scoreboard callbacks. Training runs 500
+frames and the main game 1,000 frames with zero Lua errors.
 
 ### Synth API probe
 
@@ -186,14 +203,29 @@ same deferred-load boundary after its one Lua module starts successfully.
   masking handlers and the global `playdate` callback table used by Pulp;
 - JSON string/file decoding plus compact, pretty and file encoding;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
-  duration metadata and a separate music player;
+  duration metadata, playback offset/volume queries, one-shot completion,
+  pause/resume position and a separate music player;
 - stack-safe iterative PDX sound discovery with its bounded directory queue and
   path scratch storage in PSRAM; startup stack high-water diagnostics are
   emitted for new package testing;
 - managed Lua synth voices with sine, square, triangle, noise and sawtooth
   oscillators; Hertz/MIDI/named-note input; independent note release/stop;
   volume, transpose and ADSR shaping;
-- package metadata and mutable system-menu items with values and callbacks.
+- package metadata and mutable system-menu items with values and callbacks;
+- asynchronous offline scoreboard callback compatibility for score submission
+  and empty score queries.
+
+## Coverage snapshot
+
+The Playdate SDK 3.0.5 Lua reference contains 267 documented function entries.
+After excluding the five crank queries requested outside this target, PogoDate
+has usable implementations or compatibility behaviour for roughly 210–220 of
+262 entries. About 42–52 callable entries (16–20%) therefore remain, mostly in
+networking, keyboard UI, microphone/video, simulator/debug services and the
+advanced sound graph. This is an endpoint estimate rather than a promise of
+bit-exact semantics: collision, audio mixing and rendering edge cases can still
+need fidelity work even when their functions exist. Hillslide itself is at
+100% of statically referenced API symbols after STEP11.6.22.
 
 ## Known limitations
 
@@ -213,12 +245,15 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.21.
+  the device after flashing STEP11.6.22.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
-  complete. File-player seeking, true streamed decoding and loop subranges are
-  also not implemented; long PDA music is decoded into PSRAM when started.
+  complete. File-player position is tracked, but true streamed decoding and
+  exact loop subranges are not implemented; long PDA music is decoded into
+  PSRAM when started.
+- Scoreboard callbacks are API-compatible offline placeholders. They do not
+  contact Panic's servers or provide global rankings.
 - Affine-transformed image generation uses a correct inverse-mapped software
   path, but large images or per-frame transforms can be expensive on ESP32-S3.
   Video, QR generation and several specialized bitmap filters are incomplete.
