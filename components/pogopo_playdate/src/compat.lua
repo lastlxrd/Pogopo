@@ -1898,6 +1898,44 @@ function playdate.display.getRect()
 end
 gfx.font.kLanguageEnglish="en"
 gfx.font.kLanguageJapanese="jp"
+function gfx.font.newFamily(fontPaths)
+	assert(type(fontPaths)=="table","font.newFamily expects a table")
+	local family={}
+	for variant,path in pairs(fontPaths) do
+		if type(path)=="userdata" then
+			family[variant]=path
+		elseif path~=nil then
+			family[variant]=gfx.font.new(path)
+		end
+	end
+	return family
+end
+function gfx.getTextSizeForMaxWidth(text,maxWidth,fontFamily,leadingAdjustment)
+	text=tostring(text or "")
+	maxWidth=math.max(1,math.floor(tonumber(maxWidth) or 1))
+	local _,singleHeight=gfx.getTextSize("M",fontFamily)
+	local leading=math.floor(tonumber(leadingAdjustment) or 0)
+	local widest,lineWidth,lines=0,0,1
+	for token in text:gmatch("[^%s]+%s*") do
+		local tokenWidth=gfx.getTextSize(token,fontFamily)
+		if lineWidth>0 and lineWidth+tokenWidth>maxWidth then
+			widest=math.max(widest,lineWidth); lineWidth=0; lines=lines+1
+		end
+		if tokenWidth>maxWidth then
+			for char in token:gmatch("[\1-\127\194-\244][\128-\191]*") do
+				local charWidth=gfx.getTextSize(char,fontFamily)
+				if lineWidth>0 and lineWidth+charWidth>maxWidth then
+					widest=math.max(widest,lineWidth); lineWidth=0; lines=lines+1
+				end
+				lineWidth=lineWidth+charWidth
+			end
+		else
+			lineWidth=lineWidth+tokenWidth
+		end
+	end
+	widest=math.min(maxWidth,math.max(widest,lineWidth))
+	return widest,lines*(singleHeight or 0)+math.max(0,lines-1)*leading
+end
 function playdate.getSystemLanguage() return gfx.font.kLanguageEnglish end
 function playdate.shouldDisplay24HourTime() return true end
 function playdate.getFlipped() return false end

@@ -124,6 +124,7 @@ struct PdFont {
     bool compiled = false;
     int scale = 1;
     int16_t tracking = 0;
+    int16_t leading = 0;
     uint8_t glyph_width = 0;
     uint8_t glyph_height = 0;
     uint32_t data_size = 0;
@@ -587,6 +588,7 @@ struct Runtime::Impl {
     PdFont* current_font = nullptr;
     int current_font_ref = LUA_NOREF;
     int system_font_ref = LUA_NOREF;
+    int font_tracking = 0;
     int maze_completion_image_ref = LUA_NOREF;
     bool maze_completion_reuse_logged = false;
     ClipRect clip{};
@@ -3361,6 +3363,10 @@ struct Runtime::Impl {
         if (!text) return 0;
         int line_width = 0;
         int maximum_width = 0;
+        // PFT glyph advances already include the font's own tracking in
+        // compiledGlyph(). Add it here only for the built-in fallback faces.
+        const int tracking = font_tracking +
+            (font && !font->compiled ? font->tracking : 0);
         size_t offset = 0;
         while (offset < length) {
             const uint32_t codepoint = nextUtf8(text, length, offset);
@@ -3375,29 +3381,30 @@ struct Runtime::Impl {
             if (font && font->compiled) {
                 CompiledGlyph glyph{};
                 if (compiledGlyph(*font, codepoint, next_codepoint, glyph)) {
-                    line_width += glyph.advance > 0 ? glyph.advance
-                        : std::max<int>(1, font->glyph_width);
+                    line_width += (glyph.advance > 0 ? glyph.advance
+                        : std::max<int>(1, font->glyph_width)) + tracking;
                 } else {
                     char button_label = 0;
                     if (playdateButtonSymbol(codepoint, button_label)) {
-                        line_width += buttonSymbolAdvance();
+                        line_width += buttonSymbolAdvance() + tracking;
                     } else {
                         if (codepoint != '?') {
                             compiledGlyph(*font, '?', next_codepoint, glyph);
                         }
-                        line_width += glyph.advance > 0 ? glyph.advance
-                            : std::max<int>(1, font->glyph_width);
+                        line_width += (glyph.advance > 0 ? glyph.advance
+                            : std::max<int>(1, font->glyph_width)) + tracking;
                     }
                 }
             } else if (font && font->pico) {
                 char button_label = 0;
                 line_width += playdateButtonSymbol(codepoint, button_label)
-                    ? buttonSymbolAdvance() : 4;
+                    ? buttonSymbolAdvance() + tracking : 4 + tracking;
             } else {
                 char button_label = 0;
                 const int scale = font ? font->scale : 1;
                 line_width += playdateButtonSymbol(codepoint, button_label)
-                    ? buttonSymbolAdvance(scale) : 6 * scale;
+                    ? buttonSymbolAdvance(scale) + tracking
+                    : 6 * scale + tracking;
             }
         }
         return std::max(maximum_width, line_width);
@@ -3416,7 +3423,9 @@ struct Runtime::Impl {
         const int line_height = font && font->compiled
             ? std::max<int>(1, font->glyph_height)
             : (font && font->pico ? 5 : 7 * (font ? font->scale : 1));
-        return text && length > 0 ? lines * line_height : 0;
+        const int leading = font ? font->leading : 0;
+        return text && length > 0
+            ? lines * line_height + std::max(0, lines - 1) * leading : 0;
     }
 
     static int cGetTextSize(lua_State* state) {
@@ -3424,9 +3433,16 @@ struct Runtime::Impl {
         size_t length = 0;
         const char* text = luaL_tolstring(state, 1, &length);
         const PdFont* font = runtime->current_font;
-        if (lua_gettop(state) >= 3 && luaL_testudata(
+        if (lua_gettop(state) >= 2 && luaL_testudata(
                 state, 2, kFontMetatable)) {
             font = static_cast<PdFont*>(lua_touserdata(state, 2));
+        } else if (lua_gettop(state) >= 2 && lua_istable(state, 2)) {
+            lua_getfield(state, 2, "normal");
+            if (auto* family_font = static_cast<PdFont*>(
+                    luaL_testudata(state, -1, kFontMetatable))) {
+                font = family_font;
+            }
+            lua_pop(state, 1);
         }
         const int width = runtime->textWidthForFont(font, text, length);
         const int height = runtime->textHeightForFont(font, text, length);
@@ -3441,15 +3457,18 @@ struct Runtime::Impl {
         int cursor_x = x, cursor_y = y;
         const bool pico = current_font && current_font->pico;
         const int scale = current_font ? current_font->scale : 1;
+        const int tracking = font_tracking + (current_font &&
+            !current_font->compiled ? current_font->tracking : 0);
         const CelesteAsset* font_asset = pico ? findCelesteAsset("Assets/pico") : nullptr;
         size_t offset = 0;
         while (offset < length) {
             const uint32_t codepoint = nextUtf8(text, length, offset);
             if (codepoint == '\n') {
                 cursor_x = x;
-                cursor_y += current_font && current_font->compiled
+                cursor_y += (current_font && current_font->compiled
                     ? std::max<int>(1, current_font->glyph_height)
-                    : (pico ? 6 : 8 * scale);
+                    : (pico ? 6 : 8 * scale)) +
+                    (current_font ? current_font->leading : 0);
                 continue;
             }
             size_t lookahead = offset;
@@ -3460,28 +3479,28 @@ struct Runtime::Impl {
                 if (compiledGlyph(*current_font, codepoint, next_codepoint,
                                   glyph)) {
                     drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
-                    cursor_x += glyph.advance > 0 ? glyph.advance
-                        : std::max<int>(1, current_font->glyph_width);
+                    cursor_x += (glyph.advance > 0 ? glyph.advance
+                        : std::max<int>(1, current_font->glyph_width)) + tracking;
                     continue;
                 }
                 char button_label = 0;
                 if (playdateButtonSymbol(codepoint, button_label)) {
                     drawButtonSymbol(codepoint, cursor_x, cursor_y);
-                    cursor_x += buttonSymbolAdvance();
+                    cursor_x += buttonSymbolAdvance() + tracking;
                     continue;
                 }
                 if (codepoint != '?') {
                     compiledGlyph(*current_font, '?', next_codepoint, glyph);
                 }
                 drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
-                cursor_x += glyph.advance > 0 ? glyph.advance
-                    : std::max<int>(1, current_font->glyph_width);
+                cursor_x += (glyph.advance > 0 ? glyph.advance
+                    : std::max<int>(1, current_font->glyph_width)) + tracking;
                 continue;
             }
             char button_label = 0;
             if (playdateButtonSymbol(codepoint, button_label)) {
                 drawButtonSymbol(codepoint, cursor_x, cursor_y, pico ? 1 : scale);
-                cursor_x += buttonSymbolAdvance(pico ? 1 : scale);
+                cursor_x += buttonSymbolAdvance(pico ? 1 : scale) + tracking;
                 continue;
             }
             const unsigned char character = codepoint <= 0xffU
@@ -3491,7 +3510,7 @@ struct Runtime::Impl {
                 glyph.width = 3; glyph.height = 5; glyph.asset = font_asset;
                 glyph.frame = picoFrame(character);
                 drawImage(glyph, cursor_x, cursor_y, Unflipped);
-                cursor_x += 4;
+                cursor_x += 4 + tracking;
             } else {
                 const gfx::Font& font = gfx::font5x7();
                 for (int column = 0; column < 5; ++column) {
@@ -3502,7 +3521,7 @@ struct Runtime::Impl {
                                             cursor_y + row*scale + sy, Black);
                     }
                 }
-                cursor_x += 6 * scale;
+                cursor_x += 6 * scale + tracking;
             }
         }
     }
@@ -3528,11 +3547,16 @@ struct Runtime::Impl {
         int x, y, w, h; runtime->readRect(state, 2, x, y, w, h);
         int draw_x = x;
         const int width = runtime->textWidth(value, length);
+        const int height = runtime->textHeightForFont(
+            runtime->current_font, value, length);
         if (alignment == 1) draw_x = x + std::max(0, (w - width) / 2);
         else if (alignment == 2) draw_x = x + std::max(0, w - width);
         runtime->drawText(value, length, draw_x, y);
         lua_pop(state, 1);
-        return 0;
+        lua_pushinteger(state, std::min(std::max(0, w), width));
+        lua_pushinteger(state, std::min(std::max(0, h), height));
+        lua_pushboolean(state, width > w || height > h);
+        return 3;
     }
 
     static int cDrawTextAligned(lua_State* state) {
@@ -3604,6 +3628,152 @@ struct Runtime::Impl {
         size_t length = 0;
         const char* text = luaL_checklstring(state, 2, &length);
         lua_pushinteger(state, runtime->textWidthForFont(font, text, length));
+        return 1;
+    }
+
+    static int cFontSetTracking(lua_State* state) {
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        font->tracking = static_cast<int16_t>(std::clamp<lua_Integer>(
+            luaL_checkinteger(state, 2), INT16_MIN, INT16_MAX));
+        return 0;
+    }
+
+    static int cFontGetTracking(lua_State* state) {
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        lua_pushinteger(state, font ? font->tracking : 0);
+        return 1;
+    }
+
+    static int cFontSetLeading(lua_State* state) {
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        font->leading = static_cast<int16_t>(std::clamp<lua_Integer>(
+            luaL_checkinteger(state, 2), INT16_MIN, INT16_MAX));
+        return 0;
+    }
+
+    static int cFontGetLeading(lua_State* state) {
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        lua_pushinteger(state, font ? font->leading : 0);
+        return 1;
+    }
+
+    static int cFontDrawText(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        size_t length = 0;
+        const char* text = luaL_tolstring(state, 2, &length);
+        int x = 0, y = 0, width = 0, height = 0;
+        if (lua_istable(state, 3)) {
+            runtime->readRect(state, 3, x, y, width, height);
+        } else {
+            x = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
+            y = static_cast<int>(std::lround(luaL_checknumber(state, 4)));
+            width = runtime->textWidthForFont(font, text, length);
+            height = runtime->textHeightForFont(font, text, length);
+        }
+        PdFont* previous = runtime->current_font;
+        runtime->current_font = font;
+        runtime->drawText(text, length, x, y);
+        runtime->current_font = previous;
+        const int drawn_width = std::min(std::max(0, width),
+            runtime->textWidthForFont(font, text, length));
+        const int drawn_height = std::min(std::max(0, height),
+            runtime->textHeightForFont(font, text, length));
+        lua_pop(state, 1); // luaL_tolstring result
+        lua_pushinteger(state, drawn_width);
+        lua_pushinteger(state, drawn_height);
+        return 2;
+    }
+
+    static int cFontDrawTextAligned(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        size_t length = 0;
+        const char* text = luaL_tolstring(state, 2, &length);
+        int x = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
+        const int y = static_cast<int>(std::lround(luaL_checknumber(state, 4)));
+        const int alignment = static_cast<int>(luaL_optinteger(state, 5, 0));
+        const int width = runtime->textWidthForFont(font, text, length);
+        if (alignment == 1) x -= width / 2;
+        else if (alignment == 2) x -= width;
+        PdFont* previous = runtime->current_font;
+        runtime->current_font = font;
+        runtime->drawText(text, length, x, y);
+        runtime->current_font = previous;
+        lua_pop(state, 1);
+        return 0;
+    }
+
+    static int cFontGetGlyph(lua_State* state) {
+        Impl* runtime = self(state);
+        auto* font = static_cast<PdFont*>(
+            luaL_checkudata(state, 1, kFontMetatable));
+        char encoded[5]{};
+        const char* text = nullptr;
+        size_t length = 0;
+        if (lua_type(state, 2) == LUA_TNUMBER) {
+            uint32_t codepoint = static_cast<uint32_t>(std::clamp<lua_Integer>(
+                lua_tointeger(state, 2), 0, 0x10ffff));
+            if (codepoint <= 0x7fU) {
+                encoded[0] = static_cast<char>(codepoint); length = 1;
+            } else if (codepoint <= 0x7ffU) {
+                encoded[0] = static_cast<char>(0xc0U | (codepoint >> 6U));
+                encoded[1] = static_cast<char>(0x80U | (codepoint & 0x3fU));
+                length = 2;
+            } else if (codepoint <= 0xffffU) {
+                encoded[0] = static_cast<char>(0xe0U | (codepoint >> 12U));
+                encoded[1] = static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU));
+                encoded[2] = static_cast<char>(0x80U | (codepoint & 0x3fU));
+                length = 3;
+            } else {
+                encoded[0] = static_cast<char>(0xf0U | (codepoint >> 18U));
+                encoded[1] = static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3fU));
+                encoded[2] = static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3fU));
+                encoded[3] = static_cast<char>(0x80U | (codepoint & 0x3fU));
+                length = 4;
+            }
+            text = encoded;
+        } else {
+            text = luaL_checklstring(state, 2, &length);
+        }
+        const int width = std::max(1, runtime->textWidthForFont(font, text, length));
+        const int height = std::max(1, runtime->textHeightForFont(font, text, length));
+        Image* image = runtime->pushDynamicImage(width, height, Clear);
+        if (!image) return 1;
+        Image* previous_target = runtime->target;
+        const ClipRect previous_clip = runtime->clip;
+        PdFont* previous_font = runtime->current_font;
+        const int previous_x = runtime->draw_offset_x;
+        const int previous_y = runtime->draw_offset_y;
+        runtime->target = image;
+        runtime->clip = {0, 0, width, height};
+        runtime->current_font = font;
+        runtime->draw_offset_x = runtime->draw_offset_y = 0;
+        runtime->drawText(text, length, 0, 0);
+        runtime->target = previous_target;
+        runtime->clip = previous_clip;
+        runtime->current_font = previous_font;
+        runtime->draw_offset_x = previous_x;
+        runtime->draw_offset_y = previous_y;
+        setContentBounds(*image, width, height);
+        image->black_bounds_valid = false;
+        return 1;
+    }
+
+    static int cSetFontTracking(lua_State* state) {
+        self(state)->font_tracking = static_cast<int>(std::clamp<lua_Integer>(
+            luaL_checkinteger(state, 1), -128, 128));
+        return 0;
+    }
+
+    static int cGetFontTracking(lua_State* state) {
+        lua_pushinteger(state, self(state)->font_tracking);
         return 1;
     }
 
@@ -6147,6 +6317,13 @@ struct Runtime::Impl {
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
             setFunction(-1,"getHeight",cFontGetHeight);
             setFunction(-1,"getTextWidth",cFontGetTextWidth);
+            setFunction(-1,"setTracking",cFontSetTracking);
+            setFunction(-1,"getTracking",cFontGetTracking);
+            setFunction(-1,"setLeading",cFontSetLeading);
+            setFunction(-1,"getLeading",cFontGetLeading);
+            setFunction(-1,"drawText",cFontDrawText);
+            setFunction(-1,"drawTextAligned",cFontDrawTextAligned);
+            setFunction(-1,"getGlyph",cFontGetGlyph);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kImageMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
@@ -6326,6 +6503,10 @@ struct Runtime::Impl {
         setInteger(graphics,"kLineCapStyleButt",0);setInteger(graphics,"kLineCapStyleSquare",1);
         setInteger(graphics,"kLineCapStyleRound",2);
         setInteger(graphics,"kPolygonFillNonZero",0);setInteger(graphics,"kPolygonFillEvenOdd",1);
+        setInteger(graphics,"kWrapClip",0);setInteger(graphics,"kWrapCharacter",1);
+        setInteger(graphics,"kWrapWord",2);
+        setInteger(graphics,"kAlignLeft",0);setInteger(graphics,"kAlignCenter",1);
+        setInteger(graphics,"kAlignRight",2);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"_drawTilemap",cDrawTilemap);
         setFunction(graphics,"getImageDrawMode",cGetDrawMode);
@@ -6353,6 +6534,8 @@ struct Runtime::Impl {
         setFunction(graphics,"setFont",cSetFont);setFunction(graphics,"getFont",cGetFont);
         setFunction(graphics,"setFontFamily",cSetFontFamily);
         setFunction(graphics,"getSystemFont",cGetSystemFont);
+        setFunction(graphics,"setFontTracking",cSetFontTracking);
+        setFunction(graphics,"getFontTracking",cGetFontTracking);
         setFunction(graphics,"pushContext",cPushContext);
         setFunction(graphics,"popContext",cPopContext);
         setFunction(graphics,"lockFocus",cLockFocus);
@@ -6530,6 +6713,7 @@ struct Runtime::Impl {
         draw_pattern_transparent=false;draw_pattern.fill(0xffU);
         draw_pattern_pixels.fill(Clear);draw_pattern_uses_image=false;
         pattern_offset_x=pattern_offset_y=0;current_font=nullptr;
+        font_tracking=0;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
         maze_completion_image_ref=LUA_NOREF;
         maze_completion_reuse_logged=false;
@@ -6538,7 +6722,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.18: stack-safe startup");
+                 "PogoDate API STEP11.6.19: font-family compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
