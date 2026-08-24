@@ -3320,6 +3320,42 @@ struct Runtime::Impl {
         return 8 * std::max(1, scale);
     }
 
+    // Playdate falls back to its system font when a custom PFT does not
+    // contain a requested character. Keep that behavior for ASCII menu
+    // decorations and common Unicode direction symbols.
+    static unsigned char systemFallbackCharacter(uint32_t codepoint) {
+        if (codepoint >= 0x20U && codepoint <= 0x7eU) {
+            return static_cast<unsigned char>(codepoint);
+        }
+        switch (codepoint) {
+            case 0x2190U: case 0x25c0U: case 0x25c4U: return '<';
+            case 0x2191U: case 0x25b2U: case 0x25b4U: return '^';
+            case 0x2192U: case 0x25b6U: case 0x25baU: return '>';
+            case 0x2193U: case 0x25bcU: case 0x25beU: return 'v';
+            default: return '?';
+        }
+    }
+
+    void drawSystemCharacter(uint32_t codepoint, int x, int y,
+                             int scale = 1) {
+        scale = std::max(1, scale);
+        const unsigned char character = systemFallbackCharacter(codepoint);
+        const gfx::Font& font = gfx::font5x7();
+        for (int column = 0; column < 5; ++column) {
+            const uint8_t bits = font.glyph_column(
+                static_cast<char>(character), column);
+            for (int row = 0; row < 7; ++row) {
+                if (((bits >> row) & 1U) == 0U) continue;
+                for (int sy = 0; sy < scale; ++sy) {
+                    for (int sx = 0; sx < scale; ++sx) {
+                        putLogicalPixel(x + column * scale + sx,
+                                        y + row * scale + sy, Black);
+                    }
+                }
+            }
+        }
+    }
+
     void drawButtonSymbol(uint32_t codepoint, int x, int y, int scale = 1) {
         char label = 0;
         if (!playdateButtonSymbol(codepoint, label)) return;
@@ -3387,13 +3423,7 @@ struct Runtime::Impl {
                     char button_label = 0;
                     if (playdateButtonSymbol(codepoint, button_label)) {
                         line_width += buttonSymbolAdvance() + tracking;
-                    } else {
-                        if (codepoint != '?') {
-                            compiledGlyph(*font, '?', next_codepoint, glyph);
-                        }
-                        line_width += (glyph.advance > 0 ? glyph.advance
-                            : std::max<int>(1, font->glyph_width)) + tracking;
-                    }
+                    } else line_width += 6 + tracking;
                 }
             } else if (font && font->pico) {
                 char button_label = 0;
@@ -3497,12 +3527,8 @@ struct Runtime::Impl {
                     cursor_x += buttonSymbolAdvance() + tracking;
                     continue;
                 }
-                if (codepoint != '?') {
-                    compiledGlyph(*current_font, '?', next_codepoint, glyph);
-                }
-                drawCompiledGlyph(*current_font, glyph, cursor_x, cursor_y);
-                cursor_x += (glyph.advance > 0 ? glyph.advance
-                    : std::max<int>(1, current_font->glyph_width)) + tracking;
+                drawSystemCharacter(codepoint, cursor_x, cursor_y);
+                cursor_x += 6 + tracking;
                 continue;
             }
             char button_label = 0;
@@ -3520,15 +3546,7 @@ struct Runtime::Impl {
                 drawImage(glyph, cursor_x, cursor_y, Unflipped);
                 cursor_x += 4 + tracking;
             } else {
-                const gfx::Font& font = gfx::font5x7();
-                for (int column = 0; column < 5; ++column) {
-                    const uint8_t bits = font.glyph_column(static_cast<char>(character), column);
-                    for (int row = 0; row < 7; ++row) if ((bits >> row) & 1U) {
-                        for (int sy = 0; sy < scale; ++sy) for (int sx = 0; sx < scale; ++sx)
-                            putLogicalPixel(cursor_x + column*scale + sx,
-                                            cursor_y + row*scale + sy, Black);
-                    }
-                }
+                drawSystemCharacter(character, cursor_x, cursor_y, scale);
                 cursor_x += 6 * scale + tracking;
             }
         }
@@ -6730,7 +6748,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.20: CoreLibs object/scene compatibility");
+                 "PogoDate API STEP11.6.21: key repeat and system glyph fallback");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

@@ -2292,6 +2292,41 @@ function playdate.math.lerp(startValue, endValue, amount)
 	return startValue + (endValue - startValue) * amount
 end
 
+-- SDK key-repeat timers fire immediately, wait for the initial delay, then
+-- repeat at the shorter interval until the returned timer is removed.
+local function callKeyRepeatCallback(callback, arguments, timer)
+	if arguments.n > 0 then
+		callback(table.unpack(arguments, 1, arguments.n))
+	else
+		callback(timer)
+	end
+end
+
+function playdate.timer.keyRepeatTimer(callback, ...)
+	return playdate.timer.keyRepeatTimerWithDelay(300, 100, callback, ...)
+end
+
+function playdate.timer.keyRepeatTimerWithDelay(initialDelay, repeatDelay,
+		callback, ...)
+	assert(type(callback) == "function", "key repeat callback must be a function")
+	initialDelay = math.max(1, tonumber(initialDelay) or 300)
+	repeatDelay = math.max(1, tonumber(repeatDelay) or 100)
+	local arguments = table.pack(...)
+	local timer
+	local firstTimedFiring = true
+	local function timedCallback()
+		callKeyRepeatCallback(callback, arguments, timer)
+		if firstTimedFiring then
+			firstTimedFiring = false
+			timer.duration = repeatDelay
+		end
+	end
+	timer = playdate.timer.new(initialDelay, timedCallback)
+	timer.repeats = true
+	callKeyRepeatCallback(callback, arguments, timer)
+	return timer
+end
+
 -- CoreLibs/frameTimer semantics: durations are measured in calls to
 -- updateTimers(), not milliseconds.  This keeps frame-authored animation and
 -- difficulty pacing stable when a package requests a non-default refresh rate.

@@ -31,6 +31,12 @@ concrete class links on instances, `isa`, inherited metamethods and callable
 scene reconstruction are supported. This fixes class-driven scene managers
 without making arbitrary Lua tables callable.
 
+STEP11.6.21 adds the SDK's `playdate.timer.keyRepeatTimer()` and
+`keyRepeatTimerWithDelay()` timing/callback behavior. It also follows
+Playdate's system-font fallback when a custom PFT lacks an ASCII decoration or
+common directional symbol, preventing menu arrows and brackets from becoming
+question marks.
+
 ## Validated games
 
 ### Onebit Frogger
@@ -146,8 +152,9 @@ same deferred-load boundary after its one Lua module starts successfully.
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
   locking, rectangles, circles, ellipses/arcs, triangles, polygons, text,
-  system/current-font lookup, circled A/B system glyph fallbacks and
-  rotated/faded drawing, anchored/cropped/masked drawing, generated rotated
+  system/current-font lookup, missing-PFT system glyph fallback, circled A/B
+  button symbols and common directional-symbol fallback, rotated/faded
+  drawing, anchored/cropped/masked drawing, generated rotated
   and affine-transformed images, and reusable text images;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
@@ -158,9 +165,9 @@ same deferred-load boundary after its one Lua module starts successfully.
   sprites, mutable tilemaps, merged tile collision rects and correctly-sized
   tilemap walls;
 - display offset and graphics draw offset, including draw-offset screen shake;
-- callback/value millisecond timers; callback/value frame timers with easing,
-  repeats and reverses; bundled easing, animation and animator CoreLibs plus
-  elapsed-time helpers;
+- callback/value millisecond timers, including SDK key-repeat timers;
+  callback/value frame timers with easing, repeats and reverses; bundled
+  easing, animation and animator CoreLibs plus elapsed-time helpers;
 - Playdate date/time conversion forms and cycle-safe table copy helpers;
 - geometry rect, point, size, vector, line-segment, polygon, arc and affine
   transform types, including intersections, bounds, containment, distances,
@@ -206,7 +213,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.20.
+  the device after flashing STEP11.6.21.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
