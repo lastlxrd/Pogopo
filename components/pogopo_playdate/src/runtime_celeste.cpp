@@ -1425,6 +1425,8 @@ struct Runtime::Impl {
 
     void drawImage(const Image& image, int x, int y, int flip,
                    int scale = 1, float fade = 1.0f) {
+        x += draw_offset_x;
+        y += draw_offset_y;
         scale = std::max(1, scale);
         int content_left = 0, content_top = 0;
         int content_right = image.width, content_bottom = image.height;
@@ -1640,6 +1642,8 @@ struct Runtime::Impl {
     void drawImageScaled(const Image& image, int x, int y,
                          float scale_x, float scale_y,
                          int flip = Unflipped) {
+        x += draw_offset_x;
+        y += draw_offset_y;
         const int destination_width = scaledExtent(image.width, scale_x);
         const int destination_height = scaledExtent(image.height, scale_y);
         if (destination_width <= 0 || destination_height <= 0) return;
@@ -1749,6 +1753,8 @@ struct Runtime::Impl {
 
     void drawImageRotated(const Image& image, float center_x, float center_y,
                           float angle_degrees, float scale_x, float scale_y) {
+        center_x += static_cast<float>(draw_offset_x);
+        center_y += static_cast<float>(draw_offset_y);
         if (!target || !target->pixels || image.width <= 0 || image.height <= 0 ||
             !std::isfinite(center_x) || !std::isfinite(center_y) ||
             !std::isfinite(angle_degrees) || !std::isfinite(scale_x) ||
@@ -1776,7 +1782,10 @@ struct Runtime::Impl {
                     center_x - static_cast<float>(destination_width) * 0.5f));
                 const int top = static_cast<int>(std::floor(
                     center_y - static_cast<float>(destination_height) * 0.5f));
-                drawImageScaled(image, left, top, scale_x, scale_y);
+                // drawImageScaled() applies the public draw offset itself;
+                // center_x/center_y above are already in target coordinates.
+                drawImageScaled(image, left - draw_offset_x,
+                                top - draw_offset_y, scale_x, scale_y);
             }
             return;
         }
@@ -1964,8 +1973,8 @@ struct Runtime::Impl {
 
     void flushScreen() {
         if (!canvas || !screen.pixels) return;
-        const int output_x = display_offset_x + draw_offset_x;
-        const int output_y = display_offset_y + draw_offset_y;
+        const int output_x = display_offset_x;
+        const int output_y = display_offset_y;
         if (output_x != 0 || output_y != 0) {
             canvas->clear(background_color == Black ? gfx::BLACK : gfx::WHITE);
         }
@@ -3331,7 +3340,12 @@ struct Runtime::Impl {
         return 0;
     }
 
-    void fillRect(int x, int y, int width, int height, uint8_t color) {
+    void fillRect(int x, int y, int width, int height, uint8_t color,
+                  bool apply_draw_offset = true) {
+        if (apply_draw_offset) {
+            x += draw_offset_x;
+            y += draw_offset_y;
+        }
         if (!target || !target->pixels || width <= 0 || height <= 0) return;
         const int left = std::max({x, clip.x, 0});
         const int top = std::max({y, clip.y, 0});
@@ -3429,8 +3443,10 @@ struct Runtime::Impl {
 
     static int cDrawPixel(lua_State* state) {
         Impl* runtime = self(state);
-        const int x = static_cast<int>(std::lround(luaL_checknumber(state, 1)));
-        const int y = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
+        const int x = static_cast<int>(std::lround(luaL_checknumber(state, 1))) +
+            runtime->draw_offset_x;
+        const int y = static_cast<int>(std::lround(luaL_checknumber(state, 2))) +
+            runtime->draw_offset_y;
         runtime->putLogicalPixel(x, y, runtime->draw_color);
         return 0;
     }
@@ -3438,6 +3454,8 @@ struct Runtime::Impl {
     static int cDrawRect(lua_State* state) {
         Impl* runtime = self(state);
         int x, y, w, h; runtime->readRect(state, 1, x, y, w, h);
+        x += runtime->draw_offset_x;
+        y += runtime->draw_offset_y;
         for (int line = 0; line < runtime->line_width; ++line) {
             for (int px = x + line; px < x + w - line; ++px) {
                 runtime->putLogicalPixel(px, y + line, runtime->draw_color);
@@ -3487,6 +3505,8 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         int x, y, width, height;
         runtime->readRect(state, 1, x, y, width, height);
+        x += runtime->draw_offset_x;
+        y += runtime->draw_offset_y;
         const int radius_index = lua_istable(state, 1) ? 2 : 5;
         const int radius = static_cast<int>(
             luaL_checkinteger(state, radius_index));
@@ -3498,6 +3518,8 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         int x, y, width, height;
         runtime->readRect(state, 1, x, y, width, height);
+        x += runtime->draw_offset_x;
+        y += runtime->draw_offset_y;
         const int radius_index = lua_istable(state, 1) ? 2 : 5;
         const int radius = static_cast<int>(
             luaL_checkinteger(state, radius_index));
@@ -3507,10 +3529,14 @@ struct Runtime::Impl {
 
     static int cDrawLine(lua_State* state) {
         Impl* runtime = self(state);
-        int x0 = static_cast<int>(luaL_checknumber(state, 1));
-        int y0 = static_cast<int>(luaL_checknumber(state, 2));
-        const int x1 = static_cast<int>(luaL_checknumber(state, 3));
-        const int y1 = static_cast<int>(luaL_checknumber(state, 4));
+        int x0 = static_cast<int>(luaL_checknumber(state, 1)) +
+            runtime->draw_offset_x;
+        int y0 = static_cast<int>(luaL_checknumber(state, 2)) +
+            runtime->draw_offset_y;
+        const int x1 = static_cast<int>(luaL_checknumber(state, 3)) +
+            runtime->draw_offset_x;
+        const int y1 = static_cast<int>(luaL_checknumber(state, 4)) +
+            runtime->draw_offset_y;
         const int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
         const int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
         int error = dx + dy;
@@ -3617,6 +3643,10 @@ struct Runtime::Impl {
             count, local.data(), static_cast<int>(local.size()));
         if (!points) return luaL_error(state, "polygon allocation failed");
         readPolygonPoints(state, object, points, count);
+        for (int index = 0; index < count; ++index) {
+            points[index].x += runtime->draw_offset_x;
+            points[index].y += runtime->draw_offset_y;
+        }
         for (int index = 0; index + 1 < count; ++index) {
             drawLineNative(runtime,
                 static_cast<int>(points[index].x),
@@ -3659,6 +3689,10 @@ struct Runtime::Impl {
             return luaL_error(state, "polygon allocation failed");
         }
         readPolygonPoints(state, object, points, count);
+        for (int index = 0; index < count; ++index) {
+            points[index].x += runtime->draw_offset_x;
+            points[index].y += runtime->draw_offset_y;
+        }
 
         float min_y = points[0].y;
         float max_y = points[0].y;
@@ -3692,7 +3726,7 @@ struct Runtime::Impl {
                     std::floor(intersections[index + 1]));
                 if (right >= left) {
                     runtime->fillRect(left, y, right - left + 1, 1,
-                                      runtime->draw_color);
+                                      runtime->draw_color, false);
                 }
             }
         }
@@ -3705,12 +3739,12 @@ struct Runtime::Impl {
 
     static int cDrawTriangle(lua_State* state) {
         Impl* runtime = self(state);
-        const int x1 = static_cast<int>(luaL_checknumber(state, 1));
-        const int y1 = static_cast<int>(luaL_checknumber(state, 2));
-        const int x2 = static_cast<int>(luaL_checknumber(state, 3));
-        const int y2 = static_cast<int>(luaL_checknumber(state, 4));
-        const int x3 = static_cast<int>(luaL_checknumber(state, 5));
-        const int y3 = static_cast<int>(luaL_checknumber(state, 6));
+        const int x1 = static_cast<int>(luaL_checknumber(state, 1)) + runtime->draw_offset_x;
+        const int y1 = static_cast<int>(luaL_checknumber(state, 2)) + runtime->draw_offset_y;
+        const int x2 = static_cast<int>(luaL_checknumber(state, 3)) + runtime->draw_offset_x;
+        const int y2 = static_cast<int>(luaL_checknumber(state, 4)) + runtime->draw_offset_y;
+        const int x3 = static_cast<int>(luaL_checknumber(state, 5)) + runtime->draw_offset_x;
+        const int y3 = static_cast<int>(luaL_checknumber(state, 6)) + runtime->draw_offset_y;
         drawLineNative(runtime, x1, y1, x2, y2);
         drawLineNative(runtime, x2, y2, x3, y3);
         drawLineNative(runtime, x3, y3, x1, y1);
@@ -3730,16 +3764,16 @@ struct Runtime::Impl {
 
     static int cFillCircle(lua_State* state) {
         Impl* runtime = self(state);
-        runtime->circle(static_cast<int>(luaL_checknumber(state, 1)),
-                        static_cast<int>(luaL_checknumber(state, 2)),
+        runtime->circle(static_cast<int>(luaL_checknumber(state, 1)) + runtime->draw_offset_x,
+                        static_cast<int>(luaL_checknumber(state, 2)) + runtime->draw_offset_y,
                         static_cast<int>(luaL_checknumber(state, 3)), true);
         return 0;
     }
 
     static int cDrawCircle(lua_State* state) {
         Impl* runtime = self(state);
-        runtime->circle(static_cast<int>(luaL_checknumber(state, 1)),
-                        static_cast<int>(luaL_checknumber(state, 2)),
+        runtime->circle(static_cast<int>(luaL_checknumber(state, 1)) + runtime->draw_offset_x,
+                        static_cast<int>(luaL_checknumber(state, 2)) + runtime->draw_offset_y,
                         static_cast<int>(luaL_checknumber(state, 3)), false);
         return 0;
     }
@@ -3747,6 +3781,7 @@ struct Runtime::Impl {
     static int cFillCircleInRect(lua_State* state) {
         Impl* runtime = self(state);
         int x, y, w, h; runtime->readRect(state, 1, x, y, w, h);
+        x += runtime->draw_offset_x; y += runtime->draw_offset_y;
         runtime->circle(x + w/2, y + h/2, std::max(0, std::min(w,h)/2), true);
         return 0;
     }
@@ -3754,6 +3789,7 @@ struct Runtime::Impl {
     static int cDrawCircleInRect(lua_State* state) {
         Impl* runtime = self(state);
         int x, y, w, h; runtime->readRect(state, 1, x, y, w, h);
+        x += runtime->draw_offset_x; y += runtime->draw_offset_y;
         runtime->circle(x + w/2, y + h/2, std::max(0, std::min(w,h)/2), false);
         return 0;
     }
@@ -3946,6 +3982,8 @@ struct Runtime::Impl {
 
     void drawCompiledGlyph(const PdFont& font, const CompiledGlyph& glyph,
                            int x, int y) {
+        x += draw_offset_x;
+        y += draw_offset_y;
         if (!glyph.cell || glyph.cell_size < 16U) return;
         const uint8_t* cell = glyph.cell;
         const uint16_t stored_width = readLe16(cell);
@@ -4013,6 +4051,8 @@ struct Runtime::Impl {
 
     void drawSystemCharacter(uint32_t codepoint, int x, int y,
                              int scale = 1) {
+        x += draw_offset_x;
+        y += draw_offset_y;
         scale = std::max(1, scale);
         const unsigned char character = systemFallbackCharacter(codepoint);
         const gfx::Font& font = gfx::font5x7();
@@ -4032,6 +4072,8 @@ struct Runtime::Impl {
     }
 
     void drawButtonSymbol(uint32_t codepoint, int x, int y, int scale = 1) {
+        x += draw_offset_x;
+        y += draw_offset_y;
         char label = 0;
         if (!playdateButtonSymbol(codepoint, label)) return;
         scale = std::max(1, scale);
@@ -7596,7 +7638,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.25: native polygon terrain rasterizer");
+                 "PogoDate API STEP11.6.26: camera draw-offset compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

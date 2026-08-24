@@ -68,6 +68,14 @@ directly into render targets. This targets Hillslide's seven-pass dithered hill
 generator without package-specific patches while preserving the SDK numeric
 and `geometry.polygon` overloads.
 
+STEP11.6.26 corrects `graphics.setDrawOffset()` semantics. The offset is now
+applied to images, scaled/rotated images, rectangles, lines, pixels, circles,
+polygons, triangles and font glyphs before clipping. It is no longer added to
+the already clipped full-screen framebuffer during LCD flush. World-space
+objects beyond x=400 therefore enter the camera viewport correctly, while
+`image:drawIgnoringOffset()` and `sprite:setIgnoresDrawOffset()` remain fixed
+to screen coordinates.
+
 ## Validated games
 
 ### Onebit Frogger
