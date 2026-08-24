@@ -1820,7 +1820,7 @@ local function polygonCoordinates(...)
 	end
 	return args
 end
-function gfx.drawPolygon(...)
+gfx.drawPolygon=gfx.drawPolygon or function(...)
 	local args={...}; local polygon=type(args[1])=="table" and args[1].points and args[1]
 	local p=polygonCoordinates(...)
 	for i=1,#p-3,2 do gfx.drawLine(p[i],p[i+1],p[i+2],p[i+3]) end
@@ -1828,7 +1828,7 @@ function gfx.drawPolygon(...)
 		gfx.drawLine(p[#p-1],p[#p],p[1],p[2])
 	end
 end
-function gfx.fillPolygon(...)
+gfx.fillPolygon=gfx.fillPolygon or function(...)
 	local args={...}; local polygon=type(args[1])=="table" and args[1].points and args[1]
 	if polygon and not polygon:isClosed() then error("polygon must be closed",2) end
 	local p=polygonCoordinates(...)
@@ -1850,10 +1850,10 @@ function gfx.fillPolygon(...)
 		for i=1,#nodes-1,2 do gfx.drawLine(math.ceil(nodes[i]),y,math.floor(nodes[i+1]),y) end
 	end
 end
-function gfx.drawTriangle(x1,y1,x2,y2,x3,y3)
+gfx.drawTriangle=gfx.drawTriangle or function(x1,y1,x2,y2,x3,y3)
 	gfx.drawLine(x1,y1,x2,y2); gfx.drawLine(x2,y2,x3,y3); gfx.drawLine(x3,y3,x1,y1)
 end
-function gfx.fillTriangle(...) gfx.fillPolygon(...) end
+gfx.fillTriangle=gfx.fillTriangle or function(...) gfx.fillPolygon(...) end
 local function ellipseRect(x,y,w,h)
 	if type(x)=="table" then return x.x,x.y,x.width or x.w,x.height or x.h end
 	return x,y,w,h

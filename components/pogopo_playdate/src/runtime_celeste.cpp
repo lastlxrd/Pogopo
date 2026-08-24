@@ -3365,6 +3365,54 @@ struct Runtime::Impl {
             return;
         }
 
+        // Hillslide builds every terrain segment from several patterned
+        // polygon passes. Once the scan converter has produced a horizontal
+        // span, Copy-mode patterns can be written directly: clipping and the
+        // image bounds are already known, so the generic per-pixel compositor
+        // would only repeat those checks hundreds of thousands of times.
+        if (!stencil && color == Pattern && draw_mode == Copy) {
+            bool wrote = false;
+            bool wrote_black = false;
+            for (int row = top; row < bottom; ++row) {
+                uint8_t* destination = target->pixels +
+                    static_cast<size_t>(row) * target->stride;
+                const unsigned pattern_row = static_cast<unsigned>(
+                    row - pattern_offset_y) & 7U;
+                for (int column = left; column < right; ++column) {
+                    const unsigned pattern_column = static_cast<unsigned>(
+                        column - pattern_offset_x) & 7U;
+                    uint8_t value = Clear;
+                    if (draw_pattern_uses_image) {
+                        value = draw_pattern_pixels[
+                            pattern_row * 8U + pattern_column];
+                    } else {
+                        const bool bit = (draw_pattern[pattern_row] &
+                            (0x80U >> pattern_column)) != 0U;
+                        if (draw_pattern_transparent) {
+                            value = bit ? draw_pattern_color
+                                        : static_cast<uint8_t>(Clear);
+                        } else {
+                            value = bit ? Black : White;
+                        }
+                    }
+                    if (value == Clear) continue;
+                    if (target == &screen && inverted_display) {
+                        value = value == Black ? White : Black;
+                    }
+                    destination[column] = value;
+                    wrote = true;
+                    wrote_black = wrote_black || value == Black;
+                }
+            }
+            if (target != &screen && wrote) {
+                expandContentBounds(*target, left, top, right, bottom);
+                if (wrote_black) {
+                    expandBlackBounds(*target, left, top, right, bottom);
+                }
+            }
+            return;
+        }
+
         for (int row = top; row < bottom; ++row) {
             for (int column = left; column < right; ++column) {
                 putLogicalPixel(column, row, color);
@@ -3473,6 +3521,199 @@ struct Runtime::Impl {
             if (twice >= dy) { error += dy; x0 += sx; }
             if (twice <= dx) { error += dx; y0 += sy; }
         }
+        return 0;
+    }
+
+    struct PolygonPoint { float x; float y; };
+
+    static void drawLineNative(Impl* runtime, int x0, int y0,
+                               int x1, int y1) {
+        const int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+        const int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+        int error = dx + dy;
+        while (true) {
+            runtime->putLogicalPixel(x0, y0, runtime->draw_color);
+            if (x0 == x1 && y0 == y1) break;
+            const int twice = error * 2;
+            if (twice >= dy) { error += dy; x0 += sx; }
+            if (twice <= dx) { error += dx; y0 += sy; }
+        }
+    }
+
+    static int polygonPointCount(lua_State* state, bool& object) {
+        object = lua_istable(state, 1);
+        if (object) {
+            lua_getfield(state, 1, "points");
+            if (!lua_istable(state, -1)) {
+                lua_pop(state, 1);
+                luaL_argerror(state, 1, "polygon.points table expected");
+                return 0;
+            }
+            const int count = static_cast<int>(lua_rawlen(state, -1));
+            lua_pop(state, 1);
+            return count;
+        }
+        int values = lua_gettop(state);
+        if ((values & 1) != 0) --values; // optional fill-rule argument
+        return values / 2;
+    }
+
+    static bool polygonObjectClosed(lua_State* state) {
+        lua_getfield(state, 1, "_closed");
+        const bool closed = lua_toboolean(state, -1) != 0;
+        lua_pop(state, 1);
+        return closed;
+    }
+
+    static void readPolygonPoints(lua_State* state, bool object,
+                                  PolygonPoint* points, int count) {
+        if (!object) {
+            for (int index = 0; index < count; ++index) {
+                points[index].x = static_cast<float>(
+                    luaL_checknumber(state, index * 2 + 1));
+                points[index].y = static_cast<float>(
+                    luaL_checknumber(state, index * 2 + 2));
+            }
+            return;
+        }
+        lua_getfield(state, 1, "points");
+        for (int index = 0; index < count; ++index) {
+            lua_rawgeti(state, -1, index + 1);
+            luaL_checktype(state, -1, LUA_TTABLE);
+            lua_getfield(state, -1, "x");
+            points[index].x = static_cast<float>(luaL_checknumber(state, -1));
+            lua_pop(state, 1);
+            lua_getfield(state, -1, "y");
+            points[index].y = static_cast<float>(luaL_checknumber(state, -1));
+            lua_pop(state, 2);
+        }
+        lua_pop(state, 1);
+    }
+
+    static PolygonPoint* allocatePolygonPoints(int count,
+                                               PolygonPoint* local,
+                                               int local_count) {
+        if (count <= local_count) return local;
+        return static_cast<PolygonPoint*>(heap_caps_malloc(
+            sizeof(PolygonPoint) * static_cast<size_t>(count),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+
+    static float* allocateIntersections(int count, float* local,
+                                        int local_count) {
+        if (count <= local_count) return local;
+        return static_cast<float*>(heap_caps_malloc(
+            sizeof(float) * static_cast<size_t>(count),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+
+    static int cDrawPolygon(lua_State* state) {
+        Impl* runtime = self(state);
+        bool object = false;
+        const int count = polygonPointCount(state, object);
+        if (count < 2) return 0;
+        std::array<PolygonPoint, 48> local{};
+        PolygonPoint* points = allocatePolygonPoints(
+            count, local.data(), static_cast<int>(local.size()));
+        if (!points) return luaL_error(state, "polygon allocation failed");
+        readPolygonPoints(state, object, points, count);
+        for (int index = 0; index + 1 < count; ++index) {
+            drawLineNative(runtime,
+                static_cast<int>(points[index].x),
+                static_cast<int>(points[index].y),
+                static_cast<int>(points[index + 1].x),
+                static_cast<int>(points[index + 1].y));
+        }
+        if (!object || polygonObjectClosed(state)) {
+            drawLineNative(runtime,
+                static_cast<int>(points[count - 1].x),
+                static_cast<int>(points[count - 1].y),
+                static_cast<int>(points[0].x),
+                static_cast<int>(points[0].y));
+        }
+        if (points != local.data()) heap_caps_free(points);
+        return 0;
+    }
+
+    static int cFillPolygon(lua_State* state) {
+        Impl* runtime = self(state);
+        bool object = false;
+        const int count = polygonPointCount(state, object);
+        if (object && !polygonObjectClosed(state)) {
+            return luaL_error(state, "polygon must be closed");
+        }
+        if (count < 3) return 0;
+
+        std::array<PolygonPoint, 48> local_points{};
+        std::array<float, 48> local_intersections{};
+        PolygonPoint* points = allocatePolygonPoints(count,
+            local_points.data(), static_cast<int>(local_points.size()));
+        float* intersections = allocateIntersections(count,
+            local_intersections.data(),
+            static_cast<int>(local_intersections.size()));
+        if (!points || !intersections) {
+            if (points && points != local_points.data()) heap_caps_free(points);
+            if (intersections && intersections != local_intersections.data()) {
+                heap_caps_free(intersections);
+            }
+            return luaL_error(state, "polygon allocation failed");
+        }
+        readPolygonPoints(state, object, points, count);
+
+        float min_y = points[0].y;
+        float max_y = points[0].y;
+        for (int index = 1; index < count; ++index) {
+            min_y = std::min(min_y, points[index].y);
+            max_y = std::max(max_y, points[index].y);
+        }
+        const int first_y = std::max(static_cast<int>(std::ceil(min_y)),
+                                     std::max(runtime->clip.y, 0));
+        const int last_y = std::min(static_cast<int>(std::floor(max_y)),
+            std::min(runtime->clip.y + runtime->clip.h - 1,
+                     runtime->target ? runtime->target->height - 1 : -1));
+        for (int y = first_y; y <= last_y; ++y) {
+            int used = 0;
+            int previous = count - 1;
+            for (int index = 0; index < count; ++index) {
+                const PolygonPoint& a = points[index];
+                const PolygonPoint& b = points[previous];
+                if ((a.y < y && b.y >= y) || (b.y < y && a.y >= y)) {
+                    intersections[used++] = a.x +
+                        (static_cast<float>(y) - a.y) /
+                        (b.y - a.y) * (b.x - a.x);
+                }
+                previous = index;
+            }
+            std::sort(intersections, intersections + used);
+            for (int index = 0; index + 1 < used; index += 2) {
+                const int left = static_cast<int>(
+                    std::ceil(intersections[index]));
+                const int right = static_cast<int>(
+                    std::floor(intersections[index + 1]));
+                if (right >= left) {
+                    runtime->fillRect(left, y, right - left + 1, 1,
+                                      runtime->draw_color);
+                }
+            }
+        }
+        if (points != local_points.data()) heap_caps_free(points);
+        if (intersections != local_intersections.data()) {
+            heap_caps_free(intersections);
+        }
+        return 0;
+    }
+
+    static int cDrawTriangle(lua_State* state) {
+        Impl* runtime = self(state);
+        const int x1 = static_cast<int>(luaL_checknumber(state, 1));
+        const int y1 = static_cast<int>(luaL_checknumber(state, 2));
+        const int x2 = static_cast<int>(luaL_checknumber(state, 3));
+        const int y2 = static_cast<int>(luaL_checknumber(state, 4));
+        const int x3 = static_cast<int>(luaL_checknumber(state, 5));
+        const int y3 = static_cast<int>(luaL_checknumber(state, 6));
+        drawLineNative(runtime, x1, y1, x2, y2);
+        drawLineNative(runtime, x2, y2, x3, y3);
+        drawLineNative(runtime, x3, y3, x1, y1);
         return 0;
     }
 
@@ -7152,6 +7393,10 @@ struct Runtime::Impl {
         setFunction(graphics,"fillRoundRect",cFillRoundRect);
         setFunction(graphics,"drawRoundRect",cDrawRoundRect);
         setFunction(graphics,"drawLine",cDrawLine);
+        setFunction(graphics,"drawPolygon",cDrawPolygon);
+        setFunction(graphics,"fillPolygon",cFillPolygon);
+        setFunction(graphics,"drawTriangle",cDrawTriangle);
+        setFunction(graphics,"fillTriangle",cFillPolygon);
         setFunction(graphics,"fillCircleAtPoint",cFillCircle);setFunction(graphics,"drawCircleAtPoint",cDrawCircle);
         setFunction(graphics,"fillCircleInRect",cFillCircleInRect);setFunction(graphics,"drawCircleInRect",cDrawCircleInRect);
         setFunction(graphics,"drawText",cDrawText);setFunction(graphics,"drawTextInRect",cDrawTextInRect);
@@ -7351,7 +7596,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.24: PDT LRU + fast 1-bit compositor");
+                 "PogoDate API STEP11.6.25: native polygon terrain rasterizer");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

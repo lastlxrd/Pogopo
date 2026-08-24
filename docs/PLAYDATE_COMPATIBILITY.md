@@ -50,14 +50,23 @@ requested; frames remain trimmed 1-bit images behind a bounded cache and are
 expanded to mutable pixels only on demand. This prevents animation-heavy games
 from retaining every inflated table and full transparent frame canvas.
 
-STEP11.6.24 removes the hardware stalls found during Hillslide gameplay.
+STEP11.6.24 removes repeated PDT inflation and full-GC fallback from Hillslide.
 Expanded PDT streams now live in a 1.4 MiB PSRAM LRU instead of being inflated
 again for every new frame, while returned images remain compact independent
 copies. The compositor parses each compiled 1-bit frame once per draw instead
 of once per pixel, and large render-target overflow no longer forces a
 stop-the-world Lua collection. This step also adds keyboard lifecycle,
 mic/headset capability detection, display mosaic state, display flipping and
-direct display-image loading compatibility.
+direct display-image loading compatibility. Hardware logs later proved that
+PDT decode was only 6–67 ms and that the remaining 1.18–1.32 second stalls were
+inside terrain geometry generation.
+
+STEP11.6.25 moves `drawPolygon`, `fillPolygon`, `drawTriangle` and
+`fillTriangle` from the Lua fallback into the native runtime. Polygon scan
+conversion is clipped before rasterization and patterned Copy-mode spans write
+directly into render targets. This targets Hillslide's seven-pass dithered hill
+generator without package-specific patches while preserving the SDK numeric
+and `geometry.polygon` overloads.
 
 ## Validated games
 
@@ -266,7 +275,7 @@ need fidelity work even when their functions exist. Hillslide itself is at
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.24.
+  the device after flashing STEP11.6.25.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
