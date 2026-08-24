@@ -135,13 +135,16 @@ same deferred-load boundary after its one Lua module starts successfully.
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
   locking, rectangles, circles, ellipses/arcs, triangles, polygons, text,
   system/current-font lookup, circled A/B system glyph fallbacks and
-  rotated/faded drawing;
+  rotated/faded drawing, anchored/cropped/masked drawing, generated rotated
+  and affine-transformed images, and reusable text images;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
   `kColorXOR=3` values, translated to PogoDate's private pixel representation;
 - sprite ordering, subclass defaults, visibility, image/center/scale/rotation/
   flip/clip state, automatic animation-frame sizing, object `isa()`, geometric
-  area/overlap queries, swept collision contacts and normals, group and
-  collides-with bitmasks, tilemap-backed sprites and tilemap walls;
+  area/overlap/point/line queries, ordered line-hit metadata, swept collision
+  contacts and normals, group and collides-with bitmasks, tilemap-backed
+  sprites, mutable tilemaps, merged tile collision rects and correctly-sized
+  tilemap walls;
 - display offset and graphics draw offset, including draw-offset screen shake;
 - callback/value millisecond timers; callback/value frame timers with easing,
   repeats and reverses; bundled easing, animation and animator CoreLibs plus
@@ -150,6 +153,8 @@ same deferred-load boundary after its one Lua module starts successfully.
 - geometry rect, point, size, vector, line-segment, polygon, arc and affine
   transform types, including intersections, bounds, containment, distances,
   translation and transformed AABBs;
+- weighted A* pathfinding graphs and nodes, including connection mutation,
+  ID/coordinate lookup, 2D-grid creation and node or ID path results;
 - accelerometer start/stop/state/read APIs, fed by Pogopo's BMI270 on hardware;
 - Pogopo START-to-Playdate-A translation while a PDX owns input, except for the
   Maze bundle where START must remain independent of result-screen A actions;
@@ -186,12 +191,15 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.16.
+  the device after flashing STEP11.6.17.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
   complete. File-player seeking, true streamed decoding and loop subranges are
   also not implemented; long PDA music is decoded into PSRAM when started.
+- Affine-transformed image generation uses a correct inverse-mapped software
+  path, but large images or per-frame transforms can be expensive on ESP32-S3.
+  Video, QR generation and several specialized bitmap filters are incomplete.
 - The Pogopo shell does not yet draw Playdate's system-menu overlay. Menu items
   and callbacks are functional for game logic, but their presentation remains
   owned by the future shell integration.

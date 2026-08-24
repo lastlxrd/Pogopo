@@ -113,6 +113,7 @@ local sprites_dirty = false
 local collision_sprites_dirty = false
 local query_sequence = 0
 
+local spriteBounds
 local Sprite = {}
 Sprite.__index = Sprite
 setmetatable(Sprite, {
@@ -141,6 +142,11 @@ function Sprite:init(image)
 	self.xScale, self.yScale = 1, 1
 	self.rotation = 0
 	self.clipRect = nil
+	self.ignoresDrawOffset = false
+	self.opaque = false
+	self.redrawsOnImageChange = true
+	self.alwaysRedraw = false
+	self.stencilImage = nil
 	self.groups = {}
 	self.collidesWithGroups = {}
 	self.groupMask = 0
@@ -183,11 +189,42 @@ end
 function Sprite:getSize() return self.width, self.height end
 function Sprite:setCenter(x, y) self.centerX, self.centerY = x, y end
 function Sprite:getCenter() return self.centerX, self.centerY end
+function Sprite:getCenterPoint()
+	return playdate.geometry.point.new(self.centerX, self.centerY)
+end
 function Sprite:moveTo(x, y) self.x, self.y = x, y end
 function Sprite:moveBy(x, y) self.x, self.y = self.x + x, self.y + y end
 function Sprite:getPosition() return self.x, self.y end
-function Sprite:setRotation(value) self.rotation = value or 0 end
+function Sprite:setRotation(value, xScale, yScale)
+	self.rotation = value or 0
+	if xScale ~= nil then
+		self.xScale = xScale
+		self.yScale = yScale == nil and xScale or yScale
+	end
+end
 function Sprite:getRotation() return self.rotation end
+function Sprite:copy()
+	local value=Sprite(self.image)
+	value.tilemap=self.tilemap
+	value.x,value.y=self.x,self.y
+	value.centerX,value.centerY=self.centerX,self.centerY
+	value.width,value.height=self.width,self.height
+	value._sizeExplicit=self._sizeExplicit
+	value.zIndex,value.visible=self.zIndex,self.visible
+	value._updatesEnabled,value._collisionsEnabled=self._updatesEnabled,self._collisionsEnabled
+	value.imageDrawMode,value.flip=self.imageDrawMode,self.flip
+	value.xScale,value.yScale,value.rotation=self.xScale,self.yScale,self.rotation
+	value.clipRect=self.clipRect and table.shallowcopy(self.clipRect) or nil
+	value.groups=table.shallowcopy(self.groups or {})
+	value.collidesWithGroups=table.shallowcopy(self.collidesWithGroups or {})
+	value.groupMask,value.collidesWithGroupsMask=self.groupMask,self.collidesWithGroupsMask
+	value.tag=self.tag
+	value.ignoresDrawOffset,value.opaque=self.ignoresDrawOffset,self.opaque
+	value.redrawsOnImageChange=self.redrawsOnImageChange
+	value.stencilImage=self.stencilImage
+	if self.collideRect then value:setCollideRect(self.collideRect) end
+	return value
+end
 function Sprite:setScale(xScale, yScale)
 	self.xScale = xScale or 1
 	self.yScale = yScale or self.xScale
@@ -203,6 +240,10 @@ function Sprite:setClipRect(x, y, width, height)
 	end
 end
 function Sprite:clearClipRect() self.clipRect = nil end
+function Sprite:getClipRect()
+	if not self.clipRect then return nil end
+	return self.clipRect.x,self.clipRect.y,self.clipRect.width,self.clipRect.height
+end
 function Sprite:setZIndex(value)
 	if self.zIndex ~= value then
 		self.zIndex = value
@@ -231,6 +272,14 @@ function Sprite:setImageFlip(value, flipCollideRect)
 	self.flip = nextFlip
 end
 function Sprite:getImageFlip() return self.flip or gfx.kImageUnflipped end
+function Sprite:setIgnoresDrawOffset(value) self.ignoresDrawOffset=value==true end
+function Sprite:getIgnoresDrawOffset() return self.ignoresDrawOffset==true end
+function Sprite:setOpaque(value) self.opaque=value==true end
+function Sprite:isOpaque() return self.opaque==true end
+function Sprite:setRedrawsOnImageChange(value) self.redrawsOnImageChange=value==true end
+function Sprite:markDirty() sprites_dirty=true end
+function Sprite:setStencilImage(image, tile) self.stencilImage=image; self.stencilTiled=tile==true end
+function Sprite:clearStencil() self.stencilImage=nil; self.stencilTiled=false end
 function Sprite:setTag(value) self.tag = math.max(0, math.min(255, value or 0)) end
 function Sprite:getTag() return self.tag end
 local function maskFromGroups(value)
@@ -288,6 +337,31 @@ function Sprite:clearCollideRect()
 	self.collideRect = nil
 	collision_sprites_dirty = true
 end
+function Sprite:getCollideRect()
+	if not self.collideRect then return nil end
+	return playdate.geometry.rect.new(self.collideRect.x,self.collideRect.y,
+		self.collideRect.width,self.collideRect.height)
+end
+function Sprite:getCollideBounds()
+	if not self.collideRect then return nil end
+	local x,y,w,h=spriteBounds(self)
+	return playdate.geometry.rect.new(x,y,w,h)
+end
+function Sprite:setBounds(x,y,width,height)
+	if type(x)=="table" then
+		local rect=x; x,y,width,height=rect.x,rect.y,rect.width or rect.w,rect.height or rect.h
+	end
+	self:setSize(width,height)
+	self:moveTo(x+width*self.centerX,y+height*self.centerY)
+end
+function Sprite:getBounds()
+	return self.x-self.width*self.centerX,self.y-self.height*self.centerY,
+		self.width,self.height
+end
+function Sprite:getBoundsRect()
+	local x,y,w,h=self:getBounds()
+	return playdate.geometry.rect.new(x,y,w,h)
+end
 
 function Sprite:add()
 	if self.added then return self end
@@ -331,6 +405,7 @@ function Sprite:add()
 	sprites_dirty = true
 	return self
 end
+Sprite.addSprite=Sprite.add
 
 function Sprite:remove()
 	if self.added then
@@ -340,6 +415,7 @@ function Sprite:remove()
 	end
 	return self
 end
+Sprite.removeSprite=Sprite.remove
 
 function Sprite:update()
 	-- Base-instance update is intentionally empty. A call with no receiver is
@@ -374,14 +450,36 @@ function Sprite:update()
 	end
 	for i=1,#sprites do
 		local item = sprites[i]
-		if item.added and item.visible and (item.image or item.tilemap) then
+		local customDraw=type(item.draw)=="function" and item.draw~=Sprite.draw
+		if item.added and item.visible and (item.image or item.tilemap or customDraw) then
 			local previous = gfx._getImageDrawMode()
 			gfx.setImageDrawMode(item.imageDrawMode)
+			local oldOffsetX,oldOffsetY
+			if item.ignoresDrawOffset then
+				oldOffsetX,oldOffsetY=gfx.getDrawOffset(); gfx.setDrawOffset(0,0)
+			end
 			if item.clipRect then
 				gfx.setClipRect(item.clipRect.x, item.clipRect.y,
 					item.clipRect.width, item.clipRect.height)
 			end
-			if item.tilemap then
+			if item.stencilImage then gfx.setStencilImage(item.stencilImage,item.stencilTiled) end
+			if customDraw then
+				local x,y,w,h=item:getBounds()
+				local targetWidth,targetHeight=math.max(1,math.ceil(w)),math.max(1,math.ceil(h))
+				local currentWidth,currentHeight=0,0
+				if item._customDrawImage then
+					currentWidth,currentHeight=item._customDrawImage:getSize()
+				end
+				if not item._customDrawImage or currentWidth~=targetWidth or
+					currentHeight~=targetHeight then
+					item._customDrawImage=gfx.image.new(targetWidth,targetHeight,gfx.kColorClear)
+				else item._customDrawImage:clear(gfx.kColorClear) end
+				local callbackOffsetX,callbackOffsetY=gfx.getDrawOffset()
+				gfx.setDrawOffset(0,0); gfx.pushContext(item._customDrawImage)
+				item:draw(0,0,w,h)
+				gfx.popContext(); gfx.setDrawOffset(callbackOffsetX,callbackOffsetY)
+				item._customDrawImage:draw(x,y)
+			elseif item.tilemap then
 				local x = math.floor(item.x - item.width * item.centerX)
 				local y = math.floor(item.y - item.height * item.centerY)
 				item.tilemap:draw(x, y)
@@ -409,7 +507,9 @@ function Sprite:update()
 					item.image:draw(x, y, item.flip)
 				end
 			end
+			if item.stencilImage then gfx.clearStencil() end
 			if item.clipRect then gfx.clearClipRect() end
+			if oldOffsetX then gfx.setDrawOffset(oldOffsetX,oldOffsetY) end
 			gfx.setImageDrawMode(previous)
 		end
 	end
@@ -418,6 +518,21 @@ end
 function Sprite.performOnAllSprites(callback)
 	for i=1,#sprites do if sprites[i].added then callback(sprites[i]) end end
 end
+
+function Sprite.getAllSprites()
+	local result={}
+	for i=1,#sprites do if sprites[i].added then result[#result+1]=sprites[i] end end
+	return result
+end
+function Sprite.spriteCount() return #Sprite.getAllSprites() end
+function Sprite.removeSprites(items)
+	for i=1,#items do if items[i] and items[i].remove then items[i]:remove() end end
+end
+function Sprite.addSprites(items)
+	for i=1,#items do if items[i] and items[i].add then items[i]:add() end end
+end
+function Sprite.getAlwaysRedraw() return always_redraw end
+function Sprite.addDirtyRect() sprites_dirty=true end
 
 function Sprite.removeAll()
 	for i=1,#sprites do
@@ -440,7 +555,7 @@ function Sprite.redrawBackground()
 	if background_callback then background_callback(0, 0, 400, 240) end
 end
 
-local function spriteBounds(item)
+spriteBounds = function(item)
 	local left = item.x - item.width * item.centerX
 	local top = item.y - item.height * item.centerY
 	local rect = item.collideRect
@@ -671,7 +786,78 @@ function Sprite.querySpritesInRect(x, y, width, height)
 			end
 		end
 	end
-	return result
+	return result,#result
+end
+
+function Sprite.querySpritesAtPoint(x,y)
+	if type(x)=="table" then x,y=x.x,x.y end
+	local candidates=Sprite.querySpritesInRect(x,y,1,1)
+	local result={}
+	for i=1,#candidates do
+		local sx,sy,sw,sh=spriteBounds(candidates[i])
+		if x>=sx and x<=sx+sw and y>=sy and y<=sy+sh then
+			result[#result+1]=candidates[i]
+		end
+	end
+	return result,#result
+end
+
+local function lineRectInfo(x1,y1,x2,y2,rx,ry,rw,rh)
+	local dx,dy=x2-x1,y2-y1
+	local near,far=0,1
+	local entryX,entryY,exitX,exitY=0,0,0,0
+	local function axis(origin,delta,minimum,maximum,isX)
+		if math.abs(delta)<1e-12 then return origin>=minimum and origin<=maximum end
+		local t1,t2=(minimum-origin)/delta,(maximum-origin)/delta
+		local nearNormal,farNormal=-1,1
+		if t1>t2 then t1,t2=t2,t1; nearNormal,farNormal=farNormal,nearNormal end
+		if t1>near then
+			near=t1
+			if isX then entryX,entryY=nearNormal,0 else entryX,entryY=0,nearNormal end
+		end
+		if t2<far then
+			far=t2
+			if isX then exitX,exitY=farNormal,0 else exitX,exitY=0,farNormal end
+		end
+		return near<=far
+	end
+	if not axis(x1,dx,rx,rx+rw,true) or not axis(y1,dy,ry,ry+rh,false) then return nil end
+	if far<0 or near>1 then return nil end
+	near,far=math.max(0,near),math.min(1,far)
+	return near,far,entryX,entryY,exitX,exitY
+end
+
+function Sprite.querySpriteInfoAlongLine(x1,y1,x2,y2)
+	if type(x1)=="table" then
+		local line=x1; x1,y1,x2,y2=line.x1,line.y1,line.x2,line.y2
+	end
+	local left,top=math.min(x1,x2),math.min(y1,y2)
+	local candidates=Sprite.querySpritesInRect(left,top,
+		math.max(1,math.abs(x2-x1)),math.max(1,math.abs(y2-y1)))
+	local result={}
+	for i=1,#candidates do
+		local sprite=candidates[i]
+		local rx,ry,rw,rh=spriteBounds(sprite)
+		local near,far,enx,eny,exn,eyn=lineRectInfo(x1,y1,x2,y2,rx,ry,rw,rh)
+		if near then
+			result[#result+1]={sprite=sprite,ti1=near,ti2=far,
+				entryPoint=playdate.geometry.point.new(
+					x1+(x2-x1)*near,y1+(y2-y1)*near),
+				exitPoint=playdate.geometry.point.new(
+					x1+(x2-x1)*far,y1+(y2-y1)*far),
+				entryNormal=playdate.geometry.vector2D.new(enx,eny),
+				exitNormal=playdate.geometry.vector2D.new(exn,eyn)}
+		end
+	end
+	table.sort(result,function(a,b) return a.ti1<b.ti1 end)
+	return result,#result
+end
+
+function Sprite.querySpritesAlongLine(...)
+	local info=Sprite.querySpriteInfoAlongLine(...)
+	local result={}
+	for i=1,#info do result[i]=info[i].sprite end
+	return result,#result
 end
 
 function Sprite:overlappingSprites()
@@ -728,11 +914,15 @@ function Sprite.addWallSprites(tilemap, emptyIDs, offsetX, offsetY)
 			-- so adding hundreds of them to the render list just makes every
 			-- frame sort and scan invisible objects.
 			item.added = true
-			item:setSize(8, 8)
-			item:setCollideRect(0, 0, 8, 8)
-			item:moveTo(offsetX + column * 8 + 4, offsetY + row * 8 + 4)
-			local cell_x = math.floor((offsetX + column * 8) / 8)
-			local cell_y = math.floor((offsetY + row * 8) / 8)
+			local tileWidth,tileHeight=tilemap:getTileSize()
+			tileWidth=tileWidth>0 and tileWidth or 8
+			tileHeight=tileHeight>0 and tileHeight or 8
+			item:setSize(tileWidth, tileHeight)
+			item:setCollideRect(0, 0, tileWidth, tileHeight)
+			item:moveTo(offsetX + column * tileWidth + tileWidth/2,
+				offsetY + row * tileHeight + tileHeight/2)
+			local cell_x = math.floor((offsetX + column * tileWidth) / 8)
+			local cell_y = math.floor((offsetY + row * tileHeight) / 8)
 			wall_cells[cell_y] = wall_cells[cell_y] or {}
 			wall_cells[cell_y][cell_x] = wall_cells[cell_y][cell_x] or {}
 			table.insert(wall_cells[cell_y][cell_x], item)
@@ -740,6 +930,15 @@ function Sprite.addWallSprites(tilemap, emptyIDs, offsetX, offsetY)
 		end
 	end
 	return result
+end
+
+function Sprite.addEmptyCollisionSprite(x,y,width,height)
+	if type(x)=="table" then
+		local rect=x; x,y,width,height=rect.x,rect.y,
+			rect.width or rect.w,rect.height or rect.h
+	end
+	local item=Sprite.new(); item:setBounds(x,y,width,height)
+	item:setCollideRect(0,0,width,height); item:add(); return item
 end
 
 Sprite.kCollisionTypeSlide = "slide"
@@ -754,21 +953,60 @@ function Tilemap.new()
 	return setmetatable({tiles={}, width=1, height=0, imagetable=nil}, Tilemap)
 end
 function Tilemap:setTiles(tiles, width)
-	self.tiles, self.width = tiles, math.max(1, width or 1)
+	self.tiles, self.width = table.shallowcopy(tiles), math.max(1, width or 1)
 	self.height = math.ceil(#tiles / self.width)
 end
 function Tilemap:setImageTable(value) self.imagetable = value end
+function Tilemap:getImageTable() return self.imagetable end
+function Tilemap:setSize(width,height)
+	width,height=math.max(1,math.floor(width or 1)),math.max(0,math.floor(height or 0))
+	local resized={}; local oldWidth,oldHeight=self.width,self.height
+	for y=1,height do for x=1,width do
+		resized[(y-1)*width+x]=(x<=oldWidth and y<=oldHeight)
+			and (self.tiles[(y-1)*oldWidth+x] or 0) or 0
+	end end
+	self.tiles,self.width,self.height=resized,width,height
+end
 function Tilemap:getSize() return self.width, self.height end
+function Tilemap:getTiles() return table.shallowcopy(self.tiles),self.width end
+function Tilemap:setTileAtPosition(x,y,index)
+	x,y=math.floor(x),math.floor(y)
+	if x<1 or y<1 or x>self.width or y>self.height then return false end
+	self.tiles[(y-1)*self.width+x]=index or 0
+	return true
+end
+function Tilemap:getTileAtPosition(x,y)
+	x,y=math.floor(x),math.floor(y)
+	if x<1 or y<1 or x>self.width or y>self.height then return nil end
+	return self.tiles[(y-1)*self.width+x]
+end
+function Tilemap:getTileSize()
+	local tile=self.imagetable and self.imagetable:getImage(1)
+	if not tile then return 0,0 end
+	return tile:getSize()
+end
 function Tilemap:getPixelSize()
 	local tile = self.imagetable and self.imagetable:getImage(1)
 	if not tile then return 0, 0 end
 	local width, height = tile:getSize()
 	return self.width * width, self.height * height
 end
-function Tilemap:draw(x, y)
+function Tilemap:draw(x, y, sourceRect, sourceY, sourceWidth, sourceHeight)
 	if not self.imagetable then return end
+	x,y=x or 0,y or 0
+	local previousClip
+	if sourceRect then
+		local sx,sy,sw,sh
+		if type(sourceRect)=="table" then
+			sx,sy,sw,sh=sourceRect.x,sourceRect.y,
+				sourceRect.width or sourceRect.w,sourceRect.height or sourceRect.h
+		else sx,sy,sw,sh=sourceRect,sourceY,sourceWidth,sourceHeight end
+		previousClip={gfx.getClipRect()}
+		gfx.setClipRect(x+sx,y+sy,sw,sh)
+	end
 	if gfx._drawTilemap then
-		gfx._drawTilemap(self.imagetable, self.tiles, self.width, x or 0, y or 0)
+		gfx._drawTilemap(self.imagetable, self.tiles, self.width, x, y)
+		if previousClip then gfx.setClipRect(table.unpack(previousClip)) end
 		return
 	end
 	local first = self.imagetable:getImage(1)
@@ -781,15 +1019,42 @@ function Tilemap:draw(x, y)
 			if image then
 				local column = (index - 1) % self.width
 				local row = math.floor((index - 1) / self.width)
-				image:draw((x or 0) + column * tileWidth,
-					(y or 0) + row * tileHeight)
+				image:draw(x + column * tileWidth,y + row * tileHeight)
 			end
 		end
 	end
+	if previousClip then gfx.setClipRect(table.unpack(previousClip)) end
+end
+function Tilemap:drawIgnoringOffset(...)
+	local ox,oy=gfx.getDrawOffset(); gfx.setDrawOffset(0,0)
+	self:draw(...)
+	gfx.setDrawOffset(ox,oy)
+end
+function Tilemap:getCollisionRects(emptyIDs)
+	local empty={[0]=true}
+	for i=1,#(emptyIDs or {}) do empty[emptyIDs[i]]=true end
+	local result,open={},{ }
+	for y=1,self.height do
+		local rowRuns={}; local x=1
+		while x<=self.width do
+			if empty[self:getTileAtPosition(x,y) or 0] then x=x+1 else
+				local start=x
+				repeat x=x+1 until x>self.width or empty[self:getTileAtPosition(x,y) or 0]
+				local key=start..":"..(x-start)
+				local rect=open[key]
+				if rect and rect.y+rect.height==y-1 then rect.height=rect.height+1; rect.h=rect.height
+				else rect=playdate.geometry.rect.new(start-1,y-1,x-start,1); result[#result+1]=rect end
+				rowRuns[key]=rect
+			end
+		end
+		open=rowRuns
+	end
+	return result
 end
 gfx.tilemap = Tilemap
 
 local Point
+local Vector2D
 local Rect = {}
 Rect.__index = Rect
 function Rect.new(x, y, width, height)
@@ -838,7 +1103,9 @@ function Rect:containsPoint(x, y)
 	return x >= self.x and x <= self.x + self.width and
 		y >= self.y and y <= self.y + self.height
 end
-function Rect:containsRect(other)
+
+function Rect:containsRect(other,y,width,height)
+	if type(other)~="table" then other=Rect.new(other,y,width,height) end
 	return self:containsPoint(other.x, other.y) and self:containsPoint(
 		other.x + (other.width or other.w), other.y + (other.height or other.h))
 end
@@ -850,12 +1117,18 @@ function Rect.fast_intersection(ax, ay, aw, ah, bx, by, bw, bh)
 	local top = math.max(ay, by)
 	local right = math.min(ax + aw, bx + bw)
 	local bottom = math.min(ay + ah, by + bh)
-	return left, top, math.max(0, right - left), math.max(0, bottom - top)
+	if right<=left or bottom<=top then return 0,0,0,0 end
+	return left, top, right-left, bottom-top
 end
 function Rect.fast_union(ax, ay, aw, ah, bx, by, bw, bh)
 	local x, y = math.min(ax, bx), math.min(ay, by)
 	return x, y, math.max(ax + aw, bx + bw) - x,
 		math.max(ay + ah, by + bh) - y
+end
+function Rect:flipRelativeToRect(other,flip)
+	if flip==1 or flip==3 then self.x=other.x+other.width-(self.x-other.x)-self.width end
+	if flip==2 or flip==3 then self.y=other.y+other.height-(self.y-other.y)-self.height end
+	return self
 end
 Rect.__eq = Rect.isEqual
 Rect.__tostring = function(value)
@@ -879,7 +1152,7 @@ function Point:squaredDistanceToPoint(other)
 end
 function Point:distanceToPoint(other) return math.sqrt(self:squaredDistanceToPoint(other)) end
 Point.__add = function(a, b) return Point.new(a.x + b.x, a.y + b.y) end
-Point.__sub = function(a, b) return Point.new(a.x - b.x, a.y - b.y) end
+Point.__sub = function(a, b) return Vector2D.new(a.x - b.x, a.y - b.y) end
 Point.__eq = function(a, b) return a.x == b.x and a.y == b.y end
 Point.__tostring = function(value) return string.format("(%g, %g)", value.x, value.y) end
 
@@ -909,7 +1182,6 @@ local function segmentIntersection(ax, ay, bx, by, cx, cy, dx, dy)
 	return ax + t * rx, ay + t * ry
 end
 
-local Vector2D
 local LineSegment = {}
 LineSegment.__index = LineSegment
 function LineSegment.new(x1, y1, x2, y2)
@@ -946,14 +1218,33 @@ end
 function LineSegment:intersectsLineSegment(other)
 	local x,y=segmentIntersection(self.x1,self.y1,self.x2,self.y2,
 		other.x1,other.y1,other.x2,other.y2)
-	if x then return Point.new(x,y) end
-	return nil
+	if x then return true,Point.new(x,y) end
+	return false,nil
 end
+function LineSegment.fast_intersection(x1,y1,x2,y2,x3,y3,x4,y4)
+	local x,y=segmentIntersection(x1,y1,x2,y2,x3,y3,x4,y4)
+	if x then return true,x,y end
+	return false
+end
+function LineSegment:intersectsPolygon(polygon)
+	local points={}
+	for i=1,#polygon.points-1 do
+		local hit,point=self:intersectsLineSegment(LineSegment.new(
+			polygon.points[i],polygon.points[i+1]))
+		if hit then points[#points+1]=point end
+	end
+	return #points>0,points
+end
+function LineSegment:intersectsRect(rect) return self:intersectsPolygon(rect:toPolygon()) end
 
 Vector2D = {}
 Vector2D.__index = Vector2D
 function Vector2D.new(x, y)
 	return setmetatable({x=x or 0, y=y or 0, dx=x or 0, dy=y or 0}, Vector2D)
+end
+function Vector2D.newPolar(length,angle)
+	local radians=math.rad((angle or 0)-90)
+	return Vector2D.new(math.cos(radians)*(length or 0),math.sin(radians)*(length or 0))
 end
 function Vector2D:copy() return Vector2D.new(self.x, self.y) end
 function Vector2D:unpack() return self.x, self.y end
@@ -984,6 +1275,16 @@ function Vector2D:angleBetween(other)
 	local cosine = math.max(-1, math.min(1, self:dotProduct(other) / lengths))
 	return math.deg(math.acos(cosine))
 end
+function Vector2D:projectAlong(other)
+	local divisor=other:magnitudeSquared()
+	local amount=divisor==0 and 0 or self:dotProduct(other)/divisor
+	self.x,self.y=other.x*amount,other.y*amount
+	self.dx,self.dy=self.x,self.y
+	return self
+end
+function Vector2D:projectedAlong(other) return self:copy():projectAlong(other) end
+function Vector2D:leftNormal() return Vector2D.new(self.y,-self.x) end
+function Vector2D:rightNormal() return Vector2D.new(-self.y,self.x) end
 Vector2D.__add = function(a, b) return Vector2D.new(a.x + b.x, a.y + b.y) end
 Vector2D.__sub = function(a, b) return Vector2D.new(a.x - b.x, a.y - b.y) end
 Vector2D.__unm = function(a) return Vector2D.new(-a.x, -a.y) end
@@ -998,6 +1299,10 @@ local Polygon = {}
 Polygon.__index = Polygon
 function Polygon.new(...)
 	local args={...}
+	if #args==1 and type(args[1])=="number" then
+		local points={}; for i=1,math.max(0,math.floor(args[1])) do points[i]=Point.new() end
+		return setmetatable({points=points,_closed=false},Polygon)
+	end
 	if #args == 1 and type(args[1]) == "table" then args=args[1] end
 	local points={}
 	if #args > 0 and type(args[1]) == "table" then
@@ -1021,17 +1326,21 @@ end
 function Polygon:isClosed() return self._closed end
 function Polygon:count() return #self.points end
 function Polygon:getPointAt(index) return self.points[index] and self.points[index]:copy() end
-function Polygon:setPointAt(index,point) self.points[index]=Point.new(point.x,point.y) end
+function Polygon:setPointAt(index,point,y)
+	if type(point)=="table" then self.points[index]=Point.new(point.x,point.y)
+	else self.points[index]=Point.new(point,y) end
+end
 function Polygon:getBounds()
-	if #self.points==0 then return Rect.new(0,0,0,0) end
+	if #self.points==0 then return 0,0,0,0 end
 	local left,right,top,bottom=self.points[1].x,self.points[1].x,
 		self.points[1].y,self.points[1].y
 	for i=2,#self.points do local p=self.points[i]
 		left,right=math.min(left,p.x),math.max(right,p.x)
 		top,bottom=math.min(top,p.y),math.max(bottom,p.y)
 	end
-	return Rect.new(left,top,right-left,bottom-top)
+	return left,top,right-left,bottom-top
 end
+function Polygon:getBoundsRect() return Rect.new(self:getBounds()) end
 function Polygon:containsPoint(x,y)
 	if type(x)=="table" then x,y=x.x,x.y end
 	local inside=false
@@ -1068,6 +1377,15 @@ function Polygon:pointOnPolygon(distance)
 	end
 	return self.points[#self.points] and self.points[#self.points]:copy() or Point.new()
 end
+function Polygon:intersects(other)
+	for i=1,#self.points-1 do
+		local hit=LineSegment.new(self.points[i],self.points[i+1]):intersectsPolygon(other)
+		if hit then return true end
+	end
+	return (self.points[1] and other:containsPoint(self.points[1])) or
+		(other.points[1] and self:containsPoint(other.points[1])) or false
+end
+Polygon.__mul=function(polygon,transform) return transform:transformedPolygon(polygon) end
 function Rect:toPolygon()
 	return Polygon.new(self.x,self.y,self.x+self.width,self.y,
 		self.x+self.width,self.y+self.height,self.x,self.y+self.height):close()
@@ -1167,7 +1485,7 @@ function AffineTransform:transformPolygon(polygon)
 end
 function AffineTransform:transformedPolygon(polygon) return self:transformPolygon(polygon:copy()) end
 function AffineTransform:transformAABB(rect)
-	local bounds=self:transformedPolygon(rect:toPolygon()):getBounds()
+	local bounds=self:transformedPolygon(rect:toPolygon()):getBoundsRect()
 	rect.x,rect.y,rect.width,rect.height=bounds.x,bounds.y,bounds.width,bounds.height
 	rect.w,rect.h=rect.width,rect.height
 	return rect
@@ -1181,10 +1499,256 @@ AffineTransform.__mul=function(a,b)
 	end
 	error("unsupported affine transform multiplication",2)
 end
+Point.__mul=function(point,transform) return transform:transformedPoint(point) end
+Point.__concat=function(a,b) return LineSegment.new(a,b) end
 
 playdate.geometry = {rect=Rect, point=Point, size=Size, vector2D=Vector2D,
 	lineSegment=LineSegment, polygon=Polygon, arc=Arc,
-	affineTransform=AffineTransform}
+	affineTransform=AffineTransform,kUnflipped=0,kFlippedX=1,kFlippedY=2,kFlippedXY=3}
+function playdate.geometry.squaredDistanceToPoint(x1,y1,x2,y2)
+	local dx,dy=x2-x1,y2-y1; return dx*dx+dy*dy
+end
+function playdate.geometry.distanceToPoint(...) return math.sqrt(playdate.geometry.squaredDistanceToPoint(...)) end
+
+-- Pathfinding is kept in Lua so graphs are ordinary inspectable objects and
+-- package code can extend their nodes.  The search is A* with Euclidean
+-- distance when nodes have coordinates and Dijkstra behaviour otherwise.
+local PathfinderNode={}; PathfinderNode.__index=PathfinderNode
+function PathfinderNode.new(id,x,y)
+	return setmetatable({id=id,x=x or 0,y=y or 0,connections={}},PathfinderNode)
+end
+function PathfinderNode:addConnection(other,weight,reciprocal)
+	if not other then return false end
+	self.connections[other]=tonumber(weight) or 1
+	if reciprocal then other.connections[self]=tonumber(weight) or 1 end
+	return true
+end
+function PathfinderNode:addConnections(nodes,weight,reciprocal)
+	for i=1,#(nodes or {}) do
+		self:addConnection(nodes[i],type(weight)=="table" and weight[i] or weight,reciprocal)
+	end
+end
+function PathfinderNode:removeConnection(other,reciprocal)
+	self.connections[other]=nil
+	if reciprocal and other then other.connections[self]=nil end
+end
+function PathfinderNode:connectedNodes()
+	local result={}
+	for node in pairs(self.connections) do result[#result+1]=node end
+	table.sort(result,function(a,b) return tostring(a.id)<tostring(b.id) end)
+	return result
+end
+function PathfinderNode:getID() return self.id end
+function PathfinderNode:getPosition() return self.x,self.y end
+function PathfinderNode:setPosition(x,y) self.x,self.y=x or 0,y or 0 end
+PathfinderNode.setXY=PathfinderNode.setPosition
+function PathfinderNode:addConnectionToNodeWithXY(x,y,weight,reciprocal)
+	local node=self.graph and self.graph:nodeWithXY(x,y)
+	return node and self:addConnection(node,weight,reciprocal) or false
+end
+function PathfinderNode:removeAllConnections(removeIncoming)
+	self.connections={}
+	if removeIncoming and self.graph then
+		for _,node in ipairs(self.graph.nodeList) do node.connections[self]=nil end
+	end
+end
+
+local PathfinderGraph={}; PathfinderGraph.__index=PathfinderGraph
+function PathfinderGraph.new(nodeCount,coordinates)
+	local graph=setmetatable({nodes={},nodeList={}},PathfinderGraph)
+	for id=1,math.max(0,math.floor(nodeCount or 0)) do
+		local coordinate=coordinates and coordinates[id]
+		graph:addNewNode(id,coordinate and coordinate[1] or 0,
+			coordinate and coordinate[2] or 0)
+	end
+	return graph
+end
+function PathfinderGraph:addNode(node,connectedNodes,weights,reciprocal)
+	if not node or node.id==nil then return false end
+	local previous=self.nodes[node.id]
+	if previous==node then return true end
+	if previous then self:removeNodeWithID(node.id) end
+	self.nodes[node.id]=node; self.nodeList[#self.nodeList+1]=node; node.graph=self
+	if connectedNodes then node:addConnections(connectedNodes,weights,reciprocal) end
+	return true
+end
+function PathfinderGraph:addNewNode(id,x,y,connectedNodes,weights,reciprocal)
+	local node=PathfinderNode.new(id,x,y); self:addNode(node)
+	if connectedNodes then node:addConnections(connectedNodes,weights,reciprocal) end
+	return node
+end
+PathfinderGraph.addNewNodeWithID=PathfinderGraph.addNewNode
+function PathfinderGraph:addNewNodes(count)
+	local result={}; local id=1
+	for _=1,math.max(0,math.floor(count or 0)) do
+		while self.nodes[id] do id=id+1 end
+		result[#result+1]=self:addNewNode(id); id=id+1
+	end
+	return result
+end
+function PathfinderGraph:addNodes(nodes) for i=1,#(nodes or {}) do self:addNode(nodes[i]) end end
+function PathfinderGraph:nodeWithID(id) return self.nodes[id] end
+function PathfinderGraph:nodeWithXY(x,y)
+	for _,node in ipairs(self.nodeList) do if node.x==x and node.y==y then return node end end
+end
+function PathfinderGraph:allNodes() return table.shallowcopy(self.nodeList) end
+function PathfinderGraph:removeNodeWithID(id)
+	local node=self.nodes[id]; if not node then return false end
+	self.nodes[id]=nil
+	for i=#self.nodeList,1,-1 do
+		if self.nodeList[i]==node then table.remove(self.nodeList,i) end
+	end
+	for _,other in ipairs(self.nodeList) do other.connections[node]=nil end
+	node.graph=nil; return node
+end
+function PathfinderGraph:removeNode(node) return node and self:removeNodeWithID(node.id) end
+function PathfinderGraph:removeNodeWithXY(x,y)
+	local node=self:nodeWithXY(x,y); return node and self:removeNode(node) or nil
+end
+function PathfinderGraph:setXYForNodeWithID(id,x,y)
+	local node=self.nodes[id]; if not node then return false end
+	node:setPosition(x,y); return true
+end
+function PathfinderGraph:addConnectionToNodeWithID(fromID,toID,weight,reciprocal)
+	local from,to=self.nodes[fromID],self.nodes[toID]
+	return from and to and from:addConnection(to,weight,reciprocal) or false
+end
+function PathfinderGraph:addConnections(connections)
+	for id,values in pairs(connections or {}) do
+		local from=self.nodes[id]
+		if from then for i=1,#values,2 do
+			local to=self.nodes[values[i]]; if to then from:addConnection(to,values[i+1]) end
+		end end
+	end
+end
+function PathfinderGraph:removeAllConnections()
+	for _,node in ipairs(self.nodeList) do node.connections={} end
+end
+function PathfinderGraph:removeAllConnectionsFromNodeWithID(id,removeIncoming)
+	local node=self.nodes[id]; if node then node:removeAllConnections(removeIncoming); return true end
+	return false
+end
+local function pathHeuristic(left,right)
+	local dx,dy=(left.x or 0)-(right.x or 0),(left.y or 0)-(right.y or 0)
+	return math.abs(dx)+math.abs(dy)
+end
+function PathfinderGraph:findPath(startNode,goalNode,heuristic,findAdjacent)
+	if type(startNode)~="table" then startNode=self.nodes[startNode] end
+	if type(goalNode)~="table" then goalNode=self.nodes[goalNode] end
+	if not startNode or not goalNode then return nil end
+	heuristic=heuristic or pathHeuristic
+	local open,came,gScore,fScore={startNode},{},{[startNode]=0},{[startNode]=heuristic(startNode,goalNode)}
+	local inOpen={[startNode]=true}
+	while #open>0 do
+		local best=1
+		for i=2,#open do if (fScore[open[i]] or math.huge)<(fScore[open[best]] or math.huge) then best=i end end
+		local current=table.remove(open,best); inOpen[current]=nil
+		local reached=current==goalNode or (findAdjacent and current~=goalNode and
+			math.abs((current.x or 0)-(goalNode.x or 0))<=1 and
+			math.abs((current.y or 0)-(goalNode.y or 0))<=1)
+		if reached then
+			local path={current}
+			while came[current] do current=came[current]; table.insert(path,1,current) end
+			return path
+		end
+		for neighbour,weight in pairs(current.connections) do
+			local candidate=(gScore[current] or math.huge)+(tonumber(weight) or 1)
+			if candidate<(gScore[neighbour] or math.huge) then
+				came[neighbour]=current; gScore[neighbour]=candidate
+				fScore[neighbour]=candidate+heuristic(neighbour,goalNode)
+				if not inOpen[neighbour] then open[#open+1]=neighbour; inOpen[neighbour]=true end
+			end
+		end
+	end
+	return nil
+end
+function PathfinderGraph:findPathWithIDs(startID,goalID,heuristic,findAdjacent)
+	local path=self:findPath(self.nodes[startID],self.nodes[goalID],heuristic,findAdjacent)
+	if not path then return nil end
+	local ids={}; for i=1,#path do ids[i]=path[i].id end; return ids
+end
+function PathfinderGraph.new2DGrid(width,height,allowDiagonals,includedNodes)
+	width,height=math.max(0,math.floor(width or 0)),math.max(0,math.floor(height or 0))
+	local graph=PathfinderGraph.new()
+	for y=1,height do for x=1,width do graph:addNewNode((y-1)*width+x,x,y) end end
+	local directions={{1,0,10},{0,1,10}}
+	if allowDiagonals then directions[#directions+1]={1,1,14}; directions[#directions+1]={-1,1,14} end
+	for y=1,height do for x=1,width do
+		local id=(y-1)*width+x
+		if not includedNodes or includedNodes[id]==1 then
+			for _,direction in ipairs(directions) do
+				local nx,ny=x+direction[1],y+direction[2]
+				local nid=(ny-1)*width+nx
+				if nx>=1 and nx<=width and ny>=1 and ny<=height and
+					(not includedNodes or includedNodes[nid]==1) then
+					graph.nodes[id]:addConnection(graph.nodes[nid],direction[3],true)
+				end
+			end
+		end
+	end end
+	return graph
+end
+playdate.pathfinder={node=PathfinderNode,graph=PathfinderGraph}
+
+-- Low-level images are userdata, but Lua may add real composite operations to
+-- their shared method table.  These helpers use the native compositor and
+-- therefore preserve transparency, masks and Playdate colour constants.
+local imageMethods=debug.getregistry()["PogoDate.Image"]
+if imageMethods then
+	function imageMethods:getPixel(x,y) return self:sample(x,y) end
+	function imageMethods:drawAnchored(x,y,anchorX,anchorY,flip)
+		local width,height=self:getSize()
+		self:draw(x-width*(anchorX or 0),y-height*(anchorY or 0),flip)
+	end
+	function imageMethods:getSubImage(x,y,width,height)
+		width,height=math.max(0,math.floor(width or 0)),math.max(0,math.floor(height or 0))
+		if width==0 or height==0 then return nil end
+		local result=gfx.image.new(width,height,gfx.kColorClear)
+		local ox,oy=gfx.getDrawOffset(); gfx.setDrawOffset(0,0)
+		gfx.pushContext(result); self:draw(-(x or 0),-(y or 0)); gfx.popContext()
+		gfx.setDrawOffset(ox,oy); return result
+	end
+	function imageMethods:rotatedImage(angle,scaleX,scaleY)
+		local width,height=self:getSize(); scaleX=scaleX or 1; scaleY=scaleY or scaleX
+		local radians=math.rad(angle or 0); local c,s=math.abs(math.cos(radians)),math.abs(math.sin(radians))
+		local outWidth=math.max(1,math.ceil(width*math.abs(scaleX)*c+height*math.abs(scaleY)*s))
+		local outHeight=math.max(1,math.ceil(width*math.abs(scaleX)*s+height*math.abs(scaleY)*c))
+		local result=gfx.image.new(outWidth,outHeight,gfx.kColorClear)
+		local ox,oy=gfx.getDrawOffset(); gfx.setDrawOffset(0,0)
+		gfx.pushContext(result); self:drawRotated(outWidth/2,outHeight/2,angle or 0,scaleX,scaleY); gfx.popContext()
+		gfx.setDrawOffset(ox,oy); return result
+	end
+	function imageMethods:drawWithMask(x,y,mask,flip)
+		gfx.setStencilImage(mask); self:draw(x,y,flip); gfx.clearStencil()
+	end
+	function imageMethods:transformedImage(transform)
+		local width,height=self:getSize()
+		local bounds=transform:transformedAABB(Rect.new(0,0,width,height))
+		local outWidth,outHeight=math.max(1,math.ceil(bounds.width)),math.max(1,math.ceil(bounds.height))
+		local inverse=transform:copy():invert(); if not inverse then return nil end
+		local result=gfx.image.new(outWidth,outHeight,gfx.kColorClear)
+		local oldColor=gfx.getColor(); local ox,oy=gfx.getDrawOffset(); gfx.setDrawOffset(0,0)
+		gfx.pushContext(result)
+		local activeColor=nil
+		for py=0,outHeight-1 do for px=0,outWidth-1 do
+			local sx,sy=inverse:transformXY(px+bounds.x+0.5,py+bounds.y+0.5)
+			if sx>=0 and sy>=0 and sx<width and sy<height then
+				local color=self:sample(math.floor(sx),math.floor(sy))
+				if color~=gfx.kColorClear then
+					if activeColor~=color then gfx.setColor(color); activeColor=color end
+					gfx.drawPixel(px,py)
+				end
+			end
+		end end
+		gfx.popContext(); gfx.setDrawOffset(ox,oy); gfx.setColor(oldColor)
+		return result
+	end
+	function imageMethods:drawWithTransform(transform)
+		local bounds=transform:transformedAABB(Rect.new(0,0,self:getSize()))
+		local image=self:transformedImage(transform)
+		if image then image:draw(bounds.x,bounds.y) end
+	end
+end
 
 -- Core graphics primitives which are inexpensive to compose from the native
 -- line/rectangle/pixel backend. These accept both numeric vertices and the
@@ -1274,12 +1838,69 @@ function gfx.fillEllipseInRect(x,y,w,h,startAngle,endAngle)
 end
 gfx.drawEllipse = gfx.drawEllipseInRect
 gfx.fillEllipse = gfx.fillEllipseInRect
+function gfx.drawArc(x,y,radius,startAngle,endAngle)
+	if type(x)=="table" then
+		local arc=x; x,y,radius,startAngle,endAngle=arc.x,arc.y,arc.radius,
+			arc.startAngle,arc.endAngle
+	end
+	local direction=(endAngle or 0)>=(startAngle or 0) and 1 or -1
+	local extent=math.abs((endAngle or 0)-(startAngle or 0))
+	local steps=math.max(1,math.ceil(math.rad(extent)*math.max(1,radius or 0)/2))
+	local previous
+	for index=0,steps do
+		local angle=(startAngle or 0)+direction*extent*index/steps
+		local radians=math.rad(angle-90)
+		local point=Point.new(x+math.cos(radians)*radius,y+math.sin(radians)*radius)
+		if previous then gfx.drawLine(previous.x,previous.y,point.x,point.y) end
+		previous=point
+	end
+end
+local nativeSetStrokeLocation=gfx.setStrokeLocation
+local strokeLocation=gfx.kStrokeCentered
+function gfx.setStrokeLocation(value)
+	strokeLocation=value or gfx.kStrokeCentered
+	return nativeSetStrokeLocation(strokeLocation)
+end
+function gfx.getStrokeLocation() return strokeLocation end
 local lineCapStyle=gfx.kLineCapStyleButt
 function gfx.setLineCapStyle(value) lineCapStyle=value end
 function gfx.getLineCapStyle() return lineCapStyle end
 local polygonFillRule=gfx.kPolygonFillNonZero
 function gfx.setPolygonFillRule(value) polygonFillRule=value end
 function gfx.getPolygonFillRule() return polygonFillRule end
+gfx.setScreenClipRect=gfx.setClipRect
+gfx.getScreenClipRect=gfx.getClipRect
+gfx.clearScreenClipRect=gfx.clearClipRect
+function gfx.imageWithText(text,maxWidth,maxHeight,backgroundColor,leadingAdjustment,
+	truncationString,alignment,font)
+	text=tostring(text or "")
+	if font then gfx.setFont(font) end
+	local naturalWidth,naturalHeight=gfx.getTextSize(text)
+	maxWidth=math.max(1,math.floor(maxWidth or naturalWidth or 1))
+	maxHeight=math.max(1,math.floor(maxHeight or naturalHeight or 1))
+	local width=math.max(1,math.min(maxWidth,naturalWidth or maxWidth))
+	local height=math.max(1,math.min(maxHeight,naturalHeight or maxHeight))
+	local truncated=(naturalWidth or 0)>maxWidth or (naturalHeight or 0)>maxHeight
+	local image=gfx.image.new(width,height,backgroundColor or gfx.kColorClear)
+	local ox,oy=gfx.getDrawOffset(); gfx.setDrawOffset(0,0); gfx.pushContext(image)
+	gfx.drawTextInRect(text,0,0,width,height,leadingAdjustment,truncationString,alignment,font)
+	gfx.popContext(); gfx.setDrawOffset(ox,oy)
+	return image,truncated
+end
+
+function Sprite.spriteWithText(text,maxWidth,maxHeight,...)
+	local image,truncated=gfx.imageWithText(text,maxWidth,maxHeight,...)
+	return Sprite.new(image),truncated
+end
+
+function playdate.display.getRect()
+	return Rect.new(0,0,playdate.display.getWidth(),playdate.display.getHeight())
+end
+gfx.font.kLanguageEnglish="en"
+gfx.font.kLanguageJapanese="jp"
+function playdate.getSystemLanguage() return gfx.font.kLanguageEnglish end
+function playdate.shouldDisplay24HourTime() return true end
+function playdate.getFlipped() return false end
 
 -- A functional system-menu model. The physical Pogopo shell does not render
 -- Playdate's system overlay yet, but games can create, inspect, mutate and
