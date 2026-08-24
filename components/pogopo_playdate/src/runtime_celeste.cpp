@@ -4540,44 +4540,97 @@ struct Runtime::Impl {
         return false;
     }
 
-    void preloadShortSounds(const char* relative = "", int depth = 0) {
-        // Keep recursive directory state comfortably below the 8 KiB UI-task stack.
-        if (!package_mode || depth >= 4 ||
-            sound_cache_bytes >= kMaximumSoundCacheBytes) return;
-        char directory_path[384]{};
-        if (!pdxJoinPath(directory_path, sizeof(directory_path),
-                         package_info.path, relative)) return;
-        DIR* directory = opendir(directory_path);
-        if (!directory) return;
-        while (dirent* entry = readdir(directory)) {
-            if (!std::strcmp(entry->d_name, ".") ||
-                !std::strcmp(entry->d_name, "..")) continue;
-            char child_relative[256]{};
-            const int relative_length = relative && relative[0]
-                ? std::snprintf(child_relative, sizeof(child_relative), "%s/%s",
-                                relative, entry->d_name)
-                : std::snprintf(child_relative, sizeof(child_relative), "%s",
-                                entry->d_name);
-            if (relative_length <= 0 ||
-                static_cast<size_t>(relative_length) >= sizeof(child_relative)) {
-                continue;
-            }
-            char child_path[384]{};
-            if (!pdxJoinPath(child_path, sizeof(child_path), package_info.path,
-                             child_relative)) continue;
-            struct stat value{};
-            if (stat(child_path, &value) != 0) continue;
-            if (S_ISDIR(value.st_mode)) {
-                if (!musicPath(child_relative)) {
-                    preloadShortSounds(child_relative, depth + 1);
-                }
-                continue;
-            }
-            if (!S_ISREG(value.st_mode) || musicPath(child_relative)) continue;
-            if (!pathHasSuffix(child_relative, ".pda")) continue;
-            (void)cacheSound(child_relative);
+    void preloadShortSounds() {
+        if (!package_mode || sound_cache_bytes >= kMaximumSoundCacheBytes) return;
+
+        // A recursive FAT traversal used to put two path buffers and a DIR
+        // frame on the 8 KiB pogopo_os stack for every directory level.
+        // Hillslide's deeper asset tree exhausted that stack before Lua was
+        // even created. Keep both the bounded work queue and all large scratch
+        // paths in PSRAM; the task stack now stays essentially constant.
+        struct ScanDirectory {
+            char relative[256];
+            uint8_t depth;
+        };
+        struct SoundScanState {
+            std::array<ScanDirectory, 64> pending;
+            size_t head;
+            size_t tail;
+            size_t skipped_directories;
+            char directory_path[384];
+            char child_relative[256];
+            char child_path[384];
+            struct stat value;
+        };
+        auto* scan = static_cast<SoundScanState*>(heap_caps_malloc(
+            sizeof(SoundScanState), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!scan) {
+            scan = static_cast<SoundScanState*>(heap_caps_malloc(
+                sizeof(SoundScanState), MALLOC_CAP_8BIT));
         }
-        closedir(directory);
+        if (!scan) {
+            ESP_LOGE(TAG, "SFX preload skipped: no memory for directory queue");
+            return;
+        }
+        std::memset(scan, 0, sizeof(*scan));
+        scan->tail = 1; // Entry zero is the package root (empty relative path).
+        const size_t cached_before = sound_cache_bytes;
+        size_t scanned_directories = 0;
+        while (scan->head < scan->tail &&
+               sound_cache_bytes < kMaximumSoundCacheBytes) {
+            const ScanDirectory& current = scan->pending[scan->head++];
+            if (!pdxJoinPath(scan->directory_path, sizeof(scan->directory_path),
+                             package_info.path, current.relative)) {
+                continue;
+            }
+            DIR* directory = opendir(scan->directory_path);
+            if (!directory) continue;
+            ++scanned_directories;
+            while (dirent* entry = readdir(directory)) {
+                if (!std::strcmp(entry->d_name, ".") ||
+                    !std::strcmp(entry->d_name, "..")) continue;
+                const int relative_length = current.relative[0]
+                    ? std::snprintf(scan->child_relative,
+                                    sizeof(scan->child_relative), "%s/%s",
+                                    current.relative, entry->d_name)
+                    : std::snprintf(scan->child_relative,
+                                    sizeof(scan->child_relative), "%s",
+                                    entry->d_name);
+                if (relative_length <= 0 || static_cast<size_t>(relative_length) >=
+                    sizeof(scan->child_relative)) continue;
+                if (!pdxJoinPath(scan->child_path, sizeof(scan->child_path),
+                                 package_info.path, scan->child_relative)) continue;
+                std::memset(&scan->value, 0, sizeof(scan->value));
+                if (stat(scan->child_path, &scan->value) != 0) continue;
+                if (S_ISDIR(scan->value.st_mode)) {
+                    if (!musicPath(scan->child_relative) && current.depth < 7) {
+                        if (scan->tail < scan->pending.size()) {
+                            ScanDirectory& next = scan->pending[scan->tail++];
+                            std::snprintf(next.relative, sizeof(next.relative),
+                                          "%s", scan->child_relative);
+                            next.depth = static_cast<uint8_t>(current.depth + 1);
+                        } else {
+                            ++scan->skipped_directories;
+                        }
+                    }
+                    continue;
+                }
+                if (!S_ISREG(scan->value.st_mode) ||
+                    musicPath(scan->child_relative) ||
+                    !pathHasSuffix(scan->child_relative, ".pda")) continue;
+                (void)cacheSound(scan->child_relative);
+                if (sound_cache_bytes >= kMaximumSoundCacheBytes) break;
+            }
+            closedir(directory);
+        }
+        ESP_LOGI(TAG,
+                 "SFX preload: dirs=%u queued=%u skipped=%u cache=+%uB total=%uB",
+                 static_cast<unsigned>(scanned_directories),
+                 static_cast<unsigned>(scan->tail),
+                 static_cast<unsigned>(scan->skipped_directories),
+                 static_cast<unsigned>(sound_cache_bytes - cached_before),
+                 static_cast<unsigned>(sound_cache_bytes));
+        heap_caps_free(scan);
     }
 
     bool cloneCachedSound(int index, int16_t*& samples, uint32_t& frames,
@@ -6485,7 +6538,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.17: game compatibility");
+                 "PogoDate API STEP11.6.18: stack-safe startup");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

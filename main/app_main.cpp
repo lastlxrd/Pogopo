@@ -326,7 +326,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.17 POGODATE GAME COMPAT");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.18 POGODATE STACK-SAFE START");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -352,10 +352,13 @@ extern "C" void app_main(void) {
 
     // Stable pogopoOS1.0 split: Core 1 runs high-priority input + emulator;
     // Core 0 runs high-priority I2S and low-priority GUI/Sharp presentation.
-    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
+    // PDX startup executes the Lua loader on this task. Keep enough internal
+    // stack for nested CoreLib imports while large directory-scan buffers live
+    // in PSRAM (STEP11.6.18).
+    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 12288, nullptr, 1, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.6.17 ready: sprites, tilemaps, images and pathfinder APIs");
+    ESP_LOGI(TAG, "STEP11.6.18 ready: stack-safe PDX startup and SFX scan");
 }

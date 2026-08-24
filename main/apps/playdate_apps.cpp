@@ -9,6 +9,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace pogopo::demo {
 namespace {
@@ -131,6 +133,9 @@ void PogoDateApp::onEnter(AppContext& context) {
     context.audio.stopStream();
     context.audio.stopRealtime();
     drawLoading(context);
+    ESP_LOGI(TAG, "Starting %s: pogopo_os stack free=%uB",
+             displayTitle(), static_cast<unsigned>(
+                 uxTaskGetStackHighWaterMark(nullptr)));
     start_error_ = package_.path[0]
         ? runtime_.startPackage(context.gfx.canvas(), context.audio,
                                 context.storage, package_.path)
@@ -147,6 +152,9 @@ void PogoDateApp::onEnter(AppContext& context) {
         ESP_LOGE(TAG, "PogoDate start failed: %s / %s",
                  esp_err_to_name(start_error_), runtime_.error());
     }
+    ESP_LOGI(TAG, "%s startup complete: pogopo_os stack minimum free=%uB",
+             displayTitle(), static_cast<unsigned>(
+                 uxTaskGetStackHighWaterMark(nullptr)));
     context.invalidate();
 }
 

@@ -168,6 +168,9 @@ same deferred-load boundary after its one Lua module starts successfully.
 - JSON string/file decoding plus compact, pretty and file encoding;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
+- stack-safe iterative PDX sound discovery with its bounded directory queue and
+  path scratch storage in PSRAM; startup stack high-water diagnostics are
+  emitted for new package testing;
 - managed Lua synth voices with sine, square, triangle, noise and sawtooth
   oscillators; Hertz/MIDI/named-note input; independent note release/stop;
   volume, transpose and ADSR shaping;
@@ -191,7 +194,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.17.
+  the device after flashing STEP11.6.18.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
@@ -206,6 +209,10 @@ same deferred-load boundary after its one Lua module starts successfully.
 - The ESP32-S3 and Playdate have different CPU, memory and peripheral budgets.
   Passing the host regression is necessary, but final frame time, audio and SD
   reliability must still be checked on Pogopo hardware.
+- The PogoDate loader runs inside the 12 KiB `pogopo_os` task. Recursive asset
+  scanning has been removed, but unusually deep Lua/C callback recursion can
+  still consume that finite native stack; startup logs expose its minimum free
+  value for hardware reports.
 
 ## Testing another free game
 
