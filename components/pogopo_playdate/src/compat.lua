@@ -212,6 +212,11 @@ end
 
 function Sprite:isa(candidate) return objectIsA(self, candidate) end
 
+-- The SDK's base sprite draw hook is a no-op.  A subclass draw callback is
+-- used only when the sprite has no image/tilemap; image-backed subclasses
+-- such as NobleSprite keep their normal native image rendering.
+function Sprite:draw() end
+
 function Sprite.new(image) return Sprite(image) end
 
 function Sprite:setImage(image, flip, xScale, yScale)
@@ -505,7 +510,8 @@ function Sprite:update()
 	end
 	for i=1,#sprites do
 		local item = sprites[i]
-		local customDraw=type(item.draw)=="function" and item.draw~=Sprite.draw
+		local customDraw=not item.image and not item.tilemap and
+			type(item.draw)=="function" and item.draw~=Sprite.draw
 		if item.added and item.visible and (item.image or item.tilemap or customDraw) then
 			local previous = gfx._getImageDrawMode()
 			gfx.setImageDrawMode(item.imageDrawMode)

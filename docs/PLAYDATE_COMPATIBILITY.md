@@ -76,6 +76,13 @@ objects beyond x=400 therefore enter the camera viewport correctly, while
 `image:drawIgnoringOffset()` and `sprite:setIgnoresDrawOffset()` remain fixed
 to screen coordinates.
 
+STEP11.6.27 matches the SDK distinction between ordinary image-backed sprites
+and callback-only sprites. A subclass `draw()` hook may update animation state,
+but it does not replace an already assigned sprite image or tilemap. Only a
+sprite without either backing object is rasterized through the custom draw
+callback. This restores static NobleSprite descendants while retaining custom
+procedural sprites and offscreen callback caching.
+
 ## Validated games
 
 ### Onebit Frogger
@@ -118,6 +125,11 @@ draw. The exact 600-frame animation stays pixel-identical to STEP11.6.9 and is
 about 8.1x faster in the host regression. Maze also opts out of Pogopo's
 START-to-A convenience alias, preventing an extra START press from confirming a
 result-screen choice.
+STEP11.6.27 also validates the actual live-level framebuffer: the dotted maze
+background, wall images, holes, goal and rolling marble remain visible during
+a 3,000-tick accelerometer run. The former dotted-only screen was caused by
+PogoDate treating NobleSprite's animation hook as a replacement for the
+sprite's assigned static image.
 
 ### Duel Of Shadows
 
