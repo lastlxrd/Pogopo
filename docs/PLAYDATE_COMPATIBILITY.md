@@ -121,7 +121,8 @@ same deferred-load boundary after its one Lua module starts successfully.
 
 ## Currently implemented API areas
 
-- display size, scale, offset, inversion and per-package refresh rate;
+- display size, scale, offset, inversion and per-package refresh rate, with
+  state getters backed by the native renderer;
 - buttons, just-pressed/released state and input-handler stack, using the
   same physical left/right mapping as PogopoOS plus a bundle-scoped Maze
   menu-direction quirk;
@@ -132,7 +133,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   image tables with
   `table[index]`/`drawImage()` access, image masks, PFT fonts, all eight image
   draw modes, bitmap and ordered-dither patterns, clipping, contexts, focus
-  locking, primitives, text,
+  locking, rectangles, circles, ellipses/arcs, triangles, polygons, text,
   system/current-font lookup, circled A/B system glyph fallbacks and
   rotated/faded drawing;
 - Playdate's public `kColorBlack=0`, `kColorWhite=1`, `kColorClear=2` and
@@ -146,6 +147,9 @@ same deferred-load boundary after its one Lua module starts successfully.
   repeats and reverses; bundled easing, animation and animator CoreLibs plus
   elapsed-time helpers;
 - Playdate date/time conversion forms and cycle-safe table copy helpers;
+- geometry rect, point, size, vector, line-segment, polygon, arc and affine
+  transform types, including intersections, bounds, containment, distances,
+  translation and transformed AABBs;
 - accelerometer start/stop/state/read APIs, fed by Pogopo's BMI270 on hardware;
 - Pogopo START-to-Playdate-A translation while a PDX owns input, except for the
   Maze bundle where START must remain independent of result-screen A actions;
@@ -156,13 +160,13 @@ same deferred-load boundary after its one Lua module starts successfully.
   pixel drawing and resettable audio clock;
 - Playdate's button first-responder cascade, including pushed input handlers,
   masking handlers and the global `playdate` callback table used by Pulp;
-- JSON string/file decoding into Lua tables;
+- JSON string/file decoding plus compact, pretty and file encoding;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
 - managed Lua synth voices with sine, square, triangle, noise and sawtooth
   oscillators; Hertz/MIDI/named-note input; independent note release/stop;
   volume, transpose and ADSR shaping;
-- package metadata and minimal system-menu hooks.
+- package metadata and mutable system-menu items with values and callbacks.
 
 ## Known limitations
 
@@ -182,13 +186,15 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.15.
+  the device after flashing STEP11.6.16.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
   complete. File-player seeking, true streamed decoding and loop subranges are
   also not implemented; long PDA music is decoded into PSRAM when started.
-- JSON decode/decodeFile are implemented; JSON encoding is not yet exposed.
+- The Pogopo shell does not yet draw Playdate's system-menu overlay. Menu items
+  and callbacks are functional for game logic, but their presentation remains
+  owned by the future shell integration.
 - The ESP32-S3 and Playdate have different CPU, memory and peripheral budgets.
   Passing the host regression is necessary, but final frame time, audio and SD
   reliability must still be checked on Pogopo hardware.

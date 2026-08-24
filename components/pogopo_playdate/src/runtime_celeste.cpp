@@ -3831,6 +3831,23 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int cGetScale(lua_State* state) {
+        lua_pushinteger(state, self(state)->display_scale);
+        return 1;
+    }
+
+    static int cGetOffset(lua_State* state) {
+        Impl* runtime = self(state);
+        lua_pushinteger(state, runtime->display_offset_x);
+        lua_pushinteger(state, runtime->display_offset_y);
+        return 2;
+    }
+
+    static int cGetInverted(lua_State* state) {
+        lua_pushboolean(state, self(state)->inverted_display);
+        return 1;
+    }
+
     static int cSetDrawOffset(lua_State* state) {
         Impl* runtime = self(state);
         runtime->draw_offset_x = static_cast<int>(std::lround(
@@ -3850,6 +3867,21 @@ struct Runtime::Impl {
     static int cSetInverted(lua_State* state) {
         self(state)->inverted_display = lua_toboolean(state, 1) != 0;
         return 0;
+    }
+
+    static int cGetDrawColor(lua_State* state) {
+        lua_pushinteger(state, self(state)->draw_color);
+        return 1;
+    }
+
+    static int cGetLineWidth(lua_State* state) {
+        lua_pushinteger(state, self(state)->line_width);
+        return 1;
+    }
+
+    static int cGetBackgroundColor(lua_State* state) {
+        lua_pushinteger(state, self(state)->background_color);
+        return 1;
     }
 
     static int cStartAccelerometer(lua_State* state) {
@@ -6216,7 +6248,9 @@ struct Runtime::Impl {
         setFunction(-1,"getSize",cDisplaySize);
         setFunction(-1,"setRefreshRate",cSetRefreshRate);setFunction(-1,"getRefreshRate",cGetRefreshRate);
         setFunction(-1,"flush",cNoop);setFunction(-1,"setScale",cSetScale);
-        setFunction(-1,"setOffset",cSetOffset);setFunction(-1,"setInverted",cSetInverted);
+        setFunction(-1,"getScale",cGetScale);
+        setFunction(-1,"setOffset",cSetOffset);setFunction(-1,"getOffset",cGetOffset);
+        setFunction(-1,"setInverted",cSetInverted);setFunction(-1,"getInverted",cGetInverted);
         lua_setfield(lua,playdate,"display");
 
         lua_newtable(lua);const int graphics=lua_gettop(lua);
@@ -6235,17 +6269,23 @@ struct Runtime::Impl {
         setInteger(graphics,"kImageUnflipped",Unflipped);
         setInteger(graphics,"kImageFlippedX",FlippedX);setInteger(graphics,"kImageFlippedY",FlippedY);
         setInteger(graphics,"kImageFlippedXY",FlippedXY);setInteger(graphics,"kStrokeInside",0);setInteger(graphics,"kStrokeOutside",1);
+        setInteger(graphics,"kStrokeCentered",2);
+        setInteger(graphics,"kLineCapStyleButt",0);setInteger(graphics,"kLineCapStyleSquare",1);
+        setInteger(graphics,"kLineCapStyleRound",2);
+        setInteger(graphics,"kPolygonFillNonZero",0);setInteger(graphics,"kPolygonFillEvenOdd",1);
         setFunction(graphics,"_beginFrame",cGraphicsBeginFrame);setFunction(graphics,"_getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"_drawTilemap",cDrawTilemap);
         setFunction(graphics,"getImageDrawMode",cGetDrawMode);
         setFunction(graphics,"getDisplayImage",cGetDisplayImage);
         setFunction(graphics,"getWorkingImage",cGetDisplayImage);
         setFunction(graphics,"clear",cGraphicsClear);setFunction(graphics,"setColor",cSetColor);
+        setFunction(graphics,"getColor",cGetDrawColor);
         setFunction(graphics,"setPattern",cSetPattern);
         setFunction(graphics,"setDitherPattern",cSetDitherPattern);
         setFunction(graphics,"setDrawOffset",cSetDrawOffset);
         setFunction(graphics,"getDrawOffset",cGetDrawOffset);
         setFunction(graphics,"setImageDrawMode",cSetDrawMode);setFunction(graphics,"setLineWidth",cSetLineWidth);
+        setFunction(graphics,"getLineWidth",cGetLineWidth);
         setFunction(graphics,"setStrokeLocation",cSetStrokeLocation);setFunction(graphics,"fillRect",cFillRect);
         setFunction(graphics,"drawRect",cDrawRect);
         setFunction(graphics,"drawPixel",cDrawPixel);
@@ -6268,6 +6308,7 @@ struct Runtime::Impl {
         setFunction(graphics,"getClipRect",cGetClipRect);
         setFunction(graphics,"clearClipRect",cClearClipRect);setFunction(graphics,"setStencilImage",cSetStencil);
         setFunction(graphics,"clearStencil",cClearStencil);setFunction(graphics,"setBackgroundColor",cSetBackgroundColor);
+        setFunction(graphics,"getBackgroundColor",cGetBackgroundColor);
         lua_newtable(lua);setFunction(-1,"new",cFontNew);
         lua_pushliteral(lua,"normal");lua_setfield(lua,-2,"kVariantNormal");
         lua_pushliteral(lua,"bold");lua_setfield(lua,-2,"kVariantBold");
@@ -6444,7 +6485,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.15: responder stack + Pulp controls");
+                 "PogoDate API STEP11.6.16: API harvest 1");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
