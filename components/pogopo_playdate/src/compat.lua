@@ -864,22 +864,42 @@ local buttonNames = {
 	{playdate.kButtonUp, "up"}, {playdate.kButtonDown, "down"},
 	{playdate.kButtonA, "A"}, {playdate.kButtonB, "B"},
 }
-function _pogodate_dispatch_input(pressed, released)
+
+-- Input handlers are a first-responder stack. For each individual event, the
+-- first table that implements the callback receives it. A masking handler
+-- stops the search even when it does not implement that callback. The global
+-- playdate table is the documented bottom of the stack; Pulp installs its
+-- A/B/D-pad callbacks there rather than pushing a separate input handler.
+local function dispatchButtonEvent(callbackName)
 	local stack = playdate.inputHandlers.stack
 	for index=#stack,1,-1 do
 		local entry = stack[index]
-		for i=1,#buttonNames do
-			local mask, name = buttonNames[i][1], buttonNames[i][2]
-			if (pressed & mask) ~= 0 then
-				local callback = entry.handler[name .. "ButtonDown"]
-				if callback then callback() end
+		if entry then
+			local callback = entry.handler and entry.handler[callbackName]
+			if callback then
+				callback()
+				return true
 			end
-			if (released & mask) ~= 0 then
-				local callback = entry.handler[name .. "ButtonUp"]
-				if callback then callback() end
-			end
+			if entry.exclusive then return true end
 		end
-		if entry.exclusive then break end
+	end
+	local callback = playdate[callbackName]
+	if callback then
+		callback()
+		return true
+	end
+	return false
+end
+
+function _pogodate_dispatch_input(pressed, released)
+	for i=1,#buttonNames do
+		local mask, name = buttonNames[i][1], buttonNames[i][2]
+		if (pressed & mask) ~= 0 then
+			dispatchButtonEvent(name .. "ButtonDown")
+		end
+		if (released & mask) ~= 0 then
+			dispatchButtonEvent(name .. "ButtonUp")
+		end
 	end
 end
 

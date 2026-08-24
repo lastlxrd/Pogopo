@@ -154,6 +154,8 @@ same deferred-load boundary after its one Lua module starts successfully.
   `playdate.file.run()`, including optional custom `_ENV` tables;
 - the standard Pulp runtime's class-style image draw/clear/tiled calls,
   pixel drawing and resettable audio clock;
+- Playdate's button first-responder cascade, including pushed input handlers,
+  masking handlers and the global `playdate` callback table used by Pulp;
 - JSON string/file decoding into Lua tables;
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata and a separate music player;
@@ -180,7 +182,7 @@ same deferred-load boundary after its one Lua module starts successfully.
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.14.
+  the device after flashing STEP11.6.15.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not
