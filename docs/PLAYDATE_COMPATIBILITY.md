@@ -44,6 +44,21 @@ players finish according to PDA duration, stencil clearing accepts the SDK's
 offline results, and compiled image resources recover filename-only case
 differences such as `avalanche` versus `Avalanche.pdt`.
 
+STEP11.6.23 fixes standard timer callback varargs and the real two-dimensional
+shape of compiled PDT image tables. SD PDT data stays packed until a frame is
+requested; frames remain trimmed 1-bit images behind a bounded cache and are
+expanded to mutable pixels only on demand. This prevents animation-heavy games
+from retaining every inflated table and full transparent frame canvas.
+
+STEP11.6.24 removes the hardware stalls found during Hillslide gameplay.
+Expanded PDT streams now live in a 1.4 MiB PSRAM LRU instead of being inflated
+again for every new frame, while returned images remain compact independent
+copies. The compositor parses each compiled 1-bit frame once per draw instead
+of once per pixel, and large render-target overflow no longer forces a
+stop-the-world Lua collection. This step also adds keyboard lifecycle,
+mic/headset capability detection, display mosaic state, display flipping and
+direct display-image loading compatibility.
+
 ## Validated games
 
 ### Onebit Frogger
@@ -183,6 +198,8 @@ same deferred-load boundary after its one Lua module starts successfully.
   tilemap walls;
 - display offset and graphics draw offset, including draw-offset screen shake;
 - callback/value millisecond timers, including SDK key-repeat timers;
+  explicit callback varargs are preserved, while callbacks without arguments
+  receive their timer object;
   callback/value frame timers with easing, repeats and reverses; bundled
   easing, animation and animator CoreLibs plus elapsed-time helpers;
 - Playdate date/time conversion forms and cycle-safe table copy helpers;
@@ -205,6 +222,8 @@ same deferred-load boundary after its one Lua module starts successfully.
 - short sample effects, stereo/mono PCM and IMA decoding, basic playback rate,
   duration metadata, playback offset/volume queries, one-shot completion,
   pause/resume position and a separate music player;
+- packed, correctly shaped PDT tables with a bounded expanded-table PSRAM LRU,
+  compact trimmed-frame caching and on-demand mutable materialization;
 - stack-safe iterative PDX sound discovery with its bounded directory queue and
   path scratch storage in PSRAM; startup stack high-water diagnostics are
   emitted for new package testing;
@@ -219,8 +238,8 @@ same deferred-load boundary after its one Lua module starts successfully.
 
 The Playdate SDK 3.0.5 Lua reference contains 267 documented function entries.
 After excluding the five crank queries requested outside this target, PogoDate
-has usable implementations or compatibility behaviour for roughly 210–220 of
-262 entries. About 42–52 callable entries (16–20%) therefore remain, mostly in
+has usable implementations or compatibility behaviour for roughly 226–236 of
+262 entries. About 26–36 callable entries (10–14%) therefore remain, mostly in
 networking, keyboard UI, microphone/video, simulator/debug services and the
 advanced sound graph. This is an endpoint estimate rather than a promise of
 bit-exact semantics: collision, audio mixing and rendering edge cases can still
@@ -240,12 +259,14 @@ need fidelity work even when their functions exist. Hillslide itself is at
   accepts callback and direct-string response forms, and returns swept
   normal/move/touch metadata. It is not yet a byte-for-byte replacement for
   every edge case in Playdate's native solver.
-- Networking, microphone and SDK extensions are not emulated by this step.
+- Networking and SDK extensions are not emulated by this step. Microphone and
+  headset capability calls exist and correctly report absent hardware, but
+  Pogopo cannot record audio without a microphone source.
   The Lua crank API is implemented, but Pogopo has no built-in physical crank;
   crank-driven gameplay therefore remains stationary until an expansion
   module supplies angle/dock state. Accelerometer axes and filtering are implemented for Pogopo's
   BMI270 orientation, but Maze's saved neutral point must be recalibrated on
-  the device after flashing STEP11.6.22.
+  the device after flashing STEP11.6.24.
 - Oscillator synths are implemented, but Playdate's PO waveforms are currently
   approximated. Sample/wavetable synthesis, signal/LFO modulation, exact
   scheduled `when` events, finish callbacks, instruments and sequences are not

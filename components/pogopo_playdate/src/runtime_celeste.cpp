@@ -116,8 +116,10 @@ struct Image {
 struct ImageTable {
     const CelesteAsset* asset = nullptr;
     uint8_t* packed = nullptr;
+    uint8_t* unpacked = nullptr;
     uint32_t packed_size = 0;
     uint32_t unpacked_size = 0;
+    uint32_t last_used = 0;
     uint16_t frame_width = 0;
     uint16_t frame_height = 0;
     uint16_t frame_count = 0;
@@ -561,6 +563,12 @@ struct Runtime::Impl {
     int display_scale = 1;
     int display_offset_x = 0;
     int display_offset_y = 0;
+    int display_mosaic_x = 0;
+    int display_mosaic_y = 0;
+    bool display_flipped_x = false;
+    bool display_flipped_y = false;
+    uint8_t* display_transform_buffer = nullptr;
+    size_t display_transform_capacity = 0;
     int draw_offset_x = 0;
     int draw_offset_y = 0;
     uint32_t refresh_rate = 50;
@@ -630,6 +638,16 @@ struct Runtime::Impl {
     // on ESP32-S3. Pool render targets from 32 KiB upward in PSRAM instead.
     static constexpr size_t kLargeImageThreshold = 32U * 1024U;
     std::array<LargeImageSlot, 6> large_image_pool{};
+
+    // A compact PDT frame still lives inside one zlib stream for the complete
+    // table. Inflating that stream for every cache miss costs over a second on
+    // ESP32-S3. Keep the most recently used tables expanded under a strict
+    // PSRAM budget; frame userdata copy only its small native 1-bit payload,
+    // so evicting a table never invalidates an image already returned to Lua.
+    static constexpr size_t kPdtUnpackedBudget = 1400U * 1024U;
+    std::array<ImageTable*, 64> live_image_tables{};
+    size_t pdt_unpacked_bytes = 0;
+    uint32_t pdt_use_serial = 0;
 
     size_t allocated_bytes = 0;
     size_t peak_allocated_bytes = 0;
@@ -969,6 +987,76 @@ struct Runtime::Impl {
         }
     }
 
+    void registerImageTable(ImageTable* table) {
+        if (!table || table->asset) return;
+        for (ImageTable*& entry : live_image_tables) {
+            if (!entry) {
+                entry = table;
+                return;
+            }
+        }
+    }
+
+    void unregisterImageTable(ImageTable* table) {
+        if (!table) return;
+        for (ImageTable*& entry : live_image_tables) {
+            if (entry == table) entry = nullptr;
+        }
+        if (table->unpacked) {
+            pdt_unpacked_bytes -= std::min<size_t>(
+                pdt_unpacked_bytes, table->unpacked_size);
+            heap_caps_free(table->unpacked);
+            table->unpacked = nullptr;
+        }
+    }
+
+    bool ensureImageTableUnpacked(ImageTable& requested) {
+        requested.last_used = ++pdt_use_serial;
+        if (requested.unpacked) return true;
+        if (!requested.packed || requested.packed_size == 0 ||
+            requested.unpacked_size == 0 ||
+            requested.unpacked_size > kPdtUnpackedBudget) return false;
+        while (pdt_unpacked_bytes + requested.unpacked_size >
+               kPdtUnpackedBudget) {
+            ImageTable* oldest = nullptr;
+            for (ImageTable* candidate : live_image_tables) {
+                if (!candidate || candidate == &requested ||
+                    !candidate->unpacked) continue;
+                if (!oldest || candidate->last_used < oldest->last_used) {
+                    oldest = candidate;
+                }
+            }
+            if (!oldest) return false;
+            pdt_unpacked_bytes -= std::min<size_t>(
+                pdt_unpacked_bytes, oldest->unpacked_size);
+            heap_caps_free(oldest->unpacked);
+            oldest->unpacked = nullptr;
+        }
+        uint8_t* unpacked = static_cast<uint8_t*>(heap_caps_malloc(
+            requested.unpacked_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!unpacked && requested.unpacked_size < 128U * 1024U) {
+            unpacked = static_cast<uint8_t*>(heap_caps_malloc(
+                requested.unpacked_size, MALLOC_CAP_8BIT));
+        }
+        if (!unpacked) return false;
+        const int64_t started = esp_timer_get_time();
+        uLongf actual = requested.unpacked_size;
+        const int zerr = uncompress(unpacked, &actual, requested.packed,
+                                    requested.packed_size);
+        if (zerr != Z_OK || actual != requested.unpacked_size) {
+            heap_caps_free(unpacked);
+            return false;
+        }
+        requested.unpacked = unpacked;
+        pdt_unpacked_bytes += requested.unpacked_size;
+        ESP_LOGI(TAG, "PDT cache: +%uB %s in %lld ms, total=%u/%uB",
+                 static_cast<unsigned>(requested.unpacked_size), requested.path,
+                 static_cast<long long>((esp_timer_get_time() - started) / 1000),
+                 static_cast<unsigned>(pdt_unpacked_bytes),
+                 static_cast<unsigned>(kPdtUnpackedBudget));
+        return true;
+    }
+
     Image* pushImage() {
         auto* image = static_cast<Image*>(lua_newuserdatauv(lua, sizeof(Image), 1));
         new (image) Image{};
@@ -1117,10 +1205,6 @@ struct Runtime::Impl {
                 return -1;
             };
             int slot_index = find_free_slot();
-            if (slot_index < 0) {
-                lua_gc(lua, LUA_GCCOLLECT);
-                slot_index = find_free_slot();
-            }
             if (slot_index >= 0) {
                 LargeImageSlot& slot = large_image_pool[slot_index];
                 if (slot.capacity < bytes) {
@@ -1148,6 +1232,32 @@ struct Runtime::Impl {
                     return image;
                 }
             }
+            // Never force a stop-the-world full collection simply because
+            // six persistent render targets currently own the shared slots.
+            // Hillslide keeps terrain layers alive and also creates temporary
+            // full-screen targets; the old fallback paused gameplay for
+            // 1.2-1.4 seconds every few seconds. Overflow planes are external
+            // PSRAM owned by lightweight userdata and return naturally during
+            // the already configured incremental collection.
+            Image* image = pushImage();
+            image->width = width;
+            image->height = height;
+            image->stride = width;
+            image->pixels = static_cast<uint8_t*>(heap_caps_malloc(
+                bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!image->pixels && bytes < 128U * 1024U) {
+                image->pixels = static_cast<uint8_t*>(heap_caps_malloc(
+                    bytes, MALLOC_CAP_8BIT));
+            }
+            if (image->pixels) {
+                image->owns_pixels = true;
+                std::memset(image->pixels, color, bytes);
+                setSolidImageBounds(*image, color);
+                return image;
+            }
+            lua_pop(lua, 1);
+            lua_pushnil(lua);
+            return nullptr;
         }
         auto* image = static_cast<Image*>(lua_newuserdatauv(
             lua, sizeof(Image) + bytes, 1));
@@ -1403,6 +1513,77 @@ struct Runtime::Impl {
                 }
             }
             return;
+        }
+        // Native PDI/PDT frames are trimmed 1-bit planes. The generic path
+        // below calls imagePixel() for every source pixel, which reparses the
+        // 16-byte header and validates both planes each time. Hillslide draws
+        // several of these frames on every update. Parse once and composite
+        // directly while retaining clipping, all four flips and common modes.
+        if (scale == 1 && fade >= 0.999f && image.serialized &&
+            image.serialized_size >= 16U && !image.mask && !stencil && target &&
+            target->pixels &&
+            (draw_mode == Copy || draw_mode == FillWhite ||
+             draw_mode == FillBlack || draw_mode == Inverted)) {
+            const uint8_t* bytes = image.serialized;
+            const uint16_t stored_width = readLe16(bytes);
+            const uint16_t stored_height = readLe16(bytes + 2);
+            const uint16_t row_bytes = readLe16(bytes + 4);
+            const uint16_t left = readLe16(bytes + 6);
+            const uint16_t top = readLe16(bytes + 10);
+            const uint16_t flags = readLe16(bytes + 14);
+            const size_t plane_size = static_cast<size_t>(row_bytes) *
+                stored_height;
+            const bool has_mask = (flags & 0x03U) != 0U;
+            const size_t plane_count = has_mask ? 2U : 1U;
+            if (stored_width && stored_height && row_bytes &&
+                stored_width <= row_bytes * 8U &&
+                left + stored_width <= image.width &&
+                top + stored_height <= image.height &&
+                plane_size <= (image.serialized_size - 16U) / plane_count) {
+                const uint8_t* bitmap = bytes + 16U;
+                const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
+                const int start_x = std::max(content_left,
+                    std::max(clip.x - x, -x));
+                const int start_y = std::max(content_top,
+                    std::max(clip.y - y, -y));
+                const int end_x = std::min(content_right,
+                    std::min(clip.x + clip.w - x, target->width - x));
+                const int end_y = std::min(content_bottom,
+                    std::min(clip.y + clip.h - y, target->height - y));
+                if (target != &screen && start_x < end_x && start_y < end_y) {
+                    expandContentBounds(*target, x + start_x, y + start_y,
+                                        x + end_x, y + end_y);
+                }
+                for (int logical_y = start_y; logical_y < end_y; ++logical_y) {
+                    const int source_y = (flip & FlippedY)
+                        ? image.height - 1 - logical_y : logical_y;
+                    if (source_y < top || source_y >= top + stored_height) continue;
+                    const size_t source_row = static_cast<size_t>(source_y - top) *
+                        row_bytes;
+                    uint8_t* destination = target->pixels +
+                        static_cast<size_t>(y + logical_y) * target->stride;
+                    for (int logical_x = start_x; logical_x < end_x; ++logical_x) {
+                        const int source_x = (flip & FlippedX)
+                            ? image.width - 1 - logical_x : logical_x;
+                        if (source_x < left || source_x >= left + stored_width) continue;
+                        const unsigned local_x = static_cast<unsigned>(source_x - left);
+                        const size_t source_index = source_row + (local_x >> 3U);
+                        const uint8_t bit = static_cast<uint8_t>(
+                            0x80U >> (local_x & 7U));
+                        if (mask && !(mask[source_index] & bit)) continue;
+                        uint8_t value = (bitmap[source_index] & bit) ? White : Black;
+                        if (image.inverted) value = value == Black ? White : Black;
+                        if (draw_mode == FillWhite) value = White;
+                        else if (draw_mode == FillBlack) value = Black;
+                        else if (draw_mode == Inverted)
+                            value = value == Black ? White : Black;
+                        if (target == &screen && inverted_display)
+                            value = value == Black ? White : Black;
+                        destination[x + logical_x] = value;
+                    }
+                }
+                return;
+            }
         }
         static constexpr uint8_t bayer[16] = {
             0, 8, 2, 10, 12, 4, 14, 6,
@@ -1789,9 +1970,36 @@ struct Runtime::Impl {
             canvas->clear(background_color == Black ? gfx::BLACK : gfx::WHITE);
         }
         canvas->reset_clip();
+        const uint8_t* output_pixels = screen.pixels;
+        if (display_flipped_x || display_flipped_y) {
+            const size_t bytes = static_cast<size_t>(screen.width) * screen.height;
+            if (display_transform_capacity < bytes) {
+                void* replacement = heap_caps_realloc(display_transform_buffer,
+                    bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (replacement) {
+                    display_transform_buffer = static_cast<uint8_t*>(replacement);
+                    display_transform_capacity = bytes;
+                }
+            }
+            if (display_transform_buffer && display_transform_capacity >= bytes) {
+                for (int y = 0; y < screen.height; ++y) {
+                    const int source_y = display_flipped_y
+                        ? screen.height - 1 - y : y;
+                    for (int x = 0; x < screen.width; ++x) {
+                        const int source_x = display_flipped_x
+                            ? screen.width - 1 - x : x;
+                        display_transform_buffer[static_cast<size_t>(y) *
+                            screen.width + x] = screen.pixels[
+                                static_cast<size_t>(source_y) * screen.width +
+                                source_x];
+                    }
+                }
+                output_pixels = display_transform_buffer;
+            }
+        }
         canvas->draw_indexed2_fast(
             output_x, output_y, screen.width, screen.height,
-            screen.pixels, screen.width * display_scale,
+            output_pixels, screen.width * display_scale,
             screen.height * display_scale, false, false);
     }
 
@@ -2149,6 +2357,7 @@ struct Runtime::Impl {
         table->frame_count = static_cast<uint16_t>(count);
         table->columns = columns;
         std::snprintf(table->path, sizeof(table->path), "%s", resolved);
+        registerImageTable(table);
         luaL_getmetatable(lua, kImageTableMetatable);
         lua_setmetatable(lua, -2);
         lua_newtable(lua);
@@ -2157,8 +2366,10 @@ struct Runtime::Impl {
     }
 
     static int cImageTableGc(lua_State* state) {
+        Impl* runtime = self(state);
         auto* table = static_cast<ImageTable*>(
             luaL_checkudata(state, 1, kImageTableMetatable));
+        if (runtime && table) runtime->unregisterImageTable(table);
         if (table && table->packed) heap_caps_free(table->packed);
         if (table) *table = {};
         return 0;
@@ -2736,38 +2947,23 @@ struct Runtime::Impl {
                 lua_pop(state, 1);
                 return false;
             }
-            uint8_t* unpacked = static_cast<uint8_t*>(heap_caps_malloc(
-                table->unpacked_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            if (!unpacked && table->unpacked_size < 128U * 1024U) {
-                unpacked = static_cast<uint8_t*>(heap_caps_malloc(
-                    table->unpacked_size, MALLOC_CAP_8BIT));
-            }
-            if (!unpacked) {
+            if (!ensureImageTableUnpacked(*table)) {
                 lua_pop(state, 1);
                 return false;
             }
-            uLongf actual = table->unpacked_size;
-            const int zerr = uncompress(unpacked, &actual, table->packed,
-                                        table->packed_size);
-            if (zerr != Z_OK || actual != table->unpacked_size) {
-                heap_caps_free(unpacked);
-                lua_pop(state, 1);
-                return false;
-            }
+            uint8_t* unpacked = table->unpacked;
             const size_t table_bytes = 4U + static_cast<size_t>(table->frame_count) * 4U;
             const uint32_t previous = index > 1
                 ? readLe32(unpacked + 4U + static_cast<size_t>(index - 2) * 4U)
                 : 0U;
             const uint32_t end = readLe32(unpacked + 4U + static_cast<size_t>(index - 1) * 4U);
             if (table_bytes + end > table->unpacked_size || previous >= end) {
-                heap_caps_free(unpacked);
                 lua_pop(state, 1);
                 return false;
             }
             image = pushSerializedImage(
                 unpacked + table_bytes + previous, end - previous,
                 table->frame_width, table->frame_height);
-            heap_caps_free(unpacked);
             if (!image) {
                 lua_pop(state, 2);
                 return false;
@@ -4281,6 +4477,45 @@ struct Runtime::Impl {
 
     static int cGetInverted(lua_State* state) {
         lua_pushboolean(state, self(state)->inverted_display);
+        return 1;
+    }
+
+    static int cSetMosaic(lua_State* state) {
+        Impl* runtime = self(state);
+        runtime->display_mosaic_x = std::clamp(
+            static_cast<int>(luaL_checkinteger(state, 1)), 0, 3);
+        runtime->display_mosaic_y = std::clamp(
+            static_cast<int>(luaL_checkinteger(state, 2)), 0, 3);
+        return 0;
+    }
+
+    static int cGetMosaic(lua_State* state) {
+        Impl* runtime = self(state);
+        lua_pushinteger(state, runtime->display_mosaic_x);
+        lua_pushinteger(state, runtime->display_mosaic_y);
+        return 2;
+    }
+
+    static int cSetFlipped(lua_State* state) {
+        Impl* runtime = self(state);
+        runtime->display_flipped_x = lua_toboolean(state, 1) != 0;
+        runtime->display_flipped_y = lua_toboolean(state, 2) != 0;
+        return 0;
+    }
+
+    static int cDisplayLoadImage(lua_State* state) {
+        Impl* runtime = self(state);
+        const char* path = luaL_checkstring(state, 1);
+        if (!runtime->pushPdiImage(path)) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        auto* image = static_cast<Image*>(luaL_checkudata(
+            state, -1, kImageMetatable));
+        const bool valid = image && image->width == 400 && image->height == 240;
+        if (valid) runtime->drawImage(*image, 0, 0, Unflipped);
+        lua_pop(state, 1);
+        lua_pushboolean(state, valid);
         return 1;
     }
 
@@ -6870,6 +7105,8 @@ struct Runtime::Impl {
         setFunction(-1,"getScale",cGetScale);
         setFunction(-1,"setOffset",cSetOffset);setFunction(-1,"getOffset",cGetOffset);
         setFunction(-1,"setInverted",cSetInverted);setFunction(-1,"getInverted",cGetInverted);
+        setFunction(-1,"setMosaic",cSetMosaic);setFunction(-1,"getMosaic",cGetMosaic);
+        setFunction(-1,"setFlipped",cSetFlipped);setFunction(-1,"loadImage",cDisplayLoadImage);
         lua_setfield(lua,playdate,"display");
 
         lua_newtable(lua);const int graphics=lua_gettop(lua);
@@ -7096,6 +7333,8 @@ struct Runtime::Impl {
         accelerometer_x=accelerometer_y=0.0f;accelerometer_z=1.0f;
         accelerometer_valid=false;accelerometer_running=false;
         next_timer_id=1;display_scale=1;display_offset_x=display_offset_y=0;
+        display_mosaic_x=display_mosaic_y=0;
+        display_flipped_x=display_flipped_y=false;
         sound_time_reset_ms=0;
         draw_offset_x=draw_offset_y=0;
         inverted_display=false;background_color=White;
@@ -7112,7 +7351,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.23: timer args + compact PDT streaming");
+                 "PogoDate API STEP11.6.24: PDT LRU + fast 1-bit compositor");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -7150,11 +7389,15 @@ struct Runtime::Impl {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
         if(audio)audio->stopMusicPcm();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
+        live_image_tables.fill(nullptr);
+        pdt_unpacked_bytes=0;pdt_use_serial=0;
         clearLargeImagePool();
         clearSoundCache();
         pdz.close();external_pdz.close();package_mode=false;package_info={};
         loaded_external_count=0;external_import_depth=0;
         releaseImage(screen);
+        if(display_transform_buffer)heap_caps_free(display_transform_buffer);
+        display_transform_buffer=nullptr;display_transform_capacity=0;
         target=nullptr;stencil=nullptr;current_font=nullptr;
         current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
         maze_completion_image_ref=LUA_NOREF;

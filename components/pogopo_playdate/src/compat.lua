@@ -1995,6 +1995,62 @@ function playdate.getSystemLanguage() return gfx.font.kLanguageEnglish end
 function playdate.shouldDisplay24HourTime() return true end
 function playdate.getFlipped() return false end
 
+-- Keyboard lifecycle compatibility. Pogopo does not yet have a shell-owned
+-- text-entry overlay, but games can open/close the keyboard, seed/read text
+-- and receive the documented lifecycle callbacks instead of stopping on a
+-- missing module. Physical text entry remains a future shell feature.
+playdate.keyboard=playdate.keyboard or {
+	text="",kCapitalizationNormal=0,kCapitalizationWords=1,
+	kCapitalizationSentences=2,
+}
+local keyboardVisible=false
+function playdate.keyboard.show(text)
+	if text~=nil then playdate.keyboard.text=tostring(text) end
+	if type(playdate.keyboard.keyboardWillShowCallback)=="function" then
+		playdate.keyboard.keyboardWillShowCallback()
+	end
+	keyboardVisible=true
+	if type(playdate.keyboard.keyboardDidShowCallback)=="function" then
+		playdate.keyboard.keyboardDidShowCallback()
+	end
+end
+function playdate.keyboard.hide()
+	if not keyboardVisible then return end
+	if type(playdate.keyboard.keyboardWillHideCallback)=="function" then
+		playdate.keyboard.keyboardWillHideCallback()
+	end
+	keyboardVisible=false
+	if type(playdate.keyboard.keyboardDidHideCallback)=="function" then
+		playdate.keyboard.keyboardDidHideCallback()
+	end
+end
+function playdate.keyboard.isVisible() return keyboardVisible end
+function playdate.keyboard.left() return 0 end
+function playdate.keyboard.width() return 400 end
+function playdate.keyboard.setCapitalizationBehavior(value)
+	playdate.keyboard.capitalizationBehavior=value or
+		playdate.keyboard.kCapitalizationNormal
+end
+
+-- Hardware capability endpoints use honest neutral results. They let games
+-- feature-detect a missing microphone/headset without nil API failures.
+playdate.sound.micinput=playdate.sound.micinput or {}
+function playdate.sound.micinput.recordToSample() return false end
+function playdate.sound.micinput.stopRecording() end
+function playdate.sound.micinput.startListening() return false end
+function playdate.sound.micinput.stopListening() end
+function playdate.sound.micinput.getLevel() return 0 end
+function playdate.sound.micinput.getSource() return nil end
+function playdate.sound.getHeadphoneState(callback)
+	playdate.sound.headphoneStateChangedCallback=callback
+	return false,false
+end
+function playdate.sound.setOutputsActive(headphones,speaker)
+	playdate.sound.headphonesActive=headphones==true
+	playdate.sound.speakerActive=speaker~=false
+	return true
+end
+
 -- A functional system-menu model. The physical Pogopo shell does not render
 -- Playdate's system overlay yet, but games can create, inspect, mutate and
 -- remove menu items and invoke their callbacks without nil failures.
