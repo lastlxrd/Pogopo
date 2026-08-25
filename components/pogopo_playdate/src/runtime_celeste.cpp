@@ -115,6 +115,8 @@ struct Image {
 
 struct ImageTable {
     const CelesteAsset* asset = nullptr;
+    bool directory = false;
+    uint16_t directory_first_index = 0;
     uint8_t* packed = nullptr;
     uint8_t* unpacked = nullptr;
     uint32_t packed_size = 0;
@@ -158,7 +160,6 @@ struct Sound {
     bool paused = false;
     bool offset_pending = false;
     int16_t cache_index = -1;
-    float buffer_size_seconds = 0.0f;
     char path[160]{};
 };
 
@@ -721,7 +722,10 @@ struct Runtime::Impl {
         return true;
     }
 
-    bool loadBytecode(const char* name, const uint8_t* bytes, size_t size) {
+    bool loadBytecode(const char* name, const uint8_t* bytes, size_t size,
+                      int result_count = 0, int* returned = nullptr) {
+        const int base = lua_gettop(lua);
+        if (returned) *returned = 0;
         if (!bytes || size < 4U || bytes[0] != 0x1BU ||
             std::memcmp(bytes + 1U, "Lua", 3U) != 0) {
             setError(name, "PDZ record is not Lua bytecode");
@@ -731,7 +735,12 @@ struct Runtime::Impl {
                              name, "b") != LUA_OK) {
             return takeLuaError(name);
         }
-        if (lua_pcall(lua, 0, 0, 0) != LUA_OK) return takeLuaError(name);
+        if (lua_pcall(lua, 0, result_count, 0) != LUA_OK) {
+            const bool ok = takeLuaError(name);
+            lua_settop(lua, base);
+            return ok;
+        }
+        if (returned) *returned = lua_gettop(lua) - base;
         return true;
     }
 
@@ -762,7 +771,8 @@ struct Runtime::Impl {
         return nullptr;
     }
 
-    bool importModule(const char* requested) {
+    bool importModule(const char* requested, int* returned = nullptr) {
+        if (returned) *returned = 0;
         if (!requested) return false;
         // Most CoreLibs are supplied by compat.lua because their stock
         // versions expect lower-level SDK objects we do not expose.  Pure-Lua
@@ -879,7 +889,11 @@ struct Runtime::Impl {
             const int64_t started = esp_timer_get_time();
             ESP_LOGI(TAG, "PDZ exec begin: %s (%u bytes)", entry->name,
                      static_cast<unsigned>(bytecode_size));
-            const bool ok = loadBytecode(entry->name, bytecode, bytecode_size);
+            int module_results = 0;
+            const bool ok = loadBytecode(entry->name, bytecode, bytecode_size,
+                                         returned ? LUA_MULTRET : 0,
+                                         returned ? &module_results : nullptr);
+            if (ok && returned) *returned = module_results;
             const uint32_t elapsed_ms = static_cast<uint32_t>(
                 std::max<int64_t>(0, esp_timer_get_time() - started) / 1000);
             ESP_LOGI(TAG, "PDZ exec %s: %s in %lu ms", ok ? "ready" : "failed",
@@ -914,10 +928,14 @@ struct Runtime::Impl {
     static int cImport(lua_State* state) {
         Impl* runtime = self(state);
         const char* name = luaL_checkstring(state, 1);
-        if (!runtime->importModule(name)) {
+        int returned = 0;
+        if (!runtime->importModule(name, &returned)) {
             return luaL_error(state, "%s", runtime->last_error);
         }
-        return 0;
+        // Playdate import preserves values returned by a module on its first
+        // execution. This is used by ordinary value modules such as hashids;
+        // subsequent imports execute nothing and therefore return no values.
+        return returned;
     }
 
     bool allocateImage(Image& image, int width, int height, uint8_t color,
@@ -2051,7 +2069,17 @@ struct Runtime::Impl {
         if (!package_mode || !requested || !requested[0]) return false;
         char relative[192]{};
         const char* start = requested;
-        while (*start == '/') ++start;
+        // SDK paths are package-relative. Treat leading slash and any number
+        // of harmless "./" prefixes identically; several shipped games use
+        // the latter for every image table.
+        for (;;) {
+            while (*start == '/') ++start;
+            if (start[0] == '.' && start[1] == '/') {
+                start += 2;
+                continue;
+            }
+            break;
+        }
         if (!start[0] || std::strstr(start, "..") ||
             std::strlen(start) >= sizeof(relative)) return false;
         std::snprintf(relative, sizeof(relative), "%s", start);
@@ -2372,6 +2400,77 @@ struct Runtime::Impl {
         lua_setmetatable(lua, -2);
         lua_newtable(lua);
         lua_setiuservalue(lua, -2, 1);
+        return true;
+    }
+
+    bool pushPdiDirectoryTable(const char* requested) {
+        char relative[192]{}, directory_path[384]{};
+        if (!package_mode || !requested) return false;
+        const char* start = requested;
+        for (;;) {
+            while (*start == '/') ++start;
+            if (start[0] == '.' && start[1] == '/') { start += 2; continue; }
+            break;
+        }
+        if (!start[0] || std::strstr(start, "..") ||
+            std::strlen(start) >= sizeof(relative)) return false;
+        std::snprintf(relative, sizeof(relative), "%s", start);
+        if (!pdxJoinPath(directory_path, sizeof(directory_path),
+                         package_info.path, relative)) return false;
+        DIR* directory = opendir(directory_path);
+        if (!directory) return false;
+        unsigned first = std::numeric_limits<unsigned>::max(), last = 0, count = 0;
+        while (dirent* entry = readdir(directory)) {
+            const char* name = entry->d_name;
+            const size_t length = std::strlen(name);
+            if (length <= 4U || strcasecmp(name + length - 4U, ".pdi")) continue;
+            unsigned value = 0;
+            bool numeric = true;
+            for (size_t i = 0; i < length - 4U; ++i) {
+                if (name[i] < '0' || name[i] > '9') { numeric = false; break; }
+                value = value * 10U + static_cast<unsigned>(name[i] - '0');
+                if (value > 65535U) { numeric = false; break; }
+            }
+            if (!numeric) continue;
+            first = std::min(first, value); last = std::max(last, value); ++count;
+        }
+        closedir(directory);
+        if (count == 0 || count > 2048U ||
+            first == std::numeric_limits<unsigned>::max() ||
+            last - first + 1U != count) return false;
+
+        char first_path[384]{};
+        const int path_length = std::snprintf(first_path, sizeof(first_path),
+            "%s/%u.pdi", directory_path, first);
+        if (path_length <= 0 || static_cast<size_t>(path_length) >= sizeof(first_path)) return false;
+        FILE* file = openResourceFile(first_path, sizeof(first_path));
+        if (!file) return false;
+        uint8_t header[32]{};
+        const bool header_ok = std::fread(header, 1, sizeof(header), file) == sizeof(header) &&
+            std::memcmp(header, "Playdate IMG", 12) == 0;
+        std::fclose(file);
+        const uint32_t width = header_ok ? readLe32(header + 20) : 0;
+        const uint32_t height = header_ok ? readLe32(header + 24) : 0;
+        if (!header_ok || width == 0 || height == 0 || width > 1024U || height > 1024U) {
+            return false;
+        }
+
+        auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
+            lua, sizeof(ImageTable), 1));
+        new (table) ImageTable{};
+        table->directory = true;
+        table->directory_first_index = static_cast<uint16_t>(first);
+        table->frame_width = static_cast<uint16_t>(width);
+        table->frame_height = static_cast<uint16_t>(height);
+        table->frame_count = static_cast<uint16_t>(count);
+        table->columns = static_cast<uint16_t>(count);
+        std::snprintf(table->path, sizeof(table->path), "%s", relative);
+        registerImageTable(table);
+        luaL_getmetatable(lua, kImageTableMetatable);
+        lua_setmetatable(lua, -2);
+        lua_newtable(lua);
+        lua_setiuservalue(lua, -2, 1);
+        ESP_LOGI(TAG, "PDI directory table: %s (%u frames)", relative, count);
         return true;
     }
 
@@ -2877,6 +2976,7 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         const char* path = luaL_checkstring(state, 1);
         if (runtime->pushPdtTable(path)) return 1;
+        if (runtime->pushPdiDirectoryTable(path)) return 1;
         const CelesteAsset* asset = findCelesteAsset(path);
         if (!asset || asset->frame_count <= 1) {
             ESP_LOGI(TAG, "Image table not found: %s", path ? path : "");
@@ -2951,6 +3051,23 @@ struct Runtime::Impl {
             image->height = table->asset->frame_height;
             image->asset = table->asset;
             image->frame = index - 1;
+        } else if (table->directory) {
+            char frame_path[384]{};
+            const unsigned frame_number = static_cast<unsigned>(
+                table->directory_first_index) + static_cast<unsigned>(index - 1);
+            const int length = std::snprintf(frame_path, sizeof(frame_path),
+                "%s/%u", table->path, frame_number);
+            if (length <= 0 || static_cast<size_t>(length) >= sizeof(frame_path) ||
+                !pushPdiImage(frame_path)) {
+                lua_pop(state, 1);
+                return false;
+            }
+            image = static_cast<Image*>(luaL_testudata(
+                state, -1, kImageMetatable));
+            if (!image) {
+                lua_pop(state, 2);
+                return false;
+            }
         } else {
             if (!table->packed || table->packed_size == 0 ||
                 table->unpacked_size < 4U + table->frame_count * 4U) {
@@ -4281,11 +4398,24 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int textAlignment(lua_State* state, int index, int fallback = 0) {
+        if (lua_isnoneornil(state, index)) return fallback;
+        if (lua_isnumber(state, index)) {
+            return static_cast<int>(lua_tointeger(state, index));
+        }
+        const char* value = luaL_checkstring(state, index);
+        if (!strcasecmp(value, "left")) return 0;
+        if (!strcasecmp(value, "center") || !strcasecmp(value, "centre")) return 1;
+        if (!strcasecmp(value, "right")) return 2;
+        return luaL_argerror(state, index,
+            "alignment must be left, center, right or an SDK alignment constant");
+    }
+
     static int cDrawTextInRect(lua_State* state) {
         Impl* runtime = self(state);
         const int argument_count = lua_gettop(state);
-        const int alignment = argument_count >= 8 && lua_isnumber(state, 8)
-            ? static_cast<int>(lua_tointeger(state, 8)) : 0;
+        const int alignment = argument_count >= 8
+            ? textAlignment(state, 8, 0) : 0;
         size_t length = 0;
         const char* value = luaL_tolstring(state, 1, &length);
         int x, y, w, h; runtime->readRect(state, 2, x, y, w, h);
@@ -4309,15 +4439,7 @@ struct Runtime::Impl {
         const char* value = luaL_tolstring(state, 1, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
-        int alignment = 0;
-        if (lua_type(state, 4) == LUA_TSTRING) {
-            const char* name = lua_tostring(state, 4);
-            if (name && (!strcasecmp(name, "center") ||
-                         !strcasecmp(name, "centre"))) alignment = 1;
-            else if (name && !strcasecmp(name, "right")) alignment = 2;
-        } else {
-            alignment = static_cast<int>(luaL_optinteger(state, 4, 0));
-        }
+        const int alignment = textAlignment(state, 4, 0);
         const int width = runtime->textWidth(value, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -4450,15 +4572,7 @@ struct Runtime::Impl {
         const char* text = luaL_tolstring(state, 2, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 4)));
-        int alignment = 0;
-        if (lua_type(state, 5) == LUA_TSTRING) {
-            const char* name = lua_tostring(state, 5);
-            if (name && (!strcasecmp(name, "center") ||
-                         !strcasecmp(name, "centre"))) alignment = 1;
-            else if (name && !strcasecmp(name, "right")) alignment = 2;
-        } else {
-            alignment = static_cast<int>(luaL_optinteger(state, 5, 0));
-        }
+        const int alignment = textAlignment(state, 5, 0);
         const int width = runtime->textWidthForFont(font, text, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -4634,13 +4748,19 @@ struct Runtime::Impl {
 
     static int cPushContext(lua_State* state) {
         Impl* runtime = self(state);
-        auto* image = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
+        Image* image = nullptr;
+        if (!lua_isnoneornil(state, 1)) {
+            image = static_cast<Image*>(
+                luaL_checkudata(state, 1, kImageMetatable));
+        }
         if (image && runtime) runtime->materializeImage(*image);
-        if (!image || !image->pixels || runtime->context_depth >= runtime->context_stack.size()) return 0;
+        Image* next_target = image ? image : &runtime->screen;
+        if (!next_target->pixels ||
+            runtime->context_depth >= runtime->context_stack.size()) return 0;
         runtime->context_stack[runtime->context_depth++] =
             {runtime->target, runtime->clip, runtime->stencil};
-        runtime->target = image;
-        runtime->clip = {0, 0, image->width, image->height};
+        runtime->target = next_target;
+        runtime->clip = {0, 0, next_target->width, next_target->height};
         runtime->stencil = nullptr;
         return 0;
     }
@@ -5821,22 +5941,6 @@ struct Runtime::Impl {
                 : static_cast<float>(std::max<lua_Number>(
                     sound->loop_start_seconds, luaL_checknumber(state, 3)));
             sound->loop = true;
-        }
-        return 0;
-    }
-
-    static int cSoundSetBufferSize(lua_State* state) {
-        auto* sound = static_cast<Sound*>(
-            luaL_checkudata(state, 1, kSoundMetatable));
-        if (sound) {
-            // The hardware backend decodes a complete PDA stream before it is
-            // handed to the I2S owner, so there is no refill ring to resize.
-            // Retain the requested duration for API-observable compatibility;
-            // accepting it is equivalent to an already-sufficient buffer.
-            sound->buffer_size_seconds = static_cast<float>(
-                std::clamp<lua_Number>(luaL_checknumber(state, 2),
-                    static_cast<lua_Number>(0.01),
-                    static_cast<lua_Number>(60.0)));
         }
         return 0;
     }
@@ -7301,8 +7405,10 @@ struct Runtime::Impl {
             setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"getLength",cSoundGetLength);
             setFunction(-1,"getOffset",cSoundGetOffset);setFunction(-1,"setOffset",cSoundSetOffset);
             setFunction(-1,"setLoopRange",cSoundSetLoopRange);
-            setFunction(-1,"setBufferSize",cSoundSetBufferSize);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
+            // File players accept this streaming hint. PogoDate currently
+            // preloads audio, so the requested buffer size has no effect.
+            setFunction(-1,"setBufferSize",cNoop);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kSynthMetatable)){
             lua_pushvalue(lua,-1);lua_setfield(lua,-2,"__index");
@@ -7672,7 +7778,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.28: five-game API compatibility");
+                 "PogoDate API STEP11.6.29: next-game compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

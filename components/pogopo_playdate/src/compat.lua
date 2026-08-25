@@ -155,6 +155,165 @@ function table.deepcopy(source)
 end
 
 local gfx = playdate.graphics
+
+-- Lightweight sound graph compatibility. Sample/file players and synth voices
+-- remain native; channels and sequencers retain the SDK object lifecycle so
+-- games can configure them without crashing. Sequence note scheduling is not
+-- yet mixed by PogoDate, but its state and timing are observable as expected.
+do
+	local sound = playdate.sound
+	local Channel = {}; Channel.__index = Channel
+	function Channel.new()
+		return setmetatable({_sources={}, _volumeLeft=1, _volumeRight=1}, Channel)
+	end
+	function Channel:addSource(source) self._sources[#self._sources+1]=source; return source end
+	function Channel:removeSource(source)
+		for i=#self._sources,1,-1 do
+			if self._sources[i]==source then table.remove(self._sources,i); return true end
+		end
+		return false
+	end
+	function Channel:addEffect(effect) return effect end
+	function Channel:removeEffect(_) return true end
+	function Channel:setVolume(left,right)
+		self._volumeLeft=left or 1; self._volumeRight=right or self._volumeLeft
+	end
+	function Channel:getVolume() return self._volumeLeft,self._volumeRight end
+	function Channel:setPan(_) end
+	function Channel:setVolumeMod(_) end
+	sound.channel = sound.channel or {new=Channel.new}
+
+	local Track = {}; Track.__index = Track
+	function Track.new()
+		return setmetatable({_notes={}, _signals={}, _instrument=nil, _muted=false},Track)
+	end
+	function Track:addNote(step,note,length,velocity)
+		local value
+		if type(step)=="table" then
+			value={step=step.step or 0,note=step.note,length=step.length or 1,
+				velocity=step.velocity or 1}
+		else
+			value={step=step or 0,note=note,length=length or 1,velocity=velocity or 1}
+		end
+		self._notes[#self._notes+1]=value
+		return value
+	end
+	function Track:setNotes(notes) self._notes={}; for _,v in ipairs(notes or {}) do self:addNote(v) end end
+	function Track:getNotes(first,last)
+		local result={}
+		for _,v in ipairs(self._notes) do
+			if first==nil or (v.step>=first and (last==nil or v.step<=last)) then result[#result+1]=v end
+		end
+		return result
+	end
+	function Track:removeNote(step,note)
+		for i=#self._notes,1,-1 do local v=self._notes[i]; if v.step==step and v.note==note then table.remove(self._notes,i) end end
+	end
+	function Track:clearNotes() self._notes={} end
+	function Track:getLength()
+		local length=0; for _,v in ipairs(self._notes) do length=math.max(length,(v.step or 0)+(v.length or 0)) end
+		return length
+	end
+	function Track:getNotesActive() return 0 end
+	function Track:getPolyphony() return 0 end
+	function Track:setInstrument(value) self._instrument=value end
+	function Track:getInstrument() return self._instrument end
+	function Track:setMuted(value) self._muted=not not value end
+	function Track:addControlSignal(value) self._signals[#self._signals+1]=value; return value end
+	function Track:getControlSignals() return self._signals end
+	sound.track = sound.track or {new=Track.new}
+
+	local Sequence = {}; Sequence.__index = Sequence
+	function Sequence.new(_)
+		return setmetatable({_tracks={},_tempo=20,_playing=false,_step=0,
+			_started=0,_loopStart=0,_loopEnd=nil,_loopCount=0,_finish=nil},Sequence)
+	end
+	function Sequence:getLength()
+		local length=0; for _,track in ipairs(self._tracks) do if track then length=math.max(length,track:getLength()) end end
+		return length
+	end
+	function Sequence:addTrack(track) track=track or Track.new(); self._tracks[#self._tracks+1]=track; return track end
+	function Sequence:setTrackAtIndex(index,track) self._tracks[index]=track end
+	function Sequence:getTrackAtIndex(index) return self._tracks[index] end
+	function Sequence:getTrackCount() return #self._tracks end
+	function Sequence:setTempo(value) self._tempo=tonumber(value) or self._tempo end
+	function Sequence:getTempo() return self._tempo end
+	function Sequence:setLoops(a,b,c)
+		if b==nil then self._loopStart=0; self._loopEnd=self:getLength(); self._loopCount=a or 0
+		else self._loopStart=a or 0; self._loopEnd=b; self._loopCount=c or 0 end
+	end
+	function Sequence:play(callback)
+		self._playing=true; self._finish=callback; self._started=playdate.getCurrentTimeMilliseconds()-(self._step/self._tempo)*1000
+	end
+	function Sequence:stop()
+		local was=self._playing; self._playing=false
+		if was and self._finish then local callback=self._finish; self._finish=nil; callback(self) end
+	end
+	function Sequence:isPlaying() return self._playing end
+	function Sequence:goToStep(step,_) self._step=step or 0; if self._playing then self._started=playdate.getCurrentTimeMilliseconds()-(self._step/self._tempo)*1000 end end
+	function Sequence:getCurrentStep()
+		if self._playing then self._step=math.floor((playdate.getCurrentTimeMilliseconds()-self._started)*self._tempo/1000) end
+		local ending=self._loopEnd or self:getLength()
+		if ending>self._loopStart and self._step>=ending then
+			self._step=self._loopStart+(self._step-self._loopStart)%(ending-self._loopStart)
+			self._started=playdate.getCurrentTimeMilliseconds()-(self._step/self._tempo)*1000
+		end
+		return self._step
+	end
+	function Sequence:allNotesOff() end
+	sound.sequence = sound.sequence or {new=Sequence.new}
+end
+
+-- CoreLibs/animator-compatible numeric/point interpolation. The native clock
+-- is used so objects created while loading advance correctly on hardware.
+do
+	local Animator={}; Animator.__index=Animator
+	local function interpolate(a,b,t)
+		if type(a)=="number" and type(b)=="number" then return a+(b-a)*t end
+		if type(a)=="table" and type(b)=="table" then
+			local x=(a.x or 0)+((b.x or 0)-(a.x or 0))*t
+			local y=(a.y or 0)+((b.y or 0)-(a.y or 0))*t
+			if playdate.geometry and playdate.geometry.point then return playdate.geometry.point.new(x,y) end
+			return {x=x,y=y}
+		end
+		return t>=1 and b or a
+	end
+	function Animator.new(duration,startValue,endValue,easing,startOffset)
+		return setmetatable({duration=math.max(0,tonumber(duration) or 0),
+			startValue=startValue,endValue=endValue,easingFunction=easing,
+			startTime=playdate.getCurrentTimeMilliseconds()+(tonumber(startOffset) or 0),
+			repeatCount=0,reverses=false,_observedEnd=false},Animator)
+	end
+	function Animator:_progressAt(time)
+		if self.duration<=0 then return 1,true end
+		local raw=(time-self.startTime)/self.duration
+		if raw<=0 then return 0,false end
+		local span=self.reverses and 2 or 1
+		local cycles=math.floor(raw/span)
+		local unlimited=self.repeatCount==-1
+		if not unlimited and cycles>self.repeatCount then return self.reverses and 0 or 1,true end
+		local position=raw-cycles*span
+		if self.reverses and position>1 then position=2-position end
+		return math.max(0,math.min(1,position)),false
+	end
+	function Animator:valueAtTime(time)
+		local p,ended=self:_progressAt(self.startTime+(tonumber(time) or 0))
+		if ended then self._observedEnd=true end
+		local eased=self.easingFunction and self.easingFunction(p,0,1,1,self.s,self.a,self.p) or p
+		return interpolate(self.startValue,self.endValue,eased)
+	end
+	function Animator:currentValue()
+		local p,ended=self:_progressAt(playdate.getCurrentTimeMilliseconds())
+		if ended then self._observedEnd=true end
+		local eased=self.easingFunction and self.easingFunction(p,0,1,1,self.s,self.a,self.p) or p
+		return interpolate(self.startValue,self.endValue,eased)
+	end
+	function Animator:progress() local p,ended=self:_progressAt(playdate.getCurrentTimeMilliseconds()); if ended then self._observedEnd=true end; return p end
+	function Animator:ended() return self._observedEnd end
+	function Animator:reset(duration) if duration~=nil then self.duration=math.max(0,tonumber(duration) or 0) end; self.startTime=playdate.getCurrentTimeMilliseconds(); self._observedEnd=false end
+	gfx.animator=gfx.animator or {new=Animator.new}
+end
+
 local sprites = {}
 local collision_sprites = {}
 local wall_cells = {}
@@ -2556,212 +2715,4 @@ function playdate.frameTimer.updateTimers()
 	end
 	pendingFrameTimers = {}
 	frameTimers = active
-end
-
--- CoreLibs/animator is not present in every compiled PDX even though shared
--- libraries such as Panels use gfx.animator directly.  Provide the public
--- time-based animator at boot; a bundled CoreLibs implementation can still
--- replace this table later when a game imports it explicitly.
-local Animator = {}
-Animator.__index = Animator
-
-local function animatorLinear(t, b, c, d)
-	if d <= 0 then return b + c end
-	return b + c * (t / d)
-end
-
-local function animatorBlend(from, to, progress)
-	if type(from) == "number" and type(to) == "number" then
-		return from + (to - from) * progress
-	end
-	if type(from) == "table" and type(to) == "table" then
-		local value = {}
-		for key, startValue in pairs(from) do
-			local endValue = to[key]
-			if type(startValue) == "number" and type(endValue) == "number" then
-				value[key] = startValue + (endValue - startValue) * progress
-			else
-				value[key] = progress < 1 and startValue or endValue
-			end
-		end
-		for key, endValue in pairs(to) do
-			if value[key] == nil then value[key] = endValue end
-		end
-		return setmetatable(value, getmetatable(from))
-	end
-	return progress < 1 and from or to
-end
-
-local function animatorElapsed(self)
-	local elapsed = playdate.getCurrentTimeMilliseconds() - self._startedAt
-	return math.max(0, elapsed - self._delay)
-end
-
-local function animatorPosition(self)
-	local elapsed = animatorElapsed(self)
-	if elapsed <= 0 then return 0, false, false end
-	local duration = math.max(1, self._duration)
-	local cycles = math.floor(elapsed / duration)
-	local within = elapsed % duration
-	local repeatCount = math.max(0, math.floor(tonumber(self.repeatCount) or 0))
-	local totalCycles = repeatCount + 1
-	if cycles >= totalCycles then
-		local reverse = self.reverses == true and totalCycles % 2 == 0
-		return reverse and 0 or 1, true, reverse
-	end
-	local reverse = self.reverses == true and cycles % 2 == 1
-	local position = within / duration
-	if reverse then position = 1 - position end
-	return position, false, reverse
-end
-
-function Animator:currentValue()
-	local position, finished, reversed = animatorPosition(self)
-	local easing = reversed and self.reverseEasingFunction or self.easingFunction
-	local eased = position
-	if type(easing) == "function" then
-		local ok, result = pcall(easing, position * self._duration, 0, 1,
-			self._duration, self.easingAmplitude, self.easingPeriod)
-		if ok and type(result) == "number" then eased = result end
-	end
-	if finished then eased = position end
-	return animatorBlend(self.startValue, self.endValue, eased)
-end
-
-function Animator:ended()
-	local _, finished = animatorPosition(self)
-	return finished
-end
-
-function Animator:progress()
-	local position = animatorPosition(self)
-	return position
-end
-
-function Animator:remainingTime()
-	return math.max(0, self._delay + self._duration *
-		(math.max(0, math.floor(tonumber(self.repeatCount) or 0)) + 1) -
-		(playdate.getCurrentTimeMilliseconds() - self._startedAt))
-end
-
-function Animator:duration() return self._duration end
-function Animator:reset(duration)
-	if duration ~= nil then self._duration = math.max(0, tonumber(duration) or 0) end
-	self._startedAt = playdate.getCurrentTimeMilliseconds()
-	return self
-end
-function Animator:reverse()
-	self.startValue, self.endValue = self.endValue, self.startValue
-	self._startedAt = playdate.getCurrentTimeMilliseconds()
-	return self
-end
-
-playdate.graphics.animator = playdate.graphics.animator or {}
-function playdate.graphics.animator.new(duration, startValue, endValue,
-	easingFunction, startDelay)
-	return setmetatable({
-		_duration=math.max(0, tonumber(duration) or 0),
-		_delay=math.max(0, tonumber(startDelay) or 0),
-		_startedAt=playdate.getCurrentTimeMilliseconds(),
-		startValue=startValue,
-		endValue=endValue,
-		easingFunction=type(easingFunction) == "function"
-			and easingFunction or animatorLinear,
-		reverseEasingFunction=nil,
-		repeatCount=0,
-		reverses=false,
-	}, Animator)
-end
-
--- Mixer channels only route sources/effects on real Playdate hardware.  Audio
--- objects on Pogopo already feed the single mono mixer, so this object keeps
--- the same ownership and volume API without duplicating decoded PCM buffers.
-local SoundChannel = {}
-SoundChannel.__index = SoundChannel
-function SoundChannel:addSource(source)
-	if source ~= nil then self._sources[source] = true end
-	return source
-end
-function SoundChannel:removeSource(source)
-	self._sources[source] = nil
-end
-function SoundChannel:addEffect(effect)
-	if effect ~= nil then self._effects[effect] = true end
-	return effect
-end
-function SoundChannel:removeEffect(effect)
-	self._effects[effect] = nil
-end
-function SoundChannel:setVolume(left, right)
-	self._leftVolume = math.max(0, math.min(1, tonumber(left) or 1))
-	self._rightVolume = math.max(0, math.min(1, tonumber(right) or self._leftVolume))
-end
-function SoundChannel:getVolume() return self._leftVolume, self._rightVolume end
-function SoundChannel:setPan(pan)
-	self._pan = math.max(-1, math.min(1, tonumber(pan) or 0))
-end
-function SoundChannel:getPan() return self._pan end
-
-playdate.sound.channel = playdate.sound.channel or {}
-function playdate.sound.channel.new()
-	return setmetatable({_sources={}, _effects={}, _leftVolume=1,
-		_rightVolume=1, _pan=0}, SoundChannel)
-end
-
--- Pulp and several SDK examples construct sound.sequence during startup.  The
--- ESP32 backend currently has sample/file players and synth voices but no MIDI
--- scheduler, so expose the complete lifecycle and track container.  A loaded
--- sequence is silent, but it advances in time and never prevents gameplay.
-local SoundSequence = {}
-SoundSequence.__index = SoundSequence
-function SoundSequence:load(path) self.path = path or ""; return true end
-function SoundSequence:play(callback)
-	self.playing = true
-	self.paused = false
-	self._startedAt = playdate.sound.getCurrentTime()
-	self._finishedCallback = callback or self._finishedCallback
-	return true
-end
-function SoundSequence:stop()
-	self.playing = false; self.paused = false; self.currentStep = 0
-end
-function SoundSequence:pause()
-	if self.playing then self.currentStep = self:getCurrentStep() end
-	self.playing = false; self.paused = true
-end
-function SoundSequence:isPlaying() return self.playing end
-function SoundSequence:setLoops(loops) self.loops = loops ~= false and loops ~= 0 end
-function SoundSequence:getLoops() return self.loops end
-function SoundSequence:setTempo(tempo)
-	self.tempo = math.max(1, tonumber(tempo) or 120)
-end
-function SoundSequence:getTempo() return self.tempo end
-function SoundSequence:setCurrentStep(step)
-	self.currentStep = math.max(0, tonumber(step) or 0)
-	self._startedAt = playdate.sound.getCurrentTime()
-end
-function SoundSequence:getCurrentStep()
-	if not self.playing then return self.currentStep end
-	local elapsed = math.max(0, playdate.sound.getCurrentTime() - self._startedAt)
-	local step = self.currentStep + elapsed * self.tempo / 60
-	if self.length > 0 and self.loops then step = step % self.length end
-	return step
-end
-function SoundSequence:getLength() return self.length end
-function SoundSequence:addTrack(track)
-	self.tracks[#self.tracks + 1] = track
-	return track
-end
-function SoundSequence:getTrackAtIndex(index) return self.tracks[index] end
-function SoundSequence:getTrackCount() return #self.tracks end
-function SoundSequence:setFinishedCallback(callback) self._finishedCallback = callback end
-function SoundSequence:allNotesOff() end
-
-playdate.sound.sequence = playdate.sound.sequence or {}
-function playdate.sound.sequence.new(path)
-	local sequence = setmetatable({path="", tracks={}, playing=false,
-		paused=false, loops=false, tempo=120, length=0, currentStep=0,
-		_startedAt=playdate.sound.getCurrentTime()}, SoundSequence)
-	if path ~= nil then sequence:load(path) end
-	return sequence
 end
