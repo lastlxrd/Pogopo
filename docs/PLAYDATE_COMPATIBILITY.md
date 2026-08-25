@@ -317,6 +317,10 @@ need fidelity work even when their functions exist. Hillslide itself is at
   scanning has been removed, but unusually deep Lua/C callback recursion can
   still consume that finite native stack; startup logs expose its minimum free
   value for hardware reports.
+- STEP11.6.28 adds mixer channels, file/sample-player buffer-size requests,
+  time-based graphics animators, sound-sequence lifecycle objects and string
+  alignment names used by community UI libraries. Sound sequences currently
+  preserve timing and ownership behavior but do not synthesize MIDI.
 
 ## Testing another free game
 

@@ -158,6 +158,7 @@ struct Sound {
     bool paused = false;
     bool offset_pending = false;
     int16_t cache_index = -1;
+    float buffer_size_seconds = 0.0f;
     char path[160]{};
 };
 
@@ -4308,7 +4309,15 @@ struct Runtime::Impl {
         const char* value = luaL_tolstring(state, 1, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
-        const int alignment = static_cast<int>(luaL_optinteger(state, 4, 0));
+        int alignment = 0;
+        if (lua_type(state, 4) == LUA_TSTRING) {
+            const char* name = lua_tostring(state, 4);
+            if (name && (!strcasecmp(name, "center") ||
+                         !strcasecmp(name, "centre"))) alignment = 1;
+            else if (name && !strcasecmp(name, "right")) alignment = 2;
+        } else {
+            alignment = static_cast<int>(luaL_optinteger(state, 4, 0));
+        }
         const int width = runtime->textWidth(value, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -4441,7 +4450,15 @@ struct Runtime::Impl {
         const char* text = luaL_tolstring(state, 2, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 4)));
-        const int alignment = static_cast<int>(luaL_optinteger(state, 5, 0));
+        int alignment = 0;
+        if (lua_type(state, 5) == LUA_TSTRING) {
+            const char* name = lua_tostring(state, 5);
+            if (name && (!strcasecmp(name, "center") ||
+                         !strcasecmp(name, "centre"))) alignment = 1;
+            else if (name && !strcasecmp(name, "right")) alignment = 2;
+        } else {
+            alignment = static_cast<int>(luaL_optinteger(state, 5, 0));
+        }
         const int width = runtime->textWidthForFont(font, text, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -5804,6 +5821,22 @@ struct Runtime::Impl {
                 : static_cast<float>(std::max<lua_Number>(
                     sound->loop_start_seconds, luaL_checknumber(state, 3)));
             sound->loop = true;
+        }
+        return 0;
+    }
+
+    static int cSoundSetBufferSize(lua_State* state) {
+        auto* sound = static_cast<Sound*>(
+            luaL_checkudata(state, 1, kSoundMetatable));
+        if (sound) {
+            // The hardware backend decodes a complete PDA stream before it is
+            // handed to the I2S owner, so there is no refill ring to resize.
+            // Retain the requested duration for API-observable compatibility;
+            // accepting it is equivalent to an already-sufficient buffer.
+            sound->buffer_size_seconds = static_cast<float>(
+                std::clamp<lua_Number>(luaL_checknumber(state, 2),
+                    static_cast<lua_Number>(0.01),
+                    static_cast<lua_Number>(60.0)));
         }
         return 0;
     }
@@ -7268,6 +7301,7 @@ struct Runtime::Impl {
             setFunction(-1,"setRate",cSoundSetRate);setFunction(-1,"getLength",cSoundGetLength);
             setFunction(-1,"getOffset",cSoundGetOffset);setFunction(-1,"setOffset",cSoundSetOffset);
             setFunction(-1,"setLoopRange",cSoundSetLoopRange);
+            setFunction(-1,"setBufferSize",cSoundSetBufferSize);
             setFunction(-1,"load",cSoundLoad);setFunction(-1,"setStopOnUnderrun",cNoop);
         } lua_pop(lua,1);
         if(luaL_newmetatable(lua,kSynthMetatable)){
@@ -7638,7 +7672,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.27: Noble image-backed sprite rendering");
+                 "PogoDate API STEP11.6.28: five-game API compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
