@@ -620,6 +620,23 @@ struct Runtime::Impl {
         Image* target = nullptr;
         ClipRect clip{};
         Image* stencil = nullptr;
+        PdFont* font = nullptr;
+        int font_ref = LUA_NOREF;
+        uint8_t draw_color = Black;
+        uint8_t solid_draw_color = Black;
+        uint8_t draw_pattern_color = Black;
+        bool draw_pattern_transparent = false;
+        std::array<uint8_t, 8> draw_pattern{};
+        std::array<uint8_t, 64> draw_pattern_pixels{};
+        bool draw_pattern_uses_image = false;
+        int pattern_offset_x = 0;
+        int pattern_offset_y = 0;
+        int draw_mode = Copy;
+        int line_width = 1;
+        int stroke_location = 0;
+        int draw_offset_x = 0;
+        int draw_offset_y = 0;
+        int font_tracking = 0;
     };
     std::array<Context, 8> context_stack{};
     size_t context_depth = 0;
@@ -3449,7 +3466,12 @@ struct Runtime::Impl {
     }
 
     static int cSetLineWidth(lua_State* state) {
-        self(state)->line_width = std::clamp(static_cast<int>(luaL_checkinteger(state, 1)), 1, 4);
+        const lua_Number width = luaL_checknumber(state, 1);
+        if (!std::isfinite(width)) {
+            return luaL_argerror(state, 1, "line width must be finite");
+        }
+        self(state)->line_width = std::clamp(
+            static_cast<int>(std::lround(width)), 1, 4);
         return 0;
     }
 
@@ -3605,16 +3627,52 @@ struct Runtime::Impl {
     void roundedRect(int x, int y, int width, int height, int radius,
                      bool fill) {
         const int inset = std::max(1, line_width);
+        const auto spanAtY = [&](int box_x, int box_y, int box_width,
+                                 int box_height, int box_radius, int py,
+                                 int& left, int& right) {
+            if (box_width <= 0 || box_height <= 0 || py < box_y ||
+                py >= box_y + box_height) return false;
+            left = box_x;
+            right = box_x + box_width - 1;
+            while (left <= right && !insideRoundedRect(
+                    left, py, box_x, box_y, box_width, box_height,
+                    box_radius)) ++left;
+            while (right >= left && !insideRoundedRect(
+                    right, py, box_x, box_y, box_width, box_height,
+                    box_radius)) --right;
+            return left <= right;
+        };
+
+        // A rounded rectangle is one or two horizontal spans per scanline.
+        // Sending those spans through fillRect preserves patterns, stencils,
+        // draw modes and clipping while avoiding a Lua-visible menu frame
+        // doing tens of thousands of generic per-pixel compositor calls.
         for (int py = y; py < y + height; ++py) {
-            for (int px = x; px < x + width; ++px) {
-                if (!insideRoundedRect(px, py, x, y, width, height, radius)) {
-                    continue;
+            int outer_left = 0, outer_right = -1;
+            if (!spanAtY(x, y, width, height, radius, py,
+                         outer_left, outer_right)) continue;
+            if (fill) {
+                fillRect(outer_left, py, outer_right - outer_left + 1, 1,
+                         draw_color, false);
+                continue;
+            }
+            int inner_left = 0, inner_right = -1;
+            const bool has_inner = spanAtY(
+                x + inset, y + inset, width - inset * 2,
+                height - inset * 2, std::max(0, radius - inset), py,
+                inner_left, inner_right);
+            if (!has_inner) {
+                fillRect(outer_left, py, outer_right - outer_left + 1, 1,
+                         draw_color, false);
+            } else {
+                if (outer_left < inner_left) {
+                    fillRect(outer_left, py, inner_left - outer_left, 1,
+                             draw_color, false);
                 }
-                const bool inner = !fill && insideRoundedRect(
-                    px, py, x + inset, y + inset,
-                    width - inset * 2, height - inset * 2,
-                    std::max(0, radius - inset));
-                if (!inner) putLogicalPixel(px, py, draw_color);
+                if (inner_right < outer_right) {
+                    fillRect(inner_right + 1, py, outer_right - inner_right, 1,
+                             draw_color, false);
+                }
             }
         }
     }
@@ -4754,11 +4812,37 @@ struct Runtime::Impl {
                 luaL_checkudata(state, 1, kImageMetatable));
         }
         if (image && runtime) runtime->materializeImage(*image);
-        Image* next_target = image ? image : &runtime->screen;
+        // With no image argument, Playdate only saves the drawing state and
+        // keeps the current focus. Panels relies on this while drawing text
+        // inside an off-screen panel canvas.
+        Image* next_target = image ? image : runtime->target;
         if (!next_target->pixels ||
             runtime->context_depth >= runtime->context_stack.size()) return 0;
-        runtime->context_stack[runtime->context_depth++] =
-            {runtime->target, runtime->clip, runtime->stencil};
+        Context& saved = runtime->context_stack[runtime->context_depth++];
+        saved.target = runtime->target;
+        saved.clip = runtime->clip;
+        saved.stencil = runtime->stencil;
+        saved.font = runtime->current_font;
+        saved.font_ref = LUA_NOREF;
+        if (runtime->current_font_ref != LUA_NOREF) {
+            lua_rawgeti(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+            saved.font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
+        }
+        saved.draw_color = runtime->draw_color;
+        saved.solid_draw_color = runtime->solid_draw_color;
+        saved.draw_pattern_color = runtime->draw_pattern_color;
+        saved.draw_pattern_transparent = runtime->draw_pattern_transparent;
+        saved.draw_pattern = runtime->draw_pattern;
+        saved.draw_pattern_pixels = runtime->draw_pattern_pixels;
+        saved.draw_pattern_uses_image = runtime->draw_pattern_uses_image;
+        saved.pattern_offset_x = runtime->pattern_offset_x;
+        saved.pattern_offset_y = runtime->pattern_offset_y;
+        saved.draw_mode = runtime->draw_mode;
+        saved.line_width = runtime->line_width;
+        saved.stroke_location = runtime->stroke_location;
+        saved.draw_offset_x = runtime->draw_offset_x;
+        saved.draw_offset_y = runtime->draw_offset_y;
+        saved.font_tracking = runtime->font_tracking;
         runtime->target = next_target;
         runtime->clip = {0, 0, next_target->width, next_target->height};
         runtime->stencil = nullptr;
@@ -4768,10 +4852,31 @@ struct Runtime::Impl {
     static int cPopContext(lua_State* state) {
         Impl* runtime = self(state);
         if (runtime->context_depth == 0) return 0;
-        const Context restored = runtime->context_stack[--runtime->context_depth];
+        Context restored = runtime->context_stack[--runtime->context_depth];
+        runtime->context_stack[runtime->context_depth].font_ref = LUA_NOREF;
         runtime->target = restored.target;
         runtime->clip = restored.clip;
         runtime->stencil = restored.stencil;
+        runtime->current_font = restored.font;
+        if (runtime->current_font_ref != LUA_NOREF) {
+            luaL_unref(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
+        }
+        runtime->current_font_ref = restored.font_ref;
+        runtime->draw_color = restored.draw_color;
+        runtime->solid_draw_color = restored.solid_draw_color;
+        runtime->draw_pattern_color = restored.draw_pattern_color;
+        runtime->draw_pattern_transparent = restored.draw_pattern_transparent;
+        runtime->draw_pattern = restored.draw_pattern;
+        runtime->draw_pattern_pixels = restored.draw_pattern_pixels;
+        runtime->draw_pattern_uses_image = restored.draw_pattern_uses_image;
+        runtime->pattern_offset_x = restored.pattern_offset_x;
+        runtime->pattern_offset_y = restored.pattern_offset_y;
+        runtime->draw_mode = restored.draw_mode;
+        runtime->line_width = restored.line_width;
+        runtime->stroke_location = restored.stroke_location;
+        runtime->draw_offset_x = restored.draw_offset_x;
+        runtime->draw_offset_y = restored.draw_offset_y;
+        runtime->font_tracking = restored.font_tracking;
         return 0;
     }
 
@@ -7778,7 +7883,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.29: next-game compatibility");
+                 "PogoDate API STEP11.6.30: render and audio compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

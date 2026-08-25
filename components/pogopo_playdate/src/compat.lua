@@ -183,6 +183,67 @@ do
 	function Channel:setVolumeMod(_) end
 	sound.channel = sound.channel or {new=Channel.new}
 
+	local Instrument = {}; Instrument.__index = Instrument
+	function Instrument.new(synth)
+		local value=setmetatable({_voices={},_transpose=0,_volumeLeft=1,
+			_volumeRight=1,_active={}},Instrument)
+		if synth~=nil then value:addVoice(synth) end
+		return value
+	end
+	function Instrument:addVoice(voice,note,rangeEnd,transpose)
+		self._voices[#self._voices+1]={voice=voice,note=note,
+			rangeEnd=rangeEnd,transpose=transpose or 0}
+		return voice
+	end
+	function Instrument:setTranspose(value) self._transpose=tonumber(value) or 0 end
+	function Instrument:playNote(note,velocity,length,when)
+		local entry=self._voices[1]
+		if entry and entry.voice and type(entry.voice.playNote)=="function" then
+			entry.voice:playNote(note,velocity,length,when)
+		end
+		self._active[note]=true
+		return entry and entry.voice or nil
+	end
+	function Instrument:playMIDINote(note,velocity,length,when)
+		local entry=self._voices[1]
+		if entry and entry.voice then
+			if type(entry.voice.playMIDINote)=="function" then
+				entry.voice:playMIDINote(note,velocity,length,when)
+			elseif type(entry.voice.playNote)=="function" then
+				entry.voice:playNote(note,velocity,length,when)
+			end
+		end
+		self._active[note]=true
+		return entry and entry.voice or nil
+	end
+	function Instrument:noteOff(note,when)
+		for _,entry in ipairs(self._voices) do
+			if entry.voice and type(entry.voice.noteOff)=="function" then
+				entry.voice:noteOff(note,when)
+			end
+		end
+		self._active[note]=nil
+	end
+	function Instrument:allNotesOff()
+		for _,entry in ipairs(self._voices) do
+			if entry.voice and type(entry.voice.allNotesOff)=="function" then
+				entry.voice:allNotesOff()
+			end
+		end
+		self._active={}
+	end
+	function Instrument:setVolume(left,right)
+		self._volumeLeft=tonumber(left) or 1
+		self._volumeRight=tonumber(right) or self._volumeLeft
+		for _,entry in ipairs(self._voices) do
+			if entry.voice and type(entry.voice.setVolume)=="function" then
+				entry.voice:setVolume(self._volumeLeft,self._volumeRight)
+			end
+		end
+	end
+	function Instrument:getVolume() return self._volumeLeft,self._volumeRight end
+	sound.instrument = sound.instrument or {new=Instrument.new}
+
 	local Track = {}; Track.__index = Track
 	function Track.new()
 		return setmetatable({_notes={}, _signals={}, _instrument=nil, _muted=false},Track)
