@@ -50,7 +50,7 @@ esp_err_t Storage::begin(const Config& config) {
     config_ = config;
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.width = 4;
@@ -67,16 +67,41 @@ esp_err_t Storage::begin(const Config& config) {
     mount.max_files = config.max_files;
     mount.allocation_unit_size = config.allocation_unit_size;
 
-    const esp_err_t err = esp_vfs_fat_sdmmc_mount(config.mount_point, &host, &slot, &mount, &card_);
+    esp_err_t err = esp_vfs_fat_sdmmc_mount(
+        config.mount_point, &host, &slot, &mount, &card_);
+    if (err != ESP_OK) {
+        // Marginal cards, long wires and weak pull-ups may not be reliable at
+        // 40 MHz. Retry at the previous 20 MHz clock instead of making the
+        // console unbootable after the performance upgrade.
+        ESP_LOGW(TAG, "SD high-speed mount failed: %s; retrying at %d kHz",
+                 esp_err_to_name(err), SDMMC_FREQ_DEFAULT);
+        card_ = nullptr;
+        host = SDMMC_HOST_DEFAULT();
+        host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+        err = esp_vfs_fat_sdmmc_mount(
+            config.mount_point, &host, &slot, &mount, &card_);
+    }
     if (err != ESP_OK) {
         card_ = nullptr;
         ESP_LOGW(TAG, "SD mount failed: %s", esp_err_to_name(err));
         return err;
     }
     mounted_ = true;
-    ESP_LOGI(TAG, "SD mounted at %s, capacity %.1f MB", config.mount_point,
+    int actual_freq_khz = host.max_freq_khz;
+    if (sdmmc_host_get_real_freq(host.slot, &actual_freq_khz) != ESP_OK) {
+        actual_freq_khz = host.max_freq_khz;
+    }
+    ESP_LOGI(TAG, "SD mounted at %s, %d kHz, capacity %.1f MB",
+             config.mount_point, actual_freq_khz,
              static_cast<double>(capacityBytes()) / (1024.0 * 1024.0));
     return ESP_OK;
+}
+
+esp_err_t Storage::remount() {
+    if (mounted_) return ESP_OK;
+    const Config retry = config_;
+    ESP_LOGI(TAG, "Retrying SD mount at %s", retry.mount_point);
+    return begin(retry);
 }
 
 void Storage::end() {
@@ -233,4 +258,3 @@ void Storage::freeWav(WavData& wav) {
 }
 
 } // namespace pogopo::storage
-

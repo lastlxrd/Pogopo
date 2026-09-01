@@ -57,9 +57,11 @@ esp_err_t Audio::begin(const Config& config) {
     last_write_us_.store(0);
     max_write_us_.store(0);
     voice_serial_ = 0;
+    pcm_serial_ = 0;
     noise_state_ = 0xA5C31E27u;
     silenceVoices();
     clearPcm();
+    clearMusicPcm();
     initSineTable();
 
     realtime_capacity_frames_ = config_.realtime_buffer_frames;
@@ -210,7 +212,8 @@ void Audio::end() {
     if (queue_) {
         Command pending;
         while (xQueueReceive(queue_, &pending, 0) == pdTRUE) {
-            if (pending.type == CommandType::PlayPcm && pending.pcm_samples) {
+            if ((pending.type == CommandType::PlayPcm ||
+                 pending.type == CommandType::PlayMusicPcm) && pending.pcm_samples) {
                 heap_caps_free(pending.pcm_samples);
             }
         }
@@ -224,6 +227,7 @@ void Audio::end() {
 
     silenceVoices();
     clearPcm();
+    clearMusicPcm();
     active_voices_.store(0);
     cleanupI2s();
     cleanupStreamResources();
@@ -261,6 +265,44 @@ bool Audio::tone(uint16_t frequency_hz, uint16_t duration_ms,
     return enqueue(command);
 }
 
+uint32_t Audio::playSynthTone(uint16_t frequency_hz, uint16_t duration_ms,
+                              uint8_t volume, Waveform waveform,
+                              uint16_t attack_ms, uint16_t decay_ms,
+                              uint16_t sustain_q15, uint16_t release_ms) {
+    if (!enabled_.load()) {
+        return 1;
+    }
+    const uint32_t sample_rate = config_.sample_rate ? config_.sample_rate : 32768;
+    if (frequency_hz < 20 || frequency_hz >= sample_rate / 2U ||
+        duration_ms == 0) {
+        return 0;
+    }
+
+    uint32_t token = next_synth_token_.fetch_add(1);
+    if (token == 0) token = next_synth_token_.fetch_add(1);
+    Command command;
+    command.type = CommandType::PlayTone;
+    command.waveform = waveform;
+    command.frequency_hz = frequency_hz;
+    command.duration_ms = duration_ms;
+    command.volume = std::min<uint8_t>(volume, 100);
+    command.attack_ms = std::min<uint16_t>(attack_ms, duration_ms);
+    command.decay_ms = std::min<uint16_t>(decay_ms, duration_ms);
+    command.sustain_q15 = std::min<uint16_t>(sustain_q15, 32767);
+    command.release_ms = std::min<uint16_t>(release_ms, duration_ms);
+    command.synth_token = token;
+    return enqueue(command) ? token : 0;
+}
+
+bool Audio::stopSynthTone(uint32_t token, uint16_t release_ms) {
+    if (token == 0) return false;
+    Command command;
+    command.type = CommandType::StopSynthTone;
+    command.synth_token = token;
+    command.release_ms = release_ms;
+    return enqueue(command);
+}
+
 bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate, uint8_t volume) {
     if (!samples || frames == 0 || sample_rate < 8000 || sample_rate > 96000) {
         if (samples) {
@@ -284,6 +326,36 @@ bool Audio::playPcmOwned(int16_t* samples, uint32_t frames, uint32_t sample_rate
         return false;
     }
     return true;
+}
+
+bool Audio::playMusicPcmOwned(int16_t* samples, uint32_t frames,
+                              uint32_t sample_rate, uint8_t volume, bool loop) {
+    if (!samples || frames == 0 || sample_rate < 8000 || sample_rate > 96000) {
+        if (samples) heap_caps_free(samples);
+        return false;
+    }
+    if (!enabled_.load()) {
+        heap_caps_free(samples);
+        return true;
+    }
+    Command command;
+    command.type = CommandType::PlayMusicPcm;
+    command.volume = std::min<uint8_t>(volume, 100);
+    command.pcm_samples = samples;
+    command.pcm_frames = frames;
+    command.pcm_sample_rate = sample_rate;
+    command.pcm_loop = loop;
+    if (!enqueue(command)) {
+        heap_caps_free(samples);
+        return false;
+    }
+    return true;
+}
+
+void Audio::stopMusicPcm() {
+    Command command;
+    command.type = CommandType::StopMusicPcm;
+    enqueue(command);
 }
 
 void Audio::stopAll() {
@@ -541,6 +613,7 @@ void Audio::task_loop() {
             // four synth voices, WAV streaming and the generic mixer.
             silenceVoices();
             clearPcm();
+            clearMusicPcm();
             active_voices_.store(0);
             for (size_t frame = 0; frame < config_.render_frames; ++frame) {
                 int32_t left = 0;
@@ -558,6 +631,7 @@ void Audio::task_loop() {
                     mono += renderVoice(voice);
                 }
                 mono += renderPcm();
+                mono += renderMusicPcm();
                 mono += renderStream();
 
                 int32_t realtime_left = 0;
@@ -636,9 +710,19 @@ void Audio::processCommands() {
             case CommandType::PlayPcm:
                 startPcm(command);
                 break;
+            case CommandType::PlayMusicPcm:
+                startMusicPcm(command);
+                break;
+            case CommandType::StopMusicPcm:
+                clearMusicPcm();
+                break;
+            case CommandType::StopSynthTone:
+                stopTone(command);
+                break;
             case CommandType::StopAll:
                 silenceVoices();
                 clearPcm();
+                clearMusicPcm();
                 break;
         }
     }
@@ -702,46 +786,141 @@ void Audio::startTone(const Command& command) {
         command.duration_ms,
         command.volume,
         command.waveform,
-        3,
-        8,
+        command.attack_ms,
+        command.release_ms,
+        command.decay_ms,
+        command.sustain_q15,
     };
     voice.notes = &voice.custom_note;
     voice.note_count = 1;
     voice.note_index = 0;
     voice.phase = 0;
+    voice.synth_token = command.synth_token;
     loadCurrentNote(voice);
 }
 
+void Audio::stopTone(const Command& command) {
+    for (auto& voice : voices_) {
+        if (!voice.active || voice.synth_token != command.synth_token) continue;
+        if (command.release_ms == 0) {
+            voice = Voice{};
+        } else {
+            voice.release_samples = static_cast<uint32_t>(
+                (static_cast<uint64_t>(command.release_ms) * config_.sample_rate) /
+                1000U);
+            voice.release_samples = std::max<uint32_t>(1U, voice.release_samples);
+            voice.release_samples = std::min(
+                voice.release_samples, voice.samples_total);
+            voice.samples_left = std::min(voice.samples_left, voice.release_samples);
+        }
+        break;
+    }
+}
+
 void Audio::startPcm(Command& command) {
-    clearPcm();
-    pcm_.samples = command.pcm_samples;
-    pcm_.frames = command.pcm_frames;
-    pcm_.position_q16 = 0;
-    pcm_.step_q16 =
+    PcmVoice* selected = nullptr;
+    for (auto& voice : pcm_voices_) {
+        if (!voice.active) {
+            selected = &voice;
+            break;
+        }
+    }
+    if (!selected) {
+        selected = &pcm_voices_[0];
+        for (auto& voice : pcm_voices_) {
+            if (voice.serial < selected->serial) selected = &voice;
+        }
+        if (selected->samples) heap_caps_free(selected->samples);
+        *selected = {};
+    }
+    selected->samples = command.pcm_samples;
+    selected->frames = command.pcm_frames;
+    selected->position_q16 = 0;
+    selected->step_q16 =
         (static_cast<uint64_t>(command.pcm_sample_rate) << 16U) / config_.sample_rate;
-    pcm_.step_q16 = std::max<uint64_t>(1U, pcm_.step_q16);
-    pcm_.volume = command.volume;
-    pcm_.active = true;
+    selected->step_q16 = std::max<uint64_t>(1U, selected->step_q16);
+    selected->volume = command.volume;
+    selected->active = true;
+    selected->serial = ++pcm_serial_;
     pcm_active_.store(true);
     command.pcm_samples = nullptr;
 }
 
+void Audio::startMusicPcm(Command& command) {
+    clearMusicPcm();
+    music_pcm_.samples = command.pcm_samples;
+    music_pcm_.frames = command.pcm_frames;
+    music_pcm_.position_q16 = 0;
+    music_pcm_.step_q16 =
+        (static_cast<uint64_t>(command.pcm_sample_rate) << 16U) / config_.sample_rate;
+    music_pcm_.step_q16 = std::max<uint64_t>(1U, music_pcm_.step_q16);
+    music_pcm_.volume = command.volume;
+    music_pcm_.loop = command.pcm_loop;
+    music_pcm_.active = true;
+    music_pcm_active_.store(true);
+    command.pcm_samples = nullptr;
+}
+
 int32_t Audio::renderPcm() {
-    if (!pcm_.active || !pcm_.samples || pcm_.frames == 0 || !enabled_.load()) {
-        return 0;
+    if (!enabled_.load()) return 0;
+    int32_t mixed = 0;
+    bool any_active = false;
+    for (auto& voice : pcm_voices_) {
+        if (!voice.active || !voice.samples || voice.frames == 0) continue;
+        const uint32_t index = static_cast<uint32_t>(voice.position_q16 >> 16U);
+        if (index >= voice.frames) {
+            heap_caps_free(voice.samples);
+            voice = {};
+            continue;
+        }
+        const uint32_t next_index = std::min<uint32_t>(index + 1U, voice.frames - 1U);
+        const uint32_t fraction = static_cast<uint32_t>(voice.position_q16 & 0xffffU);
+        const int32_t first = voice.samples[index];
+        const int32_t second = voice.samples[next_index];
+        const int32_t raw = static_cast<int32_t>(
+            (static_cast<int64_t>(first) * (65536U - fraction) +
+             static_cast<int64_t>(second) * fraction) >> 16U);
+        mixed += static_cast<int32_t>(
+            (static_cast<int64_t>(raw) * voice.volume * master_volume_.load()) /
+            10000LL);
+        voice.position_q16 += voice.step_q16;
+        if ((voice.position_q16 >> 16U) >= voice.frames) {
+            heap_caps_free(voice.samples);
+            voice = {};
+        } else {
+            any_active = true;
+        }
     }
-    const uint32_t index = static_cast<uint32_t>(pcm_.position_q16 >> 16U);
-    if (index >= pcm_.frames) {
-        clearPcm();
-        return 0;
+    pcm_active_.store(any_active);
+    return mixed;
+}
+
+int32_t Audio::renderMusicPcm() {
+    if (!music_pcm_.active || !music_pcm_.samples || music_pcm_.frames == 0 ||
+        !enabled_.load()) return 0;
+    uint32_t index = static_cast<uint32_t>(music_pcm_.position_q16 >> 16U);
+    if (index >= music_pcm_.frames) {
+        if (!music_pcm_.loop) {
+            clearMusicPcm();
+            return 0;
+        }
+        music_pcm_.position_q16 %= static_cast<uint64_t>(music_pcm_.frames) << 16U;
+        index = static_cast<uint32_t>(music_pcm_.position_q16 >> 16U);
     }
-    const int32_t raw = pcm_.samples[index];
+    uint32_t next_index = index + 1U;
+    if (next_index >= music_pcm_.frames) {
+        next_index = music_pcm_.loop ? 0U : music_pcm_.frames - 1U;
+    }
+    const uint32_t fraction = static_cast<uint32_t>(
+        music_pcm_.position_q16 & 0xffffU);
+    const int32_t first = music_pcm_.samples[index];
+    const int32_t second = music_pcm_.samples[next_index];
+    const int32_t raw = static_cast<int32_t>(
+        (static_cast<int64_t>(first) * (65536U - fraction) +
+         static_cast<int64_t>(second) * fraction) >> 16U);
     const int32_t sample = static_cast<int32_t>(
-        (static_cast<int64_t>(raw) * pcm_.volume * master_volume_.load()) / 10000LL);
-    pcm_.position_q16 += pcm_.step_q16;
-    if ((pcm_.position_q16 >> 16U) >= pcm_.frames) {
-        clearPcm();
-    }
+        (static_cast<int64_t>(raw) * music_pcm_.volume * master_volume_.load()) / 10000LL);
+    music_pcm_.position_q16 += music_pcm_.step_q16;
     return sample;
 }
 
@@ -927,11 +1106,17 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
 }
 
 void Audio::clearPcm() {
-    if (pcm_.samples) {
-        heap_caps_free(pcm_.samples);
+    for (auto& voice : pcm_voices_) {
+        if (voice.samples) heap_caps_free(voice.samples);
+        voice = {};
     }
-    pcm_ = {};
     pcm_active_.store(false);
+}
+
+void Audio::clearMusicPcm() {
+    if (music_pcm_.samples) heap_caps_free(music_pcm_.samples);
+    music_pcm_ = {};
+    music_pcm_active_.store(false);
 }
 
 void Audio::loadCurrentNote(Voice& voice) {
@@ -949,9 +1134,14 @@ void Audio::loadCurrentNote(Voice& voice) {
     voice.samples_left = voice.samples_total;
     voice.attack_samples = static_cast<uint32_t>(
         (static_cast<uint64_t>(note.attack_ms) * config_.sample_rate) / 1000U);
+    voice.decay_samples = static_cast<uint32_t>(
+        (static_cast<uint64_t>(note.decay_ms) * config_.sample_rate) / 1000U);
+    voice.sustain_q15 = std::min<uint16_t>(note.sustain_q15, 32767);
     voice.release_samples = static_cast<uint32_t>(
         (static_cast<uint64_t>(note.release_ms) * config_.sample_rate) / 1000U);
     voice.attack_samples = std::min(voice.attack_samples, voice.samples_total);
+    voice.decay_samples = std::min(
+        voice.decay_samples, voice.samples_total - voice.attack_samples);
     voice.release_samples = std::min(voice.release_samples, voice.samples_total);
 
     if (note.frequency_hz == 0) {
@@ -1019,6 +1209,9 @@ int16_t Audio::waveformSample(Voice& voice) {
             noise_state_ ^= noise_state_ << 5U;
             value = static_cast<int16_t>(noise_state_ & 0xFFFFU);
             break;
+        case Waveform::Sawtooth:
+            value = static_cast<int32_t>(voice.phase >> 16U) - 32768;
+            break;
     }
 
     voice.phase += voice.phase_increment;
@@ -1034,10 +1227,18 @@ uint16_t Audio::envelopeQ15(const Voice& voice) const {
 
     if (voice.attack_samples > 0 && elapsed < voice.attack_samples) {
         envelope = (elapsed * 32767U) / voice.attack_samples;
+    } else if (voice.decay_samples > 0 &&
+               elapsed < voice.attack_samples + voice.decay_samples) {
+        const uint32_t decay_elapsed = elapsed - voice.attack_samples;
+        const uint32_t range = 32767U - voice.sustain_q15;
+        envelope = 32767U -
+            (range * decay_elapsed) / voice.decay_samples;
+    } else {
+        envelope = voice.sustain_q15;
     }
     if (voice.release_samples > 0 && voice.samples_left < voice.release_samples) {
         const uint32_t release = (voice.samples_left * 32767U) / voice.release_samples;
-        envelope = std::min(envelope, release);
+        envelope = (envelope * release) / 32767U;
     }
     return static_cast<uint16_t>(envelope);
 }
@@ -1120,9 +1321,7 @@ void Audio::updateActiveVoiceCount() {
             ++count;
         }
     }
-    if (pcm_.active) {
-        ++count;
-    }
+    for (const auto& voice : pcm_voices_) if (voice.active) ++count;
     if (streamActive()) {
         ++count;
     }
@@ -1536,6 +1735,8 @@ const char* waveform_name(Waveform waveform) {
             return "TRIANGLE";
         case Waveform::Noise:
             return "NOISE";
+        case Waveform::Sawtooth:
+            return "SAWTOOTH";
         default:
             return "?";
     }

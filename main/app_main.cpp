@@ -5,6 +5,7 @@
 #include "system_state.h"
 #include "apps/demo_apps.h"
 #include "apps/gameboy_apps.h"
+#include "apps/playdate_apps.h"
 
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
@@ -17,6 +18,7 @@
 #include "pogopo_power.h"
 #include "pogopo_settings.h"
 #include "pogopo_gameboy.h"
+#include "pogopo_playdate.h"
 #include "pogopo_startup.h"
 
 #include <algorithm>
@@ -47,8 +49,6 @@ static pogopo::AppManager g_app_manager(g_gfx, g_input, g_haptics, g_audio, g_st
 static pogopo::demo::LauncherApp g_launcher_app;
 static pogopo::demo::EmptyLibraryApp g_pogopo_library_app(
     "pogopo_library", "pogopo", "/pogopo/games", pogopo::menu::Art::Pogopo);
-static pogopo::demo::EmptyLibraryApp g_playdate_library_app(
-    "playdate_library", "playdate", "/playdate", pogopo::menu::Art::Playdate);
 static pogopo::demo::GraphicsDemoApp g_graphics_app;
 static pogopo::demo::InputMonitorApp g_input_app;
 static pogopo::demo::HapticsLabApp g_haptics_app;
@@ -61,6 +61,16 @@ static pogopo::demo::PreferencesApp g_preferences_app;
 static pogopo::demo::AboutApp g_about_app;
 static pogopo::demo::GameBoyApp g_gameboy_app(g_gameboy);
 static pogopo::demo::GameBoyBrowserApp g_gameboy_browser_app(g_gameboy_app);
+static pogopo::demo::PogoDateApp g_pdsnake_app(
+    pogopo::playdate::Game::PDSnake, "pogodate", "PogoDate Snake",
+    "PDSNAKE 1.2");
+static pogopo::demo::PogoDateApp g_celeste_app(
+    pogopo::playdate::Game::Celeste, "pogodate_celeste", "Celeste Classic",
+    "CELESTE CLASSIC 1.0.3");
+static pogopo::demo::PogoDateApp g_pogodate_player(
+    pogopo::playdate::Game::External, "pogodate_player", "Playdate SD Game",
+    "SD PACKAGE");
+static pogopo::demo::PogoDateBrowserApp g_pogodate_browser(g_pogodate_player);
 
 namespace {
 
@@ -329,6 +339,7 @@ esp_err_t start_storage() {
     config.d0_io = board::SD_D0; config.d1_io = board::SD_D1;
     config.d2_io = board::SD_D2; config.d3_io = board::SD_D3;
     config.mount_point = "/sdcard";
+    config.max_files = 16;
     return g_storage.begin(config);
 }
 
@@ -614,7 +625,10 @@ void os_task(void*) {
 
     g_app_manager.registerApp(g_launcher_app, true);
     g_app_manager.registerApp(g_pogopo_library_app);
-    g_app_manager.registerApp(g_playdate_library_app);
+    g_app_manager.registerApp(g_pogodate_browser);
+    g_app_manager.registerApp(g_pogodate_player);
+    g_app_manager.registerApp(g_pdsnake_app);
+    g_app_manager.registerApp(g_celeste_app);
     g_app_manager.registerApp(g_gameboy_browser_app);
     g_app_manager.registerApp(g_gameboy_app);
     g_app_manager.registerApp(g_graphics_app);
@@ -632,7 +646,7 @@ void os_task(void*) {
         ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     } else {
-        ESP_LOGI(TAG, "STEP13.2.2 menu assets ready: %u bytes",
+        ESP_LOGI(TAG, "STEP13.3 menu assets ready: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     }
     if (!g_power_outro_animation.valid()) {
@@ -647,7 +661,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP13.2.2 Power Outro ready after startup");
+    ESP_LOGI(TAG, "STEP13.3 Power Outro + Playdate ready after startup");
 
     // The startup can wait in its 12..15 loop indefinitely. Reset both OS
     // clocks so the first menu frame begins at animation time zero instead of
@@ -702,7 +716,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.2.2 NO WHITE OUTRO FRAME");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.3 MAIN + PLAYDATE INTEGRATION");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -733,5 +747,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP13.2.2 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.3 system tasks started: startup animation pending");
 }
