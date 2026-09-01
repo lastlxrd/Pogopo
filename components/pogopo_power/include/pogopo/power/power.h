@@ -44,7 +44,7 @@ public:
         adc_unit_t adc_unit = ADC_UNIT_1;
         adc_channel_t adc_channel = ADC_CHANNEL_0;
         uint16_t short_press_min_ms = 60;
-        uint16_t shutdown_hold_ms = 2000;
+        uint16_t shutdown_hold_ms = 2220;
         uint16_t poll_ms = 20;
         uint16_t battery_period_ms = 1500;
         uint32_t task_stack = 5120;

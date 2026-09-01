@@ -85,6 +85,10 @@ public:
     esp_err_t clear_lcd_hw();
     esp_err_t toggle_vcom_only();
 
+    // Replace the complete native framebuffer atomically. Data must be
+    // WIDTH x HEIGHT, row-packed LSB-first, with 1=white and 0=black.
+    esp_err_t load_framebuffer(const uint8_t* data, size_t size);
+
     uint8_t* framebuffer() { return fb_; }
     const uint8_t* framebuffer() const { return fb_; }
     size_t framebuffer_size() const { return FRAMEBUFFER_SIZE; }

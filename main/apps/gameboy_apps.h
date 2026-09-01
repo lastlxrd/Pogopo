@@ -7,6 +7,7 @@
 #include "pogopo_app.h"
 #include "pogopo_gui.h"
 #include "pogopo_gameboy.h"
+#include "pogopo_menu.h"
 
 namespace pogopo::demo {
 
@@ -17,6 +18,9 @@ public:
     const char* id() const override { return "gameboy"; }
     const char* title() const override { return "Game Boy"; }
     bool capturesMenuButton() const override { return true; }
+    size_t quickActionCount() const override { return 2; }
+    const char* quickActionLabel(size_t index) const override;
+    bool runQuickAction(AppContext& context, size_t index) override;
 
     void prepare(const char* path, const char* display_name, gameboy::ScaleMode scale);
     void onEnter(AppContext& context) override;
@@ -52,6 +56,7 @@ public:
 
     void onEnter(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
 
 private:
@@ -66,6 +71,8 @@ private:
     size_t file_count_ = 0;
     gameboy::ScaleMode scale_ = gameboy::ScaleMode::OneX;
     char status_[80] = "READY";
+    uint32_t enter_elapsed_ms_ = 0;
+    uint32_t redraw_elapsed_ms_ = 0;
 };
 
 } // namespace pogopo::demo

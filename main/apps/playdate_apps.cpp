@@ -182,7 +182,7 @@ void PogoDateApp::onResume(AppContext& context) {
 void PogoDateApp::onEvent(AppContext& context, const input::Event& event) {
     if (start_error_ != ESP_OK && package_.path[0] &&
         event.type == input::EventType::Pressed && event.button == input::Button::B) {
-        context.launch("pogodate_browser");
+        context.launch("playdate_library");
         return;
     }
     if (event.type == input::EventType::Pressed) {

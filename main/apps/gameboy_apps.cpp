@@ -1,6 +1,7 @@
 #include "apps/gameboy_apps.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -36,6 +37,25 @@ void GameBoyApp::prepare(const char* path, const char* display_name,
     copy_text(rom_path_, sizeof(rom_path_), path);
     copy_text(display_name_, sizeof(display_name_), display_name);
     scale_ = scale;
+}
+
+const char* GameBoyApp::quickActionLabel(size_t index) const {
+    if (index == 0) return "save game";
+    if (index == 1) {
+        return scale_ == gameboy::ScaleMode::FitHeight ? "scale: fit" : "scale: 1x";
+    }
+    return "";
+}
+
+bool GameBoyApp::runQuickAction(AppContext&, size_t index) {
+    if (index == 0) return emulator_.flushSave() == ESP_OK;
+    if (index == 1) {
+        scale_ = scale_ == gameboy::ScaleMode::FitHeight
+            ? gameboy::ScaleMode::OneX : gameboy::ScaleMode::FitHeight;
+        force_draw_ = true;
+        return true;
+    }
+    return false;
 }
 
 void GameBoyApp::drawLoading(AppContext& context) {
@@ -252,6 +272,8 @@ void GameBoyBrowserApp::rescan(AppContext& context) {
 void GameBoyBrowserApp::onEnter(AppContext& context) {
     list_.setRowHeight(29);
     rescan(context);
+    enter_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
     context.invalidate();
 }
 
@@ -274,11 +296,14 @@ void GameBoyBrowserApp::onEvent(AppContext& context, const input::Event& event) 
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        // The custom 382 px focus pill extends well beyond gui::List::bounds().
+        // Repaint every browser row so the old black fill is cleared in the
+        // same Sharp refresh instead of visibly trailing the new selection.
+        context.invalidate({0, 32, 400, 178});
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        context.invalidate({0, 32, 400, 178});
     } else if (event.type == input::EventType::Pressed &&
                (event.button == input::Button::Left || event.button == input::Button::Right)) {
         scale_ = scale_ == gameboy::ScaleMode::FitHeight
@@ -303,13 +328,82 @@ void GameBoyBrowserApp::onEvent(AppContext& context, const input::Event& event) 
     }
 }
 
+void GameBoyBrowserApp::update(AppContext& context, uint32_t dt_ms) {
+    const uint32_t previous_enter = enter_elapsed_ms_;
+    enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 330U);
+    redraw_elapsed_ms_ += dt_ms;
+    if (previous_enter < 330U && enter_elapsed_ms_ == 330U) {
+        redraw_elapsed_ms_ = 0;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ < 330U && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ >= 330U && redraw_elapsed_ms_ >= 500U) {
+        redraw_elapsed_ms_ %= 500U;
+        context.invalidate();
+    }
+}
+
 void GameBoyBrowserApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
-    canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "GAME BOY", gameboy::scale_mode_name(scale_));
-    list_.draw(canvas, context.theme);
-    canvas.draw_text(22, 198, status_, gfx::font5x7(), context.theme.foreground);
-    gui::draw_footer(canvas, context.theme, "A PLAY  B BACK", "L/R SCALE  START SCAN");
+    canvas.clear_clip(gfx::WHITE);
+    const float raw_progress = std::clamp<float>(
+        static_cast<float>(enter_elapsed_ms_) / 330.0f, 0.0f, 1.0f);
+    const float progress = 1.0f - std::pow(1.0f - raw_progress, 3.0f);
+    const int content_x = static_cast<int>(std::lround((1.0f - progress) * 400.0f));
+
+    menu::PogoFont::drawText(canvas, 12 + content_x, -1, "gameboy",
+                             menu::FontFace::Italic22);
+    const power::State power = context.power.state();
+    canvas.draw_rect(366, 8, 23, 10, gfx::BLACK);
+    canvas.fill_rect(389, 11, 2, 4, gfx::BLACK);
+    const int battery_level = power.battery_valid
+        ? std::clamp<int>((power.battery_percent + 24) / 25, 0, 4) : 0;
+    for (int segment = 0; segment < battery_level; ++segment) {
+        canvas.fill_rect(368 + segment * 5, 10, 4, 6, gfx::BLACK);
+    }
+
+    const size_t count = file_count_ ? file_count_ : 1;
+    const int selected = static_cast<int>(list_.selected());
+    constexpr int visible_rows = 7;
+    const int first = std::clamp(selected - 3, 0,
+        std::max(0, static_cast<int>(count) - visible_rows));
+    for (int visible = 0; visible < visible_rows && first + visible < static_cast<int>(count); ++visible) {
+        const int item_index = first + visible;
+        const int y = 35 + visible * 25;
+        const bool focus = item_index == selected;
+        const auto& item = items_[item_index];
+        if (focus) {
+            canvas.fill_rect(9 + content_x, y + 1, 382, 22, gfx::BLACK);
+            canvas.fill_circle(20 + content_x, y + 12, 11, gfx::BLACK);
+            canvas.fill_circle(379 + content_x, y + 12, 11, gfx::BLACK);
+        }
+
+        char label[64]{};
+        std::snprintf(label, sizeof(label), "%s", item.label ? item.label : "");
+        const menu::FontFace face = focus
+            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
+        while (label[0] && menu::PogoFont::textWidth(face, label) > 280) {
+            const size_t length = std::strlen(label);
+            if (length <= 3) break;
+            label[length - 1] = '\0';
+        }
+        menu::PogoFont::drawText(canvas, 16 + content_x, y, label, face,
+                                 focus ? gfx::WHITE : gfx::BLACK);
+
+        if (file_count_ && item_index < static_cast<int>(file_count_)) {
+            const char* subtitle = subtitles_[item_index].data();
+            const int width = menu::PogoFont::textWidth(face, subtitle);
+            menu::PogoFont::drawText(canvas, 383 - width + content_x, y, subtitle,
+                                     face, focus ? gfx::WHITE : gfx::BLACK);
+        }
+    }
+
+    menu::PogoFont::drawText(canvas, 13 + content_x, 205, status_,
+                             menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 13 + content_x, 220,
+                             "A play  B back  L/R scale  START rescan",
+                             menu::FontFace::Regular14);
 }
 
 } // namespace pogopo::demo

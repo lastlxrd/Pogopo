@@ -23,6 +23,8 @@ idf_component_register(
         pogopo_playdate
         pogopo_gui
         pogopo_app
+        pogopo_startup
+        pogopo_menu
         esp_timer
         esp_system
         spi_flash

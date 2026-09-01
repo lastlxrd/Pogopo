@@ -54,7 +54,8 @@ private:
 class PogoDateBrowserApp final : public Application {
 public:
     explicit PogoDateBrowserApp(PogoDateApp& player) : player_(player) {}
-    const char* id() const override { return "pogodate_browser"; }
+    // The STEP13 home-screen Playdate tile launches this stable app id.
+    const char* id() const override { return "playdate_library"; }
     const char* title() const override { return "Playdate SD"; }
     void onEnter(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
