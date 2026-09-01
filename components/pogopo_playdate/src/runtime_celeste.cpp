@@ -710,10 +710,22 @@ struct Runtime::Impl {
         lua_pushcclosure(lua, function, 1);
     }
 
+    void pushFunction(lua_State* state, lua_CFunction function) {
+        lua_pushlightuserdata(state, this);
+        lua_pushcclosure(state, function, 1);
+    }
+
     void setFunction(int table_index, const char* name, lua_CFunction function) {
         table_index = lua_absindex(lua, table_index);
         pushFunction(function);
         lua_setfield(lua, table_index, name);
+    }
+
+    void setFunction(lua_State* state, int table_index, const char* name,
+                     lua_CFunction function) {
+        table_index = lua_absindex(state, table_index);
+        pushFunction(state, function);
+        lua_setfield(state, table_index, name);
     }
 
     void setError(const char* context, const char* message) {
@@ -728,6 +740,13 @@ struct Runtime::Impl {
         setError(context, message);
         lua_pop(lua, 1);
         return false;
+    }
+
+    static int cTraceback(lua_State* state) {
+        const char* message = lua_tostring(state, 1);
+        if (!message) message = "Lua error";
+        luaL_traceback(state, state, message, 1);
+        return 1;
     }
 
     bool loadBuffer(const char* name, const char* source, size_t size) {
@@ -1093,11 +1112,11 @@ struct Runtime::Impl {
         return true;
     }
 
-    Image* pushImage() {
-        auto* image = static_cast<Image*>(lua_newuserdatauv(lua, sizeof(Image), 1));
+    Image* pushImage(lua_State* state) {
+        auto* image = static_cast<Image*>(lua_newuserdatauv(state, sizeof(Image), 1));
         new (image) Image{};
-        luaL_getmetatable(lua, kImageMetatable);
-        lua_setmetatable(lua, -2);
+        luaL_getmetatable(state, kImageMetatable);
+        lua_setmetatable(state, -2);
         return image;
     }
 
@@ -1219,10 +1238,10 @@ struct Runtime::Impl {
         }
     }
 
-    Image* pushDynamicImage(int width, int height, uint8_t color) {
+    Image* pushDynamicImage(lua_State* state, int width, int height, uint8_t color) {
         if (width <= 0 || height <= 0 || width > 1024 || height > 1024 ||
             static_cast<size_t>(width) * height > 1024U * 1024U) {
-            lua_pushnil(lua);
+            lua_pushnil(state);
             return nullptr;
         }
         const size_t bytes = static_cast<size_t>(width) * height;
@@ -1231,7 +1250,7 @@ struct Runtime::Impl {
             // promptly returns its plane to the pool.  This bounded step is
             // much cheaper than allowing several megabytes of dead 400x240
             // images to accumulate and trigger a stop-the-world collection.
-            lua_gc(lua, LUA_GCSTEP, 96);
+            lua_gc(state, LUA_GCSTEP, 96);
             auto find_free_slot = [this]() -> int {
                 for (size_t index = 0; index < large_image_pool.size(); ++index) {
                     if (!large_image_pool[index].in_use) {
@@ -1256,7 +1275,7 @@ struct Runtime::Impl {
                     }
                 }
                 if (slot.pixels && slot.capacity >= bytes) {
-                    Image* image = pushImage();
+                    Image* image = pushImage(state);
                     image->width = width;
                     image->height = height;
                     image->stride = width;
@@ -1275,7 +1294,7 @@ struct Runtime::Impl {
             // 1.2-1.4 seconds every few seconds. Overflow planes are external
             // PSRAM owned by lightweight userdata and return naturally during
             // the already configured incremental collection.
-            Image* image = pushImage();
+            Image* image = pushImage(state);
             image->width = width;
             image->height = height;
             image->stride = width;
@@ -1291,12 +1310,12 @@ struct Runtime::Impl {
                 setSolidImageBounds(*image, color);
                 return image;
             }
-            lua_pop(lua, 1);
-            lua_pushnil(lua);
+            lua_pop(state, 1);
+            lua_pushnil(state);
             return nullptr;
         }
         auto* image = static_cast<Image*>(lua_newuserdatauv(
-            lua, sizeof(Image) + bytes, 1));
+            state, sizeof(Image) + bytes, 1));
         new (image) Image{};
         image->width = width;
         image->height = height;
@@ -1305,8 +1324,8 @@ struct Runtime::Impl {
         image->owns_pixels = false;
         std::memset(image->pixels, color, bytes);
         setSolidImageBounds(*image, color);
-        luaL_getmetatable(lua, kImageMetatable);
-        lua_setmetatable(lua, -2);
+        luaL_getmetatable(state, kImageMetatable);
+        lua_setmetatable(state, -2);
         return image;
     }
 
@@ -2323,24 +2342,24 @@ struct Runtime::Impl {
         return true;
     }
 
-    bool pushPdiImage(const char* path) {
+    bool pushPdiImage(lua_State* state, const char* path) {
         uint8_t* bytes = nullptr; size_t size = 0;
         uint32_t width = 0, height = 0, unused = 0;
         if (!loadCompiledResource(path, ".pdi", "Playdate IMG", bytes, size,
                                   width, height, unused)) return false;
-        Image* image = pushDynamicImage(static_cast<int>(width),
+        Image* image = pushDynamicImage(state, static_cast<int>(width),
                                         static_cast<int>(height), Clear);
         const bool ok = image && decodeSerializedImage(*image, bytes, size,
             static_cast<int>(width), static_cast<int>(height));
         heap_caps_free(bytes);
         if (!ok) {
-            if (image) lua_pop(lua, 1);
+            if (image) lua_pop(state, 1);
             return false;
         }
         return true;
     }
 
-    bool pushPdtTable(const char* path) {
+    bool pushPdtTable(lua_State* state, const char* path) {
         char resolved[384]{};
         if (!resourcePath(resolved, sizeof(resolved), path, ".pdt")) return false;
         FILE* file = openResourceFile(resolved, sizeof(resolved));
@@ -2402,7 +2421,7 @@ struct Runtime::Impl {
         }
 
         auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
-            lua, sizeof(ImageTable), 1));
+            state, sizeof(ImageTable), 1));
         new (table) ImageTable{};
         table->packed = packed;
         table->packed_size = static_cast<uint32_t>(packed_size);
@@ -2413,14 +2432,14 @@ struct Runtime::Impl {
         table->columns = columns;
         std::snprintf(table->path, sizeof(table->path), "%s", resolved);
         registerImageTable(table);
-        luaL_getmetatable(lua, kImageTableMetatable);
-        lua_setmetatable(lua, -2);
-        lua_newtable(lua);
-        lua_setiuservalue(lua, -2, 1);
+        luaL_getmetatable(state, kImageTableMetatable);
+        lua_setmetatable(state, -2);
+        lua_newtable(state);
+        lua_setiuservalue(state, -2, 1);
         return true;
     }
 
-    bool pushPdiDirectoryTable(const char* requested) {
+    bool pushPdiDirectoryTable(lua_State* state, const char* requested) {
         char relative[192]{}, directory_path[384]{};
         if (!package_mode || !requested) return false;
         const char* start = requested;
@@ -2473,7 +2492,7 @@ struct Runtime::Impl {
         }
 
         auto* table = static_cast<ImageTable*>(lua_newuserdatauv(
-            lua, sizeof(ImageTable), 1));
+            state, sizeof(ImageTable), 1));
         new (table) ImageTable{};
         table->directory = true;
         table->directory_first_index = static_cast<uint16_t>(first);
@@ -2483,10 +2502,10 @@ struct Runtime::Impl {
         table->columns = static_cast<uint16_t>(count);
         std::snprintf(table->path, sizeof(table->path), "%s", relative);
         registerImageTable(table);
-        luaL_getmetatable(lua, kImageTableMetatable);
-        lua_setmetatable(lua, -2);
-        lua_newtable(lua);
-        lua_setiuservalue(lua, -2, 1);
+        luaL_getmetatable(state, kImageTableMetatable);
+        lua_setmetatable(state, -2);
+        lua_newtable(state);
+        lua_setiuservalue(state, -2, 1);
         ESP_LOGI(TAG, "PDI directory table: %s (%u frames)", relative, count);
         return true;
     }
@@ -2505,10 +2524,10 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         if (lua_type(state, 1) == LUA_TSTRING) {
             const char* path = lua_tostring(state, 1);
-            if (runtime->pushPdiImage(path)) return 1;
+            if (runtime->pushPdiImage(state, path)) return 1;
             const CelesteAsset* asset = findCelesteAsset(path);
             if (asset) {
-                Image* image = runtime->pushImage();
+                Image* image = runtime->pushImage(state);
                 image->width = asset->frame_width;
                 image->height = asset->frame_height;
                 image->asset = asset;
@@ -2516,7 +2535,7 @@ struct Runtime::Impl {
             }
             if (path && (std::strstr(path, "snake") || std::strstr(path, "qrcode"))) {
                 const bool qr = std::strstr(path, "qrcode") != nullptr;
-                Image* image = runtime->pushDynamicImage(qr ? 88 : 26, qr ? 88 : 26, Clear);
+                Image* image = runtime->pushDynamicImage(state, qr ? 88 : 26, qr ? 88 : 26, Clear);
                 if (!image) return 1;
                 if (qr) {
                     for (int row = 0; row < 21; ++row) {
@@ -2594,7 +2613,7 @@ struct Runtime::Impl {
                        runtime->maze_completion_image_ref);
             runtime->maze_completion_image_ref = LUA_NOREF;
         }
-        runtime->pushDynamicImage(width, height, color);
+        runtime->pushDynamicImage(state, width, height, color);
         if (maze_completion_target &&
             luaL_testudata(state, -1, kImageMetatable)) {
             lua_pushvalue(state, -1);
@@ -2717,7 +2736,7 @@ struct Runtime::Impl {
             lua_pushnil(state);
             return 1;
         }
-        Image* scaled = runtime->pushDynamicImage(
+        Image* scaled = runtime->pushDynamicImage(state,
             destination_width, destination_height, Clear);
         if (!scaled) return 1;
         for (int y = 0; y < destination_height; ++y) {
@@ -2847,7 +2866,7 @@ struct Runtime::Impl {
         if (!image || image->mask) return 0;
         const bool opaque = lua_isnoneornil(state, 2) ||
             lua_toboolean(state, 2) != 0;
-        Image* mask = runtime->pushDynamicImage(
+        Image* mask = runtime->pushDynamicImage(state,
             image->width, image->height, opaque ? White : Black);
         if (!mask) return 0;
         image->mask = mask;
@@ -2921,7 +2940,7 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* source = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         if (!source) { lua_pushnil(state); return 1; }
-        Image* copy = runtime->pushDynamicImage(source->width, source->height, Clear);
+        Image* copy = runtime->pushDynamicImage(state, source->width, source->height, Clear);
         if (!copy) return 1;
         for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x) {
             copy->pixels[y * copy->stride + x] = source->mask &&
@@ -2945,7 +2964,7 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* source = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         if (!source) { lua_pushnil(state); return 1; }
-        Image* copy = runtime->pushDynamicImage(source->width, source->height, Clear);
+        Image* copy = runtime->pushDynamicImage(state, source->width, source->height, Clear);
         if (!copy) return 1;
         for (int y = 0; y < source->height; ++y) for (int x = 0; x < source->width; ++x) {
             const uint8_t value = runtime->imagePixel(*source, x, y);
@@ -2966,7 +2985,7 @@ struct Runtime::Impl {
         auto* source = static_cast<Image*>(luaL_checkudata(state, 1, kImageMetatable));
         const float alpha = static_cast<float>(luaL_checknumber(state, 2));
         if (!source) { lua_pushnil(state); return 1; }
-        Image* copy = runtime->pushDynamicImage(source->width, source->height, Clear);
+        Image* copy = runtime->pushDynamicImage(state, source->width, source->height, Clear);
         if (!copy) return 1;
         static constexpr uint8_t bayer[16] = {0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
         const int threshold = std::clamp(static_cast<int>(alpha * 16.0f), 0, 16);
@@ -2992,8 +3011,8 @@ struct Runtime::Impl {
     static int cImageTableNew(lua_State* state) {
         Impl* runtime = self(state);
         const char* path = luaL_checkstring(state, 1);
-        if (runtime->pushPdtTable(path)) return 1;
-        if (runtime->pushPdiDirectoryTable(path)) return 1;
+        if (runtime->pushPdtTable(state, path)) return 1;
+        if (runtime->pushPdiDirectoryTable(state, path)) return 1;
         const CelesteAsset* asset = findCelesteAsset(path);
         if (!asset || asset->frame_count <= 1) {
             ESP_LOGI(TAG, "Image table not found: %s", path ? path : "");
@@ -3010,10 +3029,11 @@ struct Runtime::Impl {
         return 1;
     }
 
-    Image* pushSerializedImage(const uint8_t* bytes, size_t size,
+    Image* pushSerializedImage(lua_State* state,
+                               const uint8_t* bytes, size_t size,
                                int full_width, int full_height) {
         if (!bytes || size < 16U || full_width <= 0 || full_height <= 0) {
-            lua_pushnil(lua);
+            lua_pushnil(state);
             return nullptr;
         }
         const uint16_t stored_width = readLe16(bytes);
@@ -3028,11 +3048,11 @@ struct Runtime::Impl {
             stored_width > row_bytes * 8U || left + stored_width > full_width ||
             top + stored_height > full_height ||
             plane_size > (size - 16U) / plane_count) {
-            lua_pushnil(lua);
+            lua_pushnil(state);
             return nullptr;
         }
         auto* image = static_cast<Image*>(lua_newuserdatauv(
-            lua, sizeof(Image) + size, 1));
+            state, sizeof(Image) + size, 1));
         new (image) Image{};
         image->width = full_width;
         image->height = full_height;
@@ -3042,8 +3062,8 @@ struct Runtime::Impl {
         setContentBounds(*image, left + stored_width, top + stored_height,
                          left, top);
         image->black_bounds_valid = false;
-        luaL_getmetatable(lua, kImageMetatable);
-        lua_setmetatable(lua, -2);
+        luaL_getmetatable(state, kImageMetatable);
+        lua_setmetatable(state, -2);
         return image;
     }
 
@@ -3063,7 +3083,7 @@ struct Runtime::Impl {
         lua_pop(state, 1);
         Image* image = nullptr;
         if (table->asset) {
-            image = pushImage();
+            image = pushImage(state);
             image->width = table->asset->frame_width;
             image->height = table->asset->frame_height;
             image->asset = table->asset;
@@ -3075,7 +3095,7 @@ struct Runtime::Impl {
             const int length = std::snprintf(frame_path, sizeof(frame_path),
                 "%s/%u", table->path, frame_number);
             if (length <= 0 || static_cast<size_t>(length) >= sizeof(frame_path) ||
-                !pushPdiImage(frame_path)) {
+                !pushPdiImage(state, frame_path)) {
                 lua_pop(state, 1);
                 return false;
             }
@@ -3105,7 +3125,7 @@ struct Runtime::Impl {
                 lua_pop(state, 1);
                 return false;
             }
-            image = pushSerializedImage(
+            image = pushSerializedImage(state,
                 unpacked + table_bytes + previous, end - previous,
                 table->frame_width, table->frame_height);
             if (!image) {
@@ -3302,7 +3322,7 @@ struct Runtime::Impl {
             lua_pushnil(state);
             return 1;
         }
-        Image* copy = runtime->pushDynamicImage(
+        Image* copy = runtime->pushDynamicImage(state,
             runtime->screen.width, runtime->screen.height, Clear);
         if (!copy) return 1;
         const size_t bytes = static_cast<size_t>(runtime->screen.width) *
@@ -3684,8 +3704,12 @@ struct Runtime::Impl {
         x += runtime->draw_offset_x;
         y += runtime->draw_offset_y;
         const int radius_index = lua_istable(state, 1) ? 2 : 5;
-        const int radius = static_cast<int>(
-            luaL_checkinteger(state, radius_index));
+        // The SDK accepts Lua numbers here.  Animated UI code (Loopsy uses
+        // this while opening the board) can legitimately produce a
+        // fractional radius between frames, so round at the raster boundary
+        // instead of requiring an exact Lua integer.
+        const int radius = static_cast<int>(std::lround(
+            luaL_checknumber(state, radius_index)));
         runtime->roundedRect(x, y, width, height, radius, true);
         return 0;
     }
@@ -3697,8 +3721,8 @@ struct Runtime::Impl {
         x += runtime->draw_offset_x;
         y += runtime->draw_offset_y;
         const int radius_index = lua_istable(state, 1) ? 2 : 5;
-        const int radius = static_cast<int>(
-            luaL_checkinteger(state, radius_index));
+        const int radius = static_cast<int>(std::lround(
+            luaL_checknumber(state, radius_index)));
         runtime->roundedRect(x, y, width, height, radius, false);
         return 0;
     }
@@ -4493,11 +4517,15 @@ struct Runtime::Impl {
 
     static int cDrawTextAligned(lua_State* state) {
         Impl* runtime = self(state);
+        // Read the optional alignment before luaL_tolstring().  Lua appends a
+        // converted value to the stack, so doing this afterwards makes a
+        // legal three-argument call look as if its text were argument four.
+        // Binairo's Continue screen uses exactly that SDK-supported form.
+        const int alignment = textAlignment(state, 4, 0);
         size_t length = 0;
         const char* value = luaL_tolstring(state, 1, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 2)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
-        const int alignment = textAlignment(state, 4, 0);
         const int width = runtime->textWidth(value, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -4626,11 +4654,11 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         auto* font = static_cast<PdFont*>(
             luaL_checkudata(state, 1, kFontMetatable));
+        const int alignment = textAlignment(state, 5, 0);
         size_t length = 0;
         const char* text = luaL_tolstring(state, 2, &length);
         int x = static_cast<int>(std::lround(luaL_checknumber(state, 3)));
         const int y = static_cast<int>(std::lround(luaL_checknumber(state, 4)));
-        const int alignment = textAlignment(state, 5, 0);
         const int width = runtime->textWidthForFont(font, text, length);
         if (alignment == 1) x -= width / 2;
         else if (alignment == 2) x -= width;
@@ -4676,7 +4704,7 @@ struct Runtime::Impl {
         }
         const int width = std::max(1, runtime->textWidthForFont(font, text, length));
         const int height = std::max(1, runtime->textHeightForFont(font, text, length));
-        Image* image = runtime->pushDynamicImage(width, height, Clear);
+        Image* image = runtime->pushDynamicImage(state, width, height, Clear);
         if (!image) return 1;
         Image* previous_target = runtime->target;
         const ClipRect previous_clip = runtime->clip;
@@ -4709,26 +4737,26 @@ struct Runtime::Impl {
         return 1;
     }
 
-    int pushSystemFont() {
+    int pushSystemFont(lua_State* state) {
         if (system_font_ref != LUA_NOREF) {
-            lua_rawgeti(lua, LUA_REGISTRYINDEX, system_font_ref);
+            lua_rawgeti(state, LUA_REGISTRYINDEX, system_font_ref);
             return 1;
         }
         auto* font = static_cast<PdFont*>(lua_newuserdatauv(
-            lua, sizeof(PdFont), 0));
+            state, sizeof(PdFont), 0));
         new (font) PdFont{};
         font->scale = 1;
-        luaL_getmetatable(lua, kFontMetatable);
-        lua_setmetatable(lua, -2);
-        lua_pushvalue(lua, -1);
-        system_font_ref = luaL_ref(lua, LUA_REGISTRYINDEX);
+        luaL_getmetatable(state, kFontMetatable);
+        lua_setmetatable(state, -2);
+        lua_pushvalue(state, -1);
+        system_font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
         return 1;
     }
 
     static int cGetSystemFont(lua_State* state) {
         // Pogopo has one built-in 5x7 system face. The optional normal/bold/
         // italic variant is accepted; all variants resolve to that same face.
-        return self(state)->pushSystemFont();
+        return self(state)->pushSystemFont(state);
     }
 
     static int cGetFont(lua_State* state) {
@@ -4737,7 +4765,7 @@ struct Runtime::Impl {
             lua_rawgeti(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
             return 1;
         }
-        return runtime->pushSystemFont();
+        return runtime->pushSystemFont(state);
     }
 
     static int cSetFont(lua_State* state) {
@@ -5031,7 +5059,7 @@ struct Runtime::Impl {
     static int cDisplayLoadImage(lua_State* state) {
         Impl* runtime = self(state);
         const char* path = luaL_checkstring(state, 1);
-        if (!runtime->pushPdiImage(path)) {
+        if (!runtime->pushPdiImage(state, path)) {
             lua_pushboolean(state, 0);
             return 1;
         }
@@ -5406,7 +5434,13 @@ struct Runtime::Impl {
 
     bool pdaPath(char* output, size_t capacity, const char* requested) const {
         if (!package_mode || !requested || !requested[0] ||
-            std::strstr(requested, "..") || requested[0] == '/') return false;
+            std::strstr(requested, "..")) return false;
+        // Playdate resource paths may be rooted at the PDX with a leading
+        // slash.  They are not host-filesystem absolute paths.  XTRIS uses
+        // /assets/sfx/... for uncached effects, so normalize that SDK form to
+        // the package-relative path instead of substituting a Pogopo UI tone.
+        while (*requested == '/') ++requested;
+        if (!requested[0]) return false;
         char relative[176]{};
         std::snprintf(relative, sizeof(relative), "%s", requested);
         if (pathHasSuffix(relative, ".pda")) {
@@ -6405,7 +6439,9 @@ struct Runtime::Impl {
         return 0;
     }
 
-    void pushTimerRegistry() { lua_rawgetp(lua, LUA_REGISTRYINDEX, &kTimerRegistryKey); }
+    void pushTimerRegistry(lua_State* state) {
+        lua_rawgetp(state, LUA_REGISTRYINDEX, &kTimerRegistryKey);
+    }
 
     static int cTimerPause(lua_State* state) {
         luaL_checktype(state, 1, LUA_TTABLE);
@@ -6472,9 +6508,11 @@ struct Runtime::Impl {
             lua_pushvalue(state, callback_index + 2);
             lua_setfield(state, timer, "easingFunction");
         }
-        setFunction(timer, "pause", cTimerPause); setFunction(timer, "start", cTimerStart);
-        setFunction(timer, "reset", cTimerReset); setFunction(timer, "remove", cTimerRemove);
-        pushTimerRegistry();
+        setFunction(state, timer, "pause", cTimerPause);
+        setFunction(state, timer, "start", cTimerStart);
+        setFunction(state, timer, "reset", cTimerReset);
+        setFunction(state, timer, "remove", cTimerRemove);
+        pushTimerRegistry(state);
         lua_pushinteger(state, next_timer_id++); lua_pushvalue(state, timer); lua_settable(state, -3);
         lua_pop(state, 1);
         return 1;
@@ -6491,7 +6529,7 @@ struct Runtime::Impl {
         Impl* runtime = self(state);
         lua_newtable(state);
         const int result = lua_absindex(state, -1);
-        runtime->pushTimerRegistry();
+        runtime->pushTimerRegistry(state);
         const int registry = lua_absindex(state, -1);
         lua_Integer output = 1;
         lua_pushnil(state);
@@ -6513,7 +6551,7 @@ struct Runtime::Impl {
 
     bool updateTimers() {
         const int top = lua_gettop(lua);
-        pushTimerRegistry();
+        pushTimerRegistry(lua);
         lua_pushnil(lua);
         while (lua_next(lua, -2) != 0) {
             if (!lua_istable(lua, -1)) { lua_pop(lua, 1); continue; }
@@ -7779,7 +7817,9 @@ struct Runtime::Impl {
         if(!lua_istable(lua,-1)){lua_settop(lua,top);if(!optional)setError(function_name,"missing table");return optional;}
         lua_getfield(lua,-1,function_name);
         if(!lua_isfunction(lua,-1)){lua_settop(lua,top);if(!optional)setError(function_name,"missing function");return optional;}
-        if(lua_pcall(lua,0,0,0)!=LUA_OK){const bool result=takeLuaError(function_name);lua_settop(lua,top);return result;}
+        lua_pushcfunction(lua,cTraceback);lua_insert(lua,-2);
+        const int error_handler=lua_gettop(lua)-1;
+        if(lua_pcall(lua,0,0,error_handler)!=LUA_OK){const bool result=takeLuaError(function_name);lua_settop(lua,top);return result;}
         lua_settop(lua,top);return true;
     }
 
@@ -7883,7 +7923,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.30: render and audio compatibility");
+                 "PogoDate API STEP11.6.31: call stack and fatal audio cleanup");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -7919,7 +7959,7 @@ struct Runtime::Impl {
 
     void stop() {
         if(lua&&is_running)callGlobal("playdate","gameWillTerminate",true);
-        if(audio)audio->stopMusicPcm();
+        if(audio)audio->stopAll();
         is_running=false;if(lua){lua_close(lua);lua=nullptr;}
         live_image_tables.fill(nullptr);
         pdt_unpacked_bytes=0;pdt_use_serial=0;
@@ -7959,6 +7999,12 @@ struct Runtime::Impl {
             bool crank_consumed=false;
             if(!dispatchInput(pressed_buttons,released)||
                !dispatchCrank(crank_consumed)||!callGlobal("playdate","update")){
+                // A Lua failure ends the game immediately.  Sample players,
+                // file players and synth voices live in the shared mixer and
+                // otherwise keep sounding after is_running becomes false.
+                // Queue StopAll before PogoDateApp queues its one-shot error
+                // effect, so only the system notification remains audible.
+                if(audio)audio->stopAll();
                 is_running=false;
                 return 0;
             }

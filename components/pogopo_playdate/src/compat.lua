@@ -2312,7 +2312,12 @@ function playdate.getSystemMenu() return systemMenu end
 playdate.scoreboards = playdate.scoreboards or {}
 local function finishScoreboardRequest(callback, result)
 	if type(callback) ~= "function" then return end
-	playdate.timer.performAfterDelay(1, function() callback(true, result) end)
+	-- The SDK callback receives a status object first, not a boolean. Games
+	-- commonly inspect status.code before reading the result (XTRIS does this
+	-- while entering Standard mode).
+	playdate.timer.performAfterDelay(1, function()
+		callback({code="OK", message=""}, result)
+	end)
 end
 function playdate.scoreboards.addScore(boardID, value, callback)
 	local result={boardID=tostring(boardID or ""),value=tonumber(value) or 0,
