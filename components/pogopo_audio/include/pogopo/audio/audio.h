@@ -167,6 +167,7 @@ public:
 
 private:
     static constexpr size_t MAX_VOICES = 4;
+    static constexpr size_t MAX_PCM_VOICES = 4;
     static constexpr size_t SINE_TABLE_SIZE = 256;
     static constexpr size_t MAX_RENDER_FRAMES = 512;
     static constexpr size_t STREAM_PATH_SIZE = 192;
@@ -234,6 +235,7 @@ private:
         uint8_t volume = 80;
         bool loop = false;
         bool active = false;
+        uint32_t serial = 0;
     };
 
     struct Voice {
@@ -320,7 +322,8 @@ private:
     uint32_t voice_serial_ = 0;
     std::atomic<uint32_t> next_synth_token_{1};
     uint32_t noise_state_ = 0xA5C31E27u;
-    PcmVoice pcm_{};
+    std::array<PcmVoice, MAX_PCM_VOICES> pcm_voices_{};
+    uint32_t pcm_serial_ = 0;
     PcmVoice music_pcm_{};
 
     int16_t* realtime_buffer_ = nullptr;

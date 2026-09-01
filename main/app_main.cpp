@@ -326,7 +326,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.31 POGODATE RUNTIME ERROR COMPAT");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP11.6.32 POGODATE AUDIO SCENE COMPAT");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -360,5 +360,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP11.6.31 ready: optional alignment, fractional radii, fatal audio stop");
+    ESP_LOGI(TAG, "STEP11.6.32 ready: mixed PCM, filtered resampling, scene and achievements safety");
 }

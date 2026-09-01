@@ -164,19 +164,44 @@ do
 	local sound = playdate.sound
 	local Channel = {}; Channel.__index = Channel
 	function Channel.new()
-		return setmetatable({_sources={}, _volumeLeft=1, _volumeRight=1}, Channel)
+		return setmetatable({_sources={}, _sourceVolumes={},
+			_volumeLeft=1, _volumeRight=1}, Channel)
 	end
-	function Channel:addSource(source) self._sources[#self._sources+1]=source; return source end
+	local function applyChannelVolume(channel,source)
+		if source and type(source.setVolume)=="function" then
+			local base=channel._sourceVolumes[source] or {1,1}
+			source:setVolume(base[1]*channel._volumeLeft,
+				base[2]*channel._volumeRight)
+		end
+	end
+	function Channel:addSource(source)
+		self._sources[#self._sources+1]=source
+		local left,right=1,1
+		if source and type(source.getVolume)=="function" then
+			local ok,currentLeft,currentRight=pcall(source.getVolume,source)
+			if ok then
+				left=tonumber(currentLeft) or 1
+				right=tonumber(currentRight) or left
+			end
+		end
+		self._sourceVolumes[source]={left,right}
+		applyChannelVolume(self,source)
+		return source
+	end
 	function Channel:removeSource(source)
 		for i=#self._sources,1,-1 do
-			if self._sources[i]==source then table.remove(self._sources,i); return true end
+		if self._sources[i]==source then
+			table.remove(self._sources,i); self._sourceVolumes[source]=nil; return true
+		end
 		end
 		return false
 	end
 	function Channel:addEffect(effect) return effect end
 	function Channel:removeEffect(_) return true end
 	function Channel:setVolume(left,right)
-		self._volumeLeft=left or 1; self._volumeRight=right or self._volumeLeft
+		self._volumeLeft=math.max(0,math.min(1,tonumber(left) or 1))
+		self._volumeRight=math.max(0,math.min(1,tonumber(right) or self._volumeLeft))
+		for i=1,#self._sources do applyChannelVolume(self,self._sources[i]) end
 	end
 	function Channel:getVolume() return self._volumeLeft,self._volumeRight end
 	function Channel:setPan(_) end
@@ -798,6 +823,14 @@ end
 
 function Sprite.performOnAllSprites(callback)
 	for i=1,#sprites do if sprites[i].added then callback(sprites[i]) end end
+	local anyAdded=false
+	for i=1,#sprites do if sprites[i].added then anyAdded=true; break end end
+	-- The SDK display list preserves the framebuffer and invokes its background
+	-- callback only for dirty regions. This compatibility renderer redraws the
+	-- full frame, so carrying an old callback across an empty scene repaints the
+	-- previous menu behind the next scene. New menu/game-over scenes install
+	-- their own callback again.
+	if not anyAdded then background_callback=nil end
 end
 
 function Sprite.getAllSprites()
@@ -828,6 +861,7 @@ function Sprite.removeAll()
 	wall_cells = {}
 	sprites_dirty = false
 	collision_sprites_dirty = false
+	background_callback = nil
 end
 
 function Sprite.setBackgroundDrawingCallback(callback) background_callback = callback end

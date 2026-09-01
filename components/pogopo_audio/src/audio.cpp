@@ -57,6 +57,7 @@ esp_err_t Audio::begin(const Config& config) {
     last_write_us_.store(0);
     max_write_us_.store(0);
     voice_serial_ = 0;
+    pcm_serial_ = 0;
     noise_state_ = 0xA5C31E27u;
     silenceVoices();
     clearPcm();
@@ -817,15 +818,30 @@ void Audio::stopTone(const Command& command) {
 }
 
 void Audio::startPcm(Command& command) {
-    clearPcm();
-    pcm_.samples = command.pcm_samples;
-    pcm_.frames = command.pcm_frames;
-    pcm_.position_q16 = 0;
-    pcm_.step_q16 =
+    PcmVoice* selected = nullptr;
+    for (auto& voice : pcm_voices_) {
+        if (!voice.active) {
+            selected = &voice;
+            break;
+        }
+    }
+    if (!selected) {
+        selected = &pcm_voices_[0];
+        for (auto& voice : pcm_voices_) {
+            if (voice.serial < selected->serial) selected = &voice;
+        }
+        if (selected->samples) heap_caps_free(selected->samples);
+        *selected = {};
+    }
+    selected->samples = command.pcm_samples;
+    selected->frames = command.pcm_frames;
+    selected->position_q16 = 0;
+    selected->step_q16 =
         (static_cast<uint64_t>(command.pcm_sample_rate) << 16U) / config_.sample_rate;
-    pcm_.step_q16 = std::max<uint64_t>(1U, pcm_.step_q16);
-    pcm_.volume = command.volume;
-    pcm_.active = true;
+    selected->step_q16 = std::max<uint64_t>(1U, selected->step_q16);
+    selected->volume = command.volume;
+    selected->active = true;
+    selected->serial = ++pcm_serial_;
     pcm_active_.store(true);
     command.pcm_samples = nullptr;
 }
@@ -846,22 +862,37 @@ void Audio::startMusicPcm(Command& command) {
 }
 
 int32_t Audio::renderPcm() {
-    if (!pcm_.active || !pcm_.samples || pcm_.frames == 0 || !enabled_.load()) {
-        return 0;
+    if (!enabled_.load()) return 0;
+    int32_t mixed = 0;
+    bool any_active = false;
+    for (auto& voice : pcm_voices_) {
+        if (!voice.active || !voice.samples || voice.frames == 0) continue;
+        const uint32_t index = static_cast<uint32_t>(voice.position_q16 >> 16U);
+        if (index >= voice.frames) {
+            heap_caps_free(voice.samples);
+            voice = {};
+            continue;
+        }
+        const uint32_t next_index = std::min<uint32_t>(index + 1U, voice.frames - 1U);
+        const uint32_t fraction = static_cast<uint32_t>(voice.position_q16 & 0xffffU);
+        const int32_t first = voice.samples[index];
+        const int32_t second = voice.samples[next_index];
+        const int32_t raw = static_cast<int32_t>(
+            (static_cast<int64_t>(first) * (65536U - fraction) +
+             static_cast<int64_t>(second) * fraction) >> 16U);
+        mixed += static_cast<int32_t>(
+            (static_cast<int64_t>(raw) * voice.volume * master_volume_.load()) /
+            10000LL);
+        voice.position_q16 += voice.step_q16;
+        if ((voice.position_q16 >> 16U) >= voice.frames) {
+            heap_caps_free(voice.samples);
+            voice = {};
+        } else {
+            any_active = true;
+        }
     }
-    const uint32_t index = static_cast<uint32_t>(pcm_.position_q16 >> 16U);
-    if (index >= pcm_.frames) {
-        clearPcm();
-        return 0;
-    }
-    const int32_t raw = pcm_.samples[index];
-    const int32_t sample = static_cast<int32_t>(
-        (static_cast<int64_t>(raw) * pcm_.volume * master_volume_.load()) / 10000LL);
-    pcm_.position_q16 += pcm_.step_q16;
-    if ((pcm_.position_q16 >> 16U) >= pcm_.frames) {
-        clearPcm();
-    }
-    return sample;
+    pcm_active_.store(any_active);
+    return mixed;
 }
 
 int32_t Audio::renderMusicPcm() {
@@ -876,7 +907,17 @@ int32_t Audio::renderMusicPcm() {
         music_pcm_.position_q16 %= static_cast<uint64_t>(music_pcm_.frames) << 16U;
         index = static_cast<uint32_t>(music_pcm_.position_q16 >> 16U);
     }
-    const int32_t raw = music_pcm_.samples[index];
+    uint32_t next_index = index + 1U;
+    if (next_index >= music_pcm_.frames) {
+        next_index = music_pcm_.loop ? 0U : music_pcm_.frames - 1U;
+    }
+    const uint32_t fraction = static_cast<uint32_t>(
+        music_pcm_.position_q16 & 0xffffU);
+    const int32_t first = music_pcm_.samples[index];
+    const int32_t second = music_pcm_.samples[next_index];
+    const int32_t raw = static_cast<int32_t>(
+        (static_cast<int64_t>(first) * (65536U - fraction) +
+         static_cast<int64_t>(second) * fraction) >> 16U);
     const int32_t sample = static_cast<int32_t>(
         (static_cast<int64_t>(raw) * music_pcm_.volume * master_volume_.load()) / 10000LL);
     music_pcm_.position_q16 += music_pcm_.step_q16;
@@ -1065,10 +1106,10 @@ void Audio::renderRealtime(int32_t& left, int32_t& right) {
 }
 
 void Audio::clearPcm() {
-    if (pcm_.samples) {
-        heap_caps_free(pcm_.samples);
+    for (auto& voice : pcm_voices_) {
+        if (voice.samples) heap_caps_free(voice.samples);
+        voice = {};
     }
-    pcm_ = {};
     pcm_active_.store(false);
 }
 
@@ -1280,9 +1321,7 @@ void Audio::updateActiveVoiceCount() {
             ++count;
         }
     }
-    if (pcm_.active) {
-        ++count;
-    }
+    for (const auto& voice : pcm_voices_) if (voice.active) ++count;
     if (streamActive()) {
         ++count;
     }

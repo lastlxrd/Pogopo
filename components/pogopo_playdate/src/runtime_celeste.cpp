@@ -4233,6 +4233,14 @@ struct Runtime::Impl {
         return 8 * std::max(1, scale);
     }
 
+    static int buttonSymbolScaleForFont(const PdFont* font) {
+        if (!font || !font->compiled) return font ? std::max<int>(1, font->scale) : 1;
+        // SDK button glyphs follow the active face's cap height. A fixed 7x7
+        // fallback looked acceptable beside a 10 px font but became tiny in
+        // Loopsy's 18-24 px menu faces.
+        return std::max<int>(1, (font->glyph_height + 5) / 12);
+    }
+
     // Playdate falls back to its system font when a custom PFT does not
     // contain a requested character. Keep that behavior for ASCII menu
     // decorations and common Unicode direction symbols.
@@ -4339,7 +4347,8 @@ struct Runtime::Impl {
                 } else {
                     char button_label = 0;
                     if (playdateButtonSymbol(codepoint, button_label)) {
-                        line_width += buttonSymbolAdvance() + tracking;
+                        line_width += buttonSymbolAdvance(
+                            buttonSymbolScaleForFont(font)) + tracking;
                     } else line_width += 6 + tracking;
                 }
             } else if (font && font->pico) {
@@ -4440,8 +4449,11 @@ struct Runtime::Impl {
                 }
                 char button_label = 0;
                 if (playdateButtonSymbol(codepoint, button_label)) {
-                    drawButtonSymbol(codepoint, cursor_x, cursor_y);
-                    cursor_x += buttonSymbolAdvance() + tracking;
+                    const int button_scale = buttonSymbolScaleForFont(current_font);
+                    const int button_y = cursor_y + std::max<int>(0,
+                        (current_font->glyph_height - 7 * button_scale) / 2);
+                    drawButtonSymbol(codepoint, cursor_x, button_y, button_scale);
+                    cursor_x += buttonSymbolAdvance(button_scale) + tracking;
                     continue;
                 }
                 drawSystemCharacter(codepoint, cursor_x, cursor_y);
@@ -5885,6 +5897,48 @@ struct Runtime::Impl {
         frames = cached.frames;
         sample_rate = cached.sample_rate;
         return true;
+    }
+
+    static int cOptionalAchievementCall(lua_State* state) {
+        const int argument_count = lua_gettop(state);
+        lua_pushvalue(state, lua_upvalueindex(1));
+        lua_insert(state, 1);
+        if (lua_pcall(state, argument_count, LUA_MULTRET, 0) == LUA_OK) {
+            return lua_gettop(state);
+        }
+        const char* message = lua_tostring(state, -1);
+        // Some public/non-Catalog builds intentionally ship a reduced
+        // achievement config but retain optional grant calls. Their helper
+        // library throws inside a transition coroutine, where resume() returns
+        // false and the game otherwise freezes without a runtime error.
+        if (message && std::strstr(message, "unconfigured achievement")) {
+            ESP_LOGW(TAG, "Achievements skipped: %s", message);
+            lua_settop(state, 0);
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        return lua_error(state);
+    }
+
+    void protectOptionalAchievementCalls() {
+        lua_getglobal(lua, "achievements");
+        if (!lua_istable(lua, -1)) {
+            lua_pop(lua, 1);
+            return;
+        }
+        static constexpr const char* methods[] = {
+            "grant", "revoke", "advance", "progress",
+        };
+        for (const char* method : methods) {
+            lua_getfield(lua, -1, method);
+            if (lua_isfunction(lua, -1)) {
+                lua_pushvalue(lua, -1);
+                lua_pushcclosure(lua, cOptionalAchievementCall, 1);
+                lua_setfield(lua, -3, method);
+            }
+            lua_pop(lua, 1);
+        }
+        lua_pop(lua, 1);
     }
 
     static int cSoundNew(lua_State* state) {
@@ -7923,7 +7977,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.31: call stack and fatal audio cleanup");
+                 "PogoDate API STEP11.6.32: polyphonic audio and scene compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -7941,6 +7995,7 @@ struct Runtime::Impl {
         if(!importModule("main")){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
         }
+        protectOptionalAchievementCalls();
         // Incremental collection trades rare long stop-the-world nursery/major
         // sweeps for small, regular slices.  A low pause keeps the Lua heap
         // close to its live size while the small step size avoids animation
