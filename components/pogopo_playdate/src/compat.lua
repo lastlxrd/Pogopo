@@ -771,20 +771,16 @@ function Sprite:update()
 			if item.stencilImage then gfx.setStencilImage(item.stencilImage,item.stencilTiled) end
 			if customDraw then
 				local x,y,w,h=item:getBounds()
-				local targetWidth,targetHeight=math.max(1,math.ceil(w)),math.max(1,math.ceil(h))
-				local currentWidth,currentHeight=0,0
-				if item._customDrawImage then
-					currentWidth,currentHeight=item._customDrawImage:getSize()
-				end
-				if not item._customDrawImage or currentWidth~=targetWidth or
-					currentHeight~=targetHeight then
-					item._customDrawImage=gfx.image.new(targetWidth,targetHeight,gfx.kColorClear)
-				else item._customDrawImage:clear(gfx.kColorClear) end
 				local callbackOffsetX,callbackOffsetY=gfx.getDrawOffset()
-				gfx.setDrawOffset(0,0); gfx.pushContext(item._customDrawImage)
+				-- The SDK invokes image-less sprite callbacks against the
+				-- framebuffer with a local origin at the sprite's top-left.
+				-- Keep the framebuffer target so setScreenClipRect(), stencils
+				-- and intentional drawing outside the nominal sprite bounds
+				-- retain their screen-space semantics.
+				gfx.pushContext()
+				gfx.setDrawOffset(callbackOffsetX+x,callbackOffsetY+y)
 				item:draw(0,0,w,h)
-				gfx.popContext(); gfx.setDrawOffset(callbackOffsetX,callbackOffsetY)
-				item._customDrawImage:draw(x,y)
+				gfx.popContext()
 			elseif item.tilemap then
 				local x = math.floor(item.x - item.width * item.centerX)
 				local y = math.floor(item.y - item.height * item.centerY)

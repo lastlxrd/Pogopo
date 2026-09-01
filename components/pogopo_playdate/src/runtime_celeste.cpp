@@ -5377,7 +5377,13 @@ struct Runtime::Impl {
         return pushTimeFromEpoch(state, true);
     }
 
-    static int cGetReduceFlashing(lua_State* state) { lua_pushboolean(state, 1); return 1; }
+    static int cGetReduceFlashing(lua_State* state) {
+        // PogoPo currently has no global accessibility toggle. Returning true
+        // here made every game silently select its reduced-effects mode.
+        // Match the Playdate default until the OS exposes a user preference.
+        lua_pushboolean(state, 0);
+        return 1;
+    }
     static int cIsCrankDocked(lua_State* state) {
         lua_pushboolean(state, self(state)->crank_docked);
         return 1;
@@ -5651,7 +5657,13 @@ struct Runtime::Impl {
         bool ok = true;
         auto decodeNibble = [&](int nibble, int& predictor, int& step_index) {
             const int step = step_table[step_index];
-            const int delta = (((nibble & 7) * 2 + 1) * step) >> 3;
+            // IMA ADPCM uses separately rounded step fractions. The compact
+            // multiply form is only approximate and accumulates audible
+            // predictor drift on short UI clicks.
+            int delta = step >> 3;
+            if (nibble & 1) delta += step >> 2;
+            if (nibble & 2) delta += step >> 1;
+            if (nibble & 4) delta += step;
             predictor += (nibble & 8) ? -delta : delta;
             predictor = std::clamp(predictor, -32768, 32767);
             step_index = std::clamp(step_index + index_table[nibble], 0, 88);
@@ -7977,7 +7989,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.32: polyphonic audio and scene compatibility");
+                 "PogoDate API STEP11.6.33: effects, ADPCM and SD compatibility");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
