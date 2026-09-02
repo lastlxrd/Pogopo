@@ -17,7 +17,7 @@
       <a class="brand" data-home-link><img class="brand-logo" data-logo alt="pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
       <span class="header-spacer"></span>
       <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
-      <a class="icon-link" href="https://github.com/lastlxrd/pogopoOS" aria-label="pogopoOS on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+      <a class="icon-link" href="https://github.com/lastlxrd/Pogopo" aria-label="Pogopo on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
     </div></header>
     <div class="docs-shell">
       <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">A small, evolving reference for the pogopo hardware and pogopoOS firmware.</p></aside>
@@ -66,11 +66,11 @@
         <p>The 25-frame shutdown overlay begins after a short hold delay. Releasing Power before completion reverses the animation and restores the suspended application.</p>
 
         <h2>Games and applications</h2>
-        <p>The current tree includes the launcher, libraries, settings, hardware diagnostics, graphics/input/audio/haptics/motion tests, a WAV player, and the Game Boy browser/application. Pogopo and Playdate library screens are present as places for future content; their presence does not imply general Playdate compatibility.</p>
+        <p>The current tree includes the launcher, libraries, settings, hardware diagnostics, graphics/input/audio/haptics/motion tests, a WAV player, the Game Boy browser/application, and the PogoDate browser/runtime. PogoDate compatibility is verified title by title and does not imply complete Playdate SDK support.</p>
 
         <h2>Emulators</h2>
         <p><span class="status">Working</span>The Game Boy runtime integrates Peanut-GB for CPU/PPU emulation and MiniGB APU for audio. ROMs are read from <code>/gameboy/*.gb</code>. The current performance path targets every 59.7 Hz emulated frame while presenting approximately every second LCD frame.</p>
-        <p><span class="status experimental">Experimental</span>Other runtimes have been explored separately, but they are not listed as production capabilities until their performance and compatibility are verified.</p>
+        <p><span class="status experimental">Experimental</span>PogoDate executes selected Lua-based Playdate packages through a compatibility API. It is not a Playdate hardware emulator and cannot execute native <code>pdex.bin</code> titles.</p>
 
         <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
         <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>

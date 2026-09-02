@@ -1,16 +1,3 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FAQ · pogopoOS</title><link rel="stylesheet" href="assets/style.css"></head><body>
-<header><div class="shell topbar"><a class="brand" href="index.html">pogopoOS</a><nav><a href="index.html">Overview</a><a href="getting-started.html">Getting started</a><a href="hardware.html">Hardware</a><a href="playdate.html">PogoDate</a><a aria-current="page" href="faq.html">FAQ</a><a href="license.html">License</a></nav></div></header>
-<main class="shell"><div class="eyebrow">answers & troubleshooting</div><h1>frequently asked questions</h1>
-<details open><summary>What is pogopo?</summary><div>pogopo is a custom modular handheld console built around ESP32-S3 and a Sharp Memory LCD. pogopoOS is its firmware.</div></details>
-<details><summary>Is this a finished consumer product?</summary><div>No. It is an active engineering project. Interfaces, storage formats and game compatibility may change between development checkpoints.</div></details>
-<details><summary>Where do Game Boy games go?</summary><div>Put legal <code>.gb</code> ROM files in <code>/gameboy</code> on a FAT32 microSD card, then open Game Boy or press START in its browser to rescan.</div></details>
-<details><summary>Where do Playdate games go?</summary><div>Extract each package as <code>/playdate/Game Name.pdx/</code>. Do not leave the package in a ZIP archive.</div></details>
-<details><summary>Will every Playdate game work?</summary><div>No. Only Lua games using implemented APIs can work. Some games may launch but still have missing graphics, audio, effects or later-scene functionality.</div></details>
-<details><summary>Why is a native Playdate game rejected?</summary><div>Native Playdate binaries are compiled for an ARM CPU. The ESP32-S3 is Xtensa and cannot directly execute that code.</div></details>
-<details><summary>Why does a game load slowly?</summary><div>Large PDZ modules, fonts, image tables and audio are read and prepared at startup. SDMMC normally tries 40 MHz and safely retries at 20 MHz on cards or wiring that are not reliable at high speed.</div></details>
-<details><summary>Why is Playdate performance different between games?</summary><div>The runtime translates SDK behavior in software. A simple Lua game can be smooth while a sprite-heavy or effect-heavy scene may be limited by Lua execution, compositing or LCD updates.</div></details>
-<details><summary>How do I return to the launcher?</summary><div>Tap Power to open the quick panel and choose Home. Some apps also support their own B or START+B shortcut.</div></details>
-<details><summary>The SD card was inserted after boot. What now?</summary><div>Open the Playdate browser or press START to rescan. The browser attempts to remount the card automatically.</div></details>
-<details><summary>What should I include in a bug report?</summary><div>Console firmware step, game name and version, exact reproduction steps, expected and actual behavior, a photo/video, and the relevant serial log. Never attach copyrighted commercial game packages.</div></details>
-<details><summary>Can I use a custom domain later?</summary><div>Yes. GitHub Pages can first use <code>lastlxrd.github.io/Pogopo/</code> and later be connected to a purchased custom domain in the repository Pages settings.</div></details>
-</main><footer><div class="shell">Still stuck? Open an issue with logs and reproduction steps.</div></footer></body></html>
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="0; url=faq/"><link rel="canonical" href="faq/"><title>Moved · Pogopo</title></head><body><p>This page moved to <a href="faq/">faq/</a>.</p></body></html>
+

@@ -1,32 +1,56 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Documentation for the pogopo modular ESP32-S3 handheld console.">
-  <title>pogopoOS documentation</title>
-  <link rel="stylesheet" href="assets/style.css">
-</head>
-<body>
-  <header><div class="shell topbar">
-    <a class="brand" href="index.html">pogopoOS</a>
-    <nav aria-label="Documentation"><a aria-current="page" href="index.html">Overview</a><a href="getting-started.html">Getting started</a><a href="hardware.html">Hardware</a><a href="playdate.html">PogoDate</a><a href="faq.html">FAQ</a><a href="license.html">License</a></nav>
-  </div></header>
-  <main class="shell">
-    <section class="hero">
-      <div class="eyebrow">Documentation</div>
-      <h1>pogopoOS</h1>
-      <p class="lead">Firmware and hardware documentation for the modular pogopo ESP32-S3 handheld.</p>
-      <p>pogopo combines a 400 × 240 Sharp Memory LCD, physical controls, audio, motion sensing, haptics and SD-card game libraries. The current firmware includes Game Boy emulation and the experimental PogoDate Lua compatibility runtime.</p>
-    </section>
-    <div class="notice"><strong>Work in progress.</strong> Game Boy support is stable. Playdate support is an independent compatibility project and currently implements only a subset of the Playdate SDK.</div>
-    <section class="grid">
-      <article class="card"><h2>Getting started</h2><p>Build, flash and prepare the SD card.</p><p><a href="getting-started.html">Open guide →</a></p></article>
-      <article class="card"><h2>Hardware reference</h2><p>Board components, signals and button inputs.</p><p><a href="hardware.html">Open reference →</a></p></article>
-      <article class="card"><h2>PogoDate</h2><p>Supported packages, APIs and current limitations.</p><p><a href="playdate.html">Open compatibility notes →</a></p></article>
-      <article class="card"><h2>FAQ</h2><p>Game loading, controls and troubleshooting.</p><p><a href="faq.html">Open FAQ →</a></p></article>
-    </section>
-  </main>
-  <footer><div class="shell">pogopoOS documentation · <a href="https://github.com/lastlxrd/Pogopo">GitHub repository</a> · <a href="license.html">Apache-2.0</a></div></footer>
-</body>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Technical documentation for the Pogopo modular ESP32-S3 handheld and PogopoOS firmware.">
+    <title>Pogopo documentation</title>
+    <link rel="icon" href="assets/jabaLOGO.png" type="image/png">
+    <script src="assets/theme.js"></script>
+    <link rel="stylesheet" href="assets/styles.css">
+  </head>
+  <body data-page="home" data-root="./">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="Pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/Pogopo" aria-label="Pogopo on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note">Technical documentation and engineering notes for the Pogopo handheld platform.</p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">Modular handheld platform</p>
+        <h1>Pogopo</h1>
+        <p class="lead">A custom ESP32-S3 handheld built around a 400 × 240 Sharp Memory LCD, physical controls, audio, motion sensing, haptics, removable storage, and PogopoOS.</p>
+        <div class="tag-row"><span class="tag">ESP32-S3</span><span class="tag">400 × 240</span><span class="tag">1-bit UI</span><span class="tag">Game Boy</span><span class="tag">PogoDate</span></div>
+        <hr class="page-rule">
+
+        <div class="callout"><p class="callout-title">Early development</p><p>Pogopo hardware and PogopoOS are active engineering projects. Interfaces, compatibility, and documentation may change between checkpoints.</p></div>
+
+        <h2>Start exploring</h2>
+        <div class="doc-grid">
+          <a class="doc-card" href="hardware/"><span class="doc-card-label">Hardware</span><span class="doc-card-copy">Custom PCB, display, controls, audio, storage, motion, haptics, and power.</span></a>
+          <a class="doc-card" href="pogopoos/"><span class="doc-card-label">PogopoOS</span><span class="doc-card-copy">Firmware services, launcher, applications, graphics, and emulator integration.</span></a>
+          <a class="doc-card" href="pogodate/"><span class="doc-card-label">PogoDate</span><span class="doc-card-copy">Experimental Lua Playdate compatibility runtime and current limitations.</span></a>
+          <a class="doc-card" href="development/"><span class="doc-card-label">Development</span><span class="doc-card-copy">Build setup, SD-card layout, project status, and the current engineering roadmap.</span></a>
+        </div>
+
+        <h2>What is working</h2>
+        <p>The current firmware includes board bring-up, a responsive 1-bit launcher, settings and diagnostics, Game Boy emulation, and an experimental PogoDate runtime for selected Lua-based Playdate packages.</p>
+        <p>Use the navigation to inspect the hardware architecture, software stack, engineering case studies, gallery, FAQ, and licensing boundary.</p>
+
+        <h2>Repository</h2>
+        <p>The firmware and documentation live in <a class="text-link" href="https://github.com/lastlxrd/Pogopo">lastlxrd/Pogopo ↗</a>. The site is deployed from the repository's <code>docs/</code> directory with GitHub Pages.</p>
+        <p class="link-muted"><a href="https://github.com/lastlxrd">@lastlxrd</a> · 2026</p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">Pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="assets/app.js"></script>
+  </body>
 </html>

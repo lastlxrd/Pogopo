@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="PogoDate Playdate compatibility runtime, supported packages, APIs, and limitations.">
+    <title>PogoDate · Pogopo</title>
+    <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
+    <script src="../assets/theme.js"></script>
+    <link rel="stylesheet" href="../assets/styles.css">
+  </head>
+  <body data-page="pogodate" data-root="../">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header"><div class="header-inner">
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <a class="brand" data-home-link><img class="brand-logo" data-logo alt="Pogopo frog logo"><span class="brand-copy"><span class="brand-name">pogopo</span><span class="brand-label">documentation</span></span></a>
+      <span class="header-spacer"></span>
+      <button class="search-trigger" id="search-trigger" type="button" aria-label="Search documentation"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><span>Search docs</span><kbd class="key-hint">/</kbd></button>
+      <a class="icon-link" href="https://github.com/lastlxrd/Pogopo" aria-label="Pogopo on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7.4A5.8 5.8 0 0 0 19.3 3 5.4 5.4 0 0 0 19.1.4S17.9 0 15 2a13.4 13.4 0 0 0-7 0C5.1 0 3.9.4 3.9.4A5.4 5.4 0 0 0 3.7 3a5.8 5.8 0 0 0-1.5 4.1c0 5.8 3.5 7 6.8 7.4A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4.2-2"/></svg></a>
+    </div></header>
+    <div class="docs-shell">
+      <aside class="left-sidebar" aria-label="Documentation navigation"><nav id="site-nav"></nav><p class="sidebar-note"></p></aside>
+      <main class="doc-content" id="main-content">
+        <p class="eyebrow">Experimental runtime</p>
+        <h1>PogoDate</h1>
+        <p class="lead">PogoDate runs selected Lua-based Playdate packages on ESP32-S3. It is an independent compatibility layer, not an emulator of Playdate hardware and not an official Panic product.</p>
+        <hr class="page-rule">
+
+        <h2>Package support</h2>
+        <table class="spec-table"><tbody>
+          <tr><th>Lua source / Lua PDZ</th><td>Supported when the title uses implemented APIs.</td></tr>
+          <tr><th>Images, image tables, fonts, and audio</th><td>Partially supported; compatibility is expanded and verified title by title.</td></tr>
+          <tr><th>Native <code>pdex.bin</code></th><td>Unsupported. Playdate native code targets ARM while ESP32-S3 uses Xtensa.</td></tr>
+          <tr><th>Complete Playdate SDK</th><td>Not yet implemented.</td></tr>
+        </tbody></table>
+
+        <h2>Implemented areas</h2>
+        <ul><li>Lua 5.4 runtime and PDZ loading</li><li>400 × 240 monochrome rendering, patterns, images, and image tables</li><li>Sprites, timers, easing, fonts, clipping, and common drawing APIs</li><li>Samples, file players, synthesizer paths, PCM mixing, and IMA ADPCM decoding</li><li>Buttons and BMI270 accelerometer mapping</li><li>Per-title compatibility and performance fixes</li></ul>
+
+        <h2>Current limitations</h2>
+        <p>A title reaching its menu does not mean every gameplay scene, transition, audio format, SDK call, or accessibility mode is implemented. Native Playdate executables cannot run through this runtime.</p>
+
+        <h2>Reporting a problem</h2>
+        <p>Include the title and version, exact reproduction steps, expected and actual behavior, a photo or video, and serial output beginning at <code>Starting ...</code> through the first error or several <code>PERF PD</code> lines. Do not redistribute commercial game packages.</p>
+
+        <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
+        <footer class="doc-footer">Pogopo documentation · <span data-year></span></footer>
+      </main>
+      <aside class="right-sidebar" aria-label="On this page"><h2 class="toc-heading">On this page</h2><ol class="toc-list" id="page-toc"></ol></aside>
+    </div>
+    <script src="../assets/app.js"></script>
+  </body>
+</html>

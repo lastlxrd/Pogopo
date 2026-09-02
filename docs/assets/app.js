@@ -31,6 +31,13 @@
       description: "The ESP-IDF firmware stack, launcher, services, apps, games, and emulators.",
     },
     {
+      id: "pogodate",
+      title: "PogoDate",
+      path: "pogodate/",
+      group: "System",
+      description: "The experimental Lua Playdate compatibility runtime, supported packages, and limitations.",
+    },
+    {
       id: "architecture",
       title: "Architecture",
       path: "architecture/",
@@ -64,6 +71,13 @@
       path: "development/",
       group: "Project",
       description: "Working, experimental, and planned work plus build and SD-card setup.",
+    },
+    {
+      id: "license",
+      title: "License",
+      path: "license/",
+      group: "Project",
+      description: "Apache-2.0 terms, third-party notices, trademarks, and project attribution.",
     },
   ];
 

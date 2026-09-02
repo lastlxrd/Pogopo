@@ -15,3 +15,4 @@
   const theme = savedTheme === "light" || savedTheme === "dark" ? savedTheme : systemTheme;
   document.documentElement.dataset.theme = theme;
 })();
+
