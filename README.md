@@ -20,8 +20,8 @@
 
 Pogopo is still under active development. More complete documentation will be added as the hardware and software mature.
 
-**FAQ:** coming soon...  
-**Tutorials:** coming soon...
+[Documentation](https://pogopo.github.io/pogopoOS/)
+[FAQ](https://pogopo.github.io/pogopoOS/faq.html) 
 
 ## Project Summary
 
