@@ -1,6 +1,7 @@
 #include "apps/playdate_apps.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -11,6 +12,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "pogopo_menu.h"
 
 namespace pogopo::demo {
 namespace {
@@ -417,8 +419,10 @@ void PogoDateBrowserApp::rescan(AppContext& context) {
 }
 
 void PogoDateBrowserApp::onEnter(AppContext& context) {
-    list_.setRowHeight(32);
+    list_.setRowHeight(29);
     rescan(context);
+    enter_elapsed_ms_ = 0;
+    redraw_elapsed_ms_ = 0;
     context.invalidate();
 }
 
@@ -443,16 +447,19 @@ void PogoDateBrowserApp::onEvent(AppContext& context, const input::Event& event)
     if (event.button == input::Button::Top && list_.move(-1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        // The custom focus pill extends beyond gui::List::bounds(). Redraw all
+        // rows so the old black selection never trails on the Sharp LCD.
+        context.invalidate({0, 32, 400, 178});
     } else if (event.button == input::Button::Down && list_.move(1)) {
         context.haptics.play(haptics::Effect::Tick);
         context.uiSound(audio::Effect::Tick);
-        context.invalidate(list_.bounds());
+        context.invalidate({0, 32, 400, 178});
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::A) {
         launchSelected(context);
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::Start) {
         rescan(context);
         context.haptics.play(haptics::Effect::Click);
+        context.uiSound(audio::Effect::Click);
         context.invalidate();
     } else if (event.type == input::EventType::Pressed && event.button == input::Button::B) {
         context.haptics.play(haptics::Effect::Click);
@@ -461,13 +468,103 @@ void PogoDateBrowserApp::onEvent(AppContext& context, const input::Event& event)
     }
 }
 
+void PogoDateBrowserApp::update(AppContext& context, uint32_t dt_ms) {
+    const uint32_t previous_enter = enter_elapsed_ms_;
+    enter_elapsed_ms_ = std::min<uint32_t>(enter_elapsed_ms_ + dt_ms, 330U);
+    redraw_elapsed_ms_ += dt_ms;
+    if (previous_enter < 330U && enter_elapsed_ms_ == 330U) {
+        redraw_elapsed_ms_ = 0;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ < 330U && redraw_elapsed_ms_ >= 32U) {
+        redraw_elapsed_ms_ %= 32U;
+        context.invalidate();
+    } else if (enter_elapsed_ms_ >= 330U && redraw_elapsed_ms_ >= 500U) {
+        redraw_elapsed_ms_ %= 500U;
+        context.invalidate();
+    }
+}
+
 void PogoDateBrowserApp::draw(AppContext& context, const gfx::Rect&) {
     auto& canvas = context.gfx.canvas();
-    canvas.clear_clip(context.theme.background);
-    gui::draw_header(canvas, context.theme, "PLAYDATE SD", "PDX / PDZ");
-    list_.draw(canvas, context.theme);
-    canvas.draw_text(22, 198, status_, gfx::font5x7(), context.theme.foreground);
-    gui::draw_footer(canvas, context.theme, "A PLAY  B BACK", "START RESCAN");
+    canvas.clear_clip(gfx::WHITE);
+    const float raw_progress = std::clamp<float>(
+        static_cast<float>(enter_elapsed_ms_) / 330.0f, 0.0f, 1.0f);
+    const float progress = 1.0f - std::pow(1.0f - raw_progress, 3.0f);
+    const int content_x = static_cast<int>(
+        std::lround((1.0f - progress) * 400.0f));
+
+    menu::PogoFont::drawText(canvas, 12 + content_x, -1, "playdate",
+                             menu::FontFace::Italic22);
+    const power::State power = context.power.state();
+    canvas.draw_rect(366, 8, 23, 10, gfx::BLACK);
+    canvas.fill_rect(389, 11, 2, 4, gfx::BLACK);
+    const int battery_level = power.battery_valid
+        ? std::clamp<int>((power.battery_percent + 24) / 25, 0, 4) : 0;
+    for (int segment = 0; segment < battery_level; ++segment) {
+        canvas.fill_rect(368 + segment * 5, 10, 4, 6, gfx::BLACK);
+    }
+
+    const size_t count = package_count_ ? package_count_ : 1;
+    const int selected = static_cast<int>(list_.selected());
+    constexpr int visible_rows = 7;
+    const int first = std::clamp(selected - 3, 0,
+        std::max(0, static_cast<int>(count) - visible_rows));
+    for (int visible = 0;
+         visible < visible_rows && first + visible < static_cast<int>(count);
+         ++visible) {
+        const int item_index = first + visible;
+        const int y = 35 + visible * 25;
+        const bool focus = item_index == selected;
+        const auto& item = items_[item_index];
+        if (focus) {
+            canvas.fill_rect(9 + content_x, y + 1, 382, 22, gfx::BLACK);
+            canvas.fill_circle(20 + content_x, y + 12, 11, gfx::BLACK);
+            canvas.fill_circle(379 + content_x, y + 12, 11, gfx::BLACK);
+        }
+
+        const menu::FontFace face = focus
+            ? menu::FontFace::Italic14 : menu::FontFace::Regular14;
+        char subtitle[48]{};
+        if (package_count_ && item_index < static_cast<int>(package_count_)) {
+            std::snprintf(subtitle, sizeof(subtitle), "%s",
+                          subtitles_[item_index].data());
+            while (subtitle[0] && menu::PogoFont::textWidth(face, subtitle) > 190) {
+                const size_t length = std::strlen(subtitle);
+                if (length <= 3) break;
+                subtitle[length - 1] = '\0';
+            }
+        }
+        const int subtitle_width = menu::PogoFont::textWidth(face, subtitle);
+        const int label_width = std::max(80, 350 - subtitle_width);
+        char label[64]{};
+        std::snprintf(label, sizeof(label), "%s", item.label ? item.label : "");
+        while (label[0] && menu::PogoFont::textWidth(face, label) > label_width) {
+            const size_t length = std::strlen(label);
+            if (length <= 3) break;
+            label[length - 1] = '\0';
+        }
+        menu::PogoFont::drawText(canvas, 16 + content_x, y, label, face,
+                                 focus ? gfx::WHITE : gfx::BLACK);
+        if (subtitle[0]) {
+            menu::PogoFont::drawText(canvas,
+                383 - subtitle_width + content_x, y, subtitle, face,
+                focus ? gfx::WHITE : gfx::BLACK);
+        }
+    }
+
+    char status[96]{};
+    std::snprintf(status, sizeof(status), "%s", status_);
+    while (status[0] &&
+           menu::PogoFont::textWidth(menu::FontFace::Italic14, status) > 374) {
+        const size_t length = std::strlen(status);
+        if (length <= 3) break;
+        status[length - 1] = '\0';
+    }
+    menu::PogoFont::drawText(canvas, 13 + content_x, 205, status,
+                             menu::FontFace::Italic14);
+    menu::PogoFont::drawText(canvas, 13 + content_x, 220,
+                             "A play  B back  START rescan",
+                             menu::FontFace::Regular14);
 }
 
 } // namespace pogopo::demo

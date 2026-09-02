@@ -59,6 +59,7 @@ public:
     const char* title() const override { return "Playdate SD"; }
     void onEnter(AppContext& context) override;
     void onEvent(AppContext& context, const input::Event& event) override;
+    void update(AppContext& context, uint32_t dt_ms) override;
     void draw(AppContext& context, const gfx::Rect& dirty_region) override;
 
 private:
@@ -72,6 +73,8 @@ private:
     std::array<std::array<char, 48>, storage::Storage::MAX_FILES> subtitles_{};
     size_t package_count_ = 0;
     char status_[96] = "READY";
+    uint32_t enter_elapsed_ms_ = 0;
+    uint32_t redraw_elapsed_ms_ = 0;
 };
 
 } // namespace pogopo::demo
