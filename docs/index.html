@@ -10,23 +10,23 @@
 <body>
   <header><div class="shell topbar">
     <a class="brand" href="index.html">pogopoOS</a>
-    <nav aria-label="Documentation"><a aria-current="page" href="index.html">home</a><a href="getting-started.html">start</a><a href="hardware.html">hardware</a><a href="playdate.html">playdate</a><a href="faq.html">faq</a><a href="license.html">license</a></nav>
+    <nav aria-label="Documentation"><a aria-current="page" href="index.html">Overview</a><a href="getting-started.html">Getting started</a><a href="hardware.html">Hardware</a><a href="playdate.html">PogoDate</a><a href="faq.html">FAQ</a><a href="license.html">License</a></nav>
   </div></header>
   <main class="shell">
     <section class="hero">
-      <div class="eyebrow">modular handheld firmware</div>
-      <h1>small console.<br>big experiments.</h1>
-      <p class="lead">pogopoOS is firmware for a custom ESP32-S3 handheld with a 400 × 240 Sharp Memory LCD, Game Boy emulation, an experimental Playdate Lua compatibility runtime, audio, motion controls and haptics.</p>
-      <a class="button" href="getting-started.html">get started</a><a class="button secondary" href="faq.html">read the FAQ</a>
+      <div class="eyebrow">Documentation</div>
+      <h1>pogopoOS</h1>
+      <p class="lead">Firmware and hardware documentation for the modular pogopo ESP32-S3 handheld.</p>
+      <p>pogopo combines a 400 × 240 Sharp Memory LCD, physical controls, audio, motion sensing, haptics and SD-card game libraries. The current firmware includes Game Boy emulation and the experimental PogoDate Lua compatibility runtime.</p>
     </section>
     <div class="notice"><strong>Work in progress.</strong> Game Boy support is stable. Playdate support is an independent compatibility project and currently implements only a subset of the Playdate SDK.</div>
     <section class="grid">
-      <article class="card"><h2>Build & flash</h2><p>Prepare ESP-IDF 6.0.2, build the firmware and flash it to the console.</p><p><a href="getting-started.html">Open the guide →</a></p></article>
-      <article class="card"><h2>Hardware</h2><p>Pin assignments and the core components used by the current pogopo board.</p><p><a href="hardware.html">View hardware →</a></p></article>
-      <article class="card"><h2>Game libraries</h2><p>Load Game Boy ROMs from <code>/gameboy</code> and extracted Playdate packages from <code>/playdate</code>.</p><p><a href="getting-started.html#sd-card">Prepare an SD card →</a></p></article>
-      <article class="card"><h2>Playdate status</h2><p>Understand what the compatibility runtime can run, what remains incomplete and how to report failures.</p><p><a href="playdate.html">Compatibility notes →</a></p></article>
+      <article class="card"><h2>Getting started</h2><p>Build, flash and prepare the SD card.</p><p><a href="getting-started.html">Open guide →</a></p></article>
+      <article class="card"><h2>Hardware reference</h2><p>Board components, signals and button inputs.</p><p><a href="hardware.html">Open reference →</a></p></article>
+      <article class="card"><h2>PogoDate</h2><p>Supported packages, APIs and current limitations.</p><p><a href="playdate.html">Open compatibility notes →</a></p></article>
+      <article class="card"><h2>FAQ</h2><p>Game loading, controls and troubleshooting.</p><p><a href="faq.html">Open FAQ →</a></p></article>
     </section>
   </main>
-  <footer><div class="shell">pogopoOS · ESP32-S3 handheld firmware · <a href="license.html">Apache-2.0</a></div></footer>
+  <footer><div class="shell">pogopoOS documentation · <a href="https://github.com/lastlxrd/Pogopo">GitHub repository</a> · <a href="license.html">Apache-2.0</a></div></footer>
 </body>
 </html>
