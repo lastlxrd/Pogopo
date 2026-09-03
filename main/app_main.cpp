@@ -654,7 +654,7 @@ void os_task(void*) {
         ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     } else {
-        ESP_LOGI(TAG, "STEP13.5 menu assets ready: %u bytes",
+        ESP_LOGI(TAG, "STEP13.5.1 menu assets ready: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     }
     if (!g_power_outro_animation.valid()) {
@@ -669,7 +669,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP13.5 PogoDate fast-RAM runtime ready after startup");
+    ESP_LOGI(TAG, "STEP13.5.1 PogoDate fast-RAM runtime ready after startup");
 
     // The startup can wait in its 12..15 loop indefinitely. Reset both OS
     // clocks so the first menu frame begins at animation time zero instead of
@@ -736,7 +736,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5 POGODATE FAST RAM");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5.1 POGODATE FAST RAM");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -767,5 +767,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP13.5 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.5.1 system tasks started: startup animation pending");
 }

@@ -88,8 +88,8 @@ bool endsPdx(const char* name) {
 PogoDateApp::PogoDateApp(playdate::Game game, const char* app_id,
                          const char* app_title, const char* game_title,
                          gameboy::GameBoy* memory_donor)
-    : game_(game), app_id_(app_id), app_title_(app_title),
-      game_title_(game_title), memory_donor_(memory_donor) {}
+    : memory_donor_(memory_donor), game_(game), app_id_(app_id),
+      app_title_(app_title), game_title_(game_title) {}
 
 void PogoDateApp::preparePackage(const playdate::PackageInfo& package) {
     package_ = package;
