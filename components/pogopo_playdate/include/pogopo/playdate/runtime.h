@@ -46,7 +46,14 @@ struct Stats {
     uint32_t last_update_us = 0;
     uint32_t max_update_us = 0;
     uint32_t last_logic_us = 0;
+    uint32_t last_game_us = 0;
+    uint32_t last_sprite_us = 0;
+    uint32_t last_timer_us = 0;
+    uint32_t last_frame_timer_us = 0;
     uint32_t last_blit_us = 0;
+    uint32_t startup_us = 0;
+    uint32_t pdz_cache_bytes = 0;
+    uint32_t lazy_sound_loads = 0;
     uint32_t errors = 0;
     uint32_t requested_fps = 50;
     size_t lua_bytes = 0;
@@ -67,6 +74,11 @@ public:
     esp_err_t startPackage(gfx::Canvas& canvas, audio::Audio& audio,
                            storage::Storage& storage,
                            const char* pdx_path);
+    // Browser launches can reuse the PackageInfo they already validated,
+    // avoiding a second main.pdz index pass immediately before startup.
+    esp_err_t startPackage(gfx::Canvas& canvas, audio::Audio& audio,
+                           storage::Storage& storage,
+                           const PackageInfo& package);
     void stop();
 
     void setInput(uint8_t held_mask, uint8_t pressed_mask);

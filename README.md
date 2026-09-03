@@ -21,7 +21,7 @@
 Pogopo is still under active development. More complete documentation will be added as the hardware and software mature.
 
 [Documentation](https://lastlxrd.github.io/Pogopo/)
-[FAQ](https://lastlxrd.github.io/Pogopo/faq.html) 
+[FAQ](https://lastlxrd.github.io/Pogopo/faq/)
 
 ## Project Summary
 

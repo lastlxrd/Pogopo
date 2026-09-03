@@ -726,6 +726,7 @@ function Sprite:update()
 	-- Base-instance update is intentionally empty. A call with no receiver is
 	-- the static Playdate sprite frame update.
 	if self ~= nil then return end
+	playdate._pogoProfileBegin(0)
 	gfx._beginFrame()
 	if background_callback then background_callback(0, 0, 400, 240) end
 	if sprites_dirty then
@@ -815,6 +816,7 @@ function Sprite:update()
 			gfx.setImageDrawMode(previous)
 		end
 	end
+	playdate._pogoProfileEnd(0)
 end
 
 function Sprite.performOnAllSprites(callback)
@@ -2751,6 +2753,7 @@ function playdate.frameTimer.allTimers()
 end
 
 function playdate.frameTimer.updateTimers()
+	playdate._pogoProfileBegin(2)
 	local active = {}
 	updatingFrameTimers = true
 	for i=1,#frameTimers do
@@ -2811,4 +2814,5 @@ function playdate.frameTimer.updateTimers()
 	end
 	pendingFrameTimers = {}
 	frameTimers = active
+	playdate._pogoProfileEnd(2)
 end

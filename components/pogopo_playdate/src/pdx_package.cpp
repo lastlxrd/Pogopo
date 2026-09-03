@@ -15,6 +15,7 @@ namespace pogopo::playdate {
 namespace {
 
 constexpr uint32_t kMaximumPdzBlock = 2U * 1024U * 1024U;
+constexpr size_t kMaximumPdzCache = 2U * 1024U * 1024U;
 
 uint32_t le32(const uint8_t* value) {
     return static_cast<uint32_t>(value[0]) |
@@ -308,7 +309,7 @@ bool normalizePlaydateLuaBytecode(uint8_t* data, size_t size,
 }
 
 esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity,
-                           bool require_main) {
+                           bool require_main, bool cache_data) {
     close();
     if (!path || std::strlen(path) >= sizeof(path_)) {
         setError(error, error_capacity, "main.pdz path is too long");
@@ -398,17 +399,46 @@ esp_err_t PdzArchive::open(const char* path, char* error, size_t error_capacity,
         entry.slot = static_cast<uint8_t>(count_);
         entries_[count_++] = entry;
     }
-    std::fclose(file);
     if (require_main && !findLua("main")) {
+        std::fclose(file);
         close();
         setError(error, error_capacity, "main.pdz does not contain Lua module main");
         return ESP_ERR_NOT_FOUND;
     }
+
+    // Package imports used to reopen and seek main.pdz for every Lua module.
+    // A typical PDZ is small (XTRIS is about 109 KiB), so retain one complete
+    // PSRAM copy and let all imports read directly from it. Oversized packages
+    // keep the original file-backed path instead of consuming unbounded RAM.
+    if (cache_data && file_length > 0 &&
+        static_cast<uint64_t>(file_length) <= kMaximumPdzCache) {
+        cache_ = static_cast<uint8_t*>(heap_caps_malloc(
+            static_cast<size_t>(file_length),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!cache_) {
+            cache_ = static_cast<uint8_t*>(heap_caps_malloc(
+                static_cast<size_t>(file_length), MALLOC_CAP_8BIT));
+        }
+        if (cache_) {
+            std::rewind(file);
+            if (std::fread(cache_, 1, static_cast<size_t>(file_length), file) ==
+                static_cast<size_t>(file_length)) {
+                cache_size_ = static_cast<size_t>(file_length);
+            } else {
+                heap_caps_free(cache_);
+                cache_ = nullptr;
+            }
+        }
+    }
+    std::fclose(file);
     copyText(path_, sizeof(path_), path);
     return ESP_OK;
 }
 
 void PdzArchive::close() {
+    if (cache_) heap_caps_free(cache_);
+    cache_ = nullptr;
+    cache_size_ = 0;
     count_ = 0;
     path_[0] = '\0';
     for (auto& entry : entries_) entry = {};
@@ -438,36 +468,56 @@ esp_err_t PdzArchive::load(const PdzEntry& entry, uint8_t*& data, size_t& size,
         setError(error, error_capacity, "invalid PDZ load request");
         return ESP_ERR_INVALID_ARG;
     }
-    FILE* file = std::fopen(path_, "rb");
-    if (!file || std::fseek(file, static_cast<long>(entry.data_offset), SEEK_SET) != 0) {
-        if (file) std::fclose(file);
-        setError(error, error_capacity, "could not seek main.pdz");
-        return ESP_ERR_NOT_FOUND;
+    FILE* file = nullptr;
+    const uint8_t* cached_data = nullptr;
+    if (cache_ && entry.data_offset <= cache_size_ &&
+        entry.stored_size <= cache_size_ - entry.data_offset) {
+        cached_data = cache_ + entry.data_offset;
+    } else {
+        file = std::fopen(path_, "rb");
+        if (!file ||
+            std::fseek(file, static_cast<long>(entry.data_offset), SEEK_SET) != 0) {
+            if (file) std::fclose(file);
+            setError(error, error_capacity, "could not seek main.pdz");
+            return ESP_ERR_NOT_FOUND;
+        }
     }
     uint8_t* output = static_cast<uint8_t*>(heap_caps_malloc(
         entry.unpacked_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!output) output = static_cast<uint8_t*>(heap_caps_malloc(
         entry.unpacked_size, MALLOC_CAP_8BIT));
     if (!output) {
-        std::fclose(file);
+        if (file) std::fclose(file);
         setError(error, error_capacity, "not enough memory for PDZ module");
         return ESP_ERR_NO_MEM;
     }
 
     esp_err_t result = ESP_OK;
     if (!entry.compressed) {
-        if (std::fread(output, 1, entry.stored_size, file) != entry.stored_size) {
+        if (cached_data) {
+            std::memcpy(output, cached_data, entry.stored_size);
+        } else if (std::fread(output, 1, entry.stored_size, file) !=
+                   entry.stored_size) {
             result = ESP_ERR_INVALID_SIZE;
         }
     } else {
-        uint8_t* packed = static_cast<uint8_t*>(heap_caps_malloc(
-            entry.stored_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!packed) packed = static_cast<uint8_t*>(heap_caps_malloc(
-            entry.stored_size, MALLOC_CAP_8BIT));
+        uint8_t* packed_allocation = nullptr;
+        const uint8_t* packed = cached_data;
+        if (!packed) {
+            packed_allocation = static_cast<uint8_t*>(heap_caps_malloc(
+                entry.stored_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!packed_allocation) {
+                packed_allocation = static_cast<uint8_t*>(heap_caps_malloc(
+                    entry.stored_size, MALLOC_CAP_8BIT));
+            }
+            packed = packed_allocation;
+        }
         if (!packed) {
             result = ESP_ERR_NO_MEM;
         } else {
-            if (std::fread(packed, 1, entry.stored_size, file) != entry.stored_size) {
+            if (!cached_data &&
+                std::fread(packed_allocation, 1, entry.stored_size, file) !=
+                    entry.stored_size) {
                 result = ESP_ERR_INVALID_SIZE;
             } else {
                 uLongf unpacked = entry.unpacked_size;
@@ -476,10 +526,10 @@ esp_err_t PdzArchive::load(const PdzEntry& entry, uint8_t*& data, size_t& size,
                     result = ESP_ERR_INVALID_RESPONSE;
                 }
             }
-            heap_caps_free(packed);
+            if (packed_allocation) heap_caps_free(packed_allocation);
         }
     }
-    std::fclose(file);
+    if (file) std::fclose(file);
     if (result != ESP_OK) {
         heap_caps_free(output);
         setError(error, error_capacity, "PDZ decompression/read failed");
@@ -527,7 +577,8 @@ esp_err_t inspectPackage(const char* pdx_path, PackageInfo& info,
     PdzArchive* archive = allocateArchive();
     if (!archive) return ESP_ERR_NO_MEM;
     char error[96]{};
-    const esp_err_t result = archive->open(path, error, sizeof(error));
+    const esp_err_t result = archive->open(path, error, sizeof(error), true,
+                                           false);
     if (result != ESP_OK) {
         releaseArchive(archive);
         return result;

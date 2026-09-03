@@ -681,8 +681,46 @@ struct Runtime::Impl {
     unsigned external_import_depth = 0;
     char last_error[kErrorCapacity]{};
 
+    enum ProfileSection : size_t {
+        ProfileSprite = 0,
+        ProfileTimer,
+        ProfileFrameTimer,
+        ProfileSectionCount,
+    };
+    std::array<int64_t, ProfileSectionCount> profile_started_us{};
+    std::array<uint32_t, ProfileSectionCount> profile_elapsed_us{};
+
     static Impl* self(lua_State* state) {
         return static_cast<Impl*>(lua_touserdata(state, lua_upvalueindex(1)));
+    }
+
+    static int cProfileBegin(lua_State* state) {
+        Impl* runtime = self(state);
+        const lua_Integer requested = luaL_checkinteger(state, 1);
+        if (requested >= 0 &&
+            requested < static_cast<lua_Integer>(ProfileSectionCount)) {
+            runtime->profile_started_us[static_cast<size_t>(requested)] =
+                esp_timer_get_time();
+        }
+        return 0;
+    }
+
+    static int cProfileEnd(lua_State* state) {
+        Impl* runtime = self(state);
+        const lua_Integer requested = luaL_checkinteger(state, 1);
+        if (requested >= 0 &&
+            requested < static_cast<lua_Integer>(ProfileSectionCount)) {
+            const size_t section = static_cast<size_t>(requested);
+            const int64_t started = runtime->profile_started_us[section];
+            if (started > 0) {
+                const uint32_t elapsed = static_cast<uint32_t>(
+                    std::clamp<int64_t>(esp_timer_get_time() - started, 0,
+                                        UINT32_MAX));
+                runtime->profile_elapsed_us[section] += elapsed;
+                runtime->profile_started_us[section] = 0;
+            }
+        }
+        return 0;
     }
 
     static void* allocator(void* user, void* pointer, size_t old_size,
@@ -5929,99 +5967,6 @@ struct Runtime::Impl {
         return false;
     }
 
-    void preloadShortSounds() {
-        if (!package_mode || sound_cache_bytes >= kMaximumSoundCacheBytes) return;
-
-        // A recursive FAT traversal used to put two path buffers and a DIR
-        // frame on the 8 KiB pogopo_os stack for every directory level.
-        // Hillslide's deeper asset tree exhausted that stack before Lua was
-        // even created. Keep both the bounded work queue and all large scratch
-        // paths in PSRAM; the task stack now stays essentially constant.
-        struct ScanDirectory {
-            char relative[256];
-            uint8_t depth;
-        };
-        struct SoundScanState {
-            std::array<ScanDirectory, 64> pending;
-            size_t head;
-            size_t tail;
-            size_t skipped_directories;
-            char directory_path[384];
-            char child_relative[256];
-            char child_path[384];
-            struct stat value;
-        };
-        auto* scan = static_cast<SoundScanState*>(heap_caps_malloc(
-            sizeof(SoundScanState), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!scan) {
-            scan = static_cast<SoundScanState*>(heap_caps_malloc(
-                sizeof(SoundScanState), MALLOC_CAP_8BIT));
-        }
-        if (!scan) {
-            ESP_LOGE(TAG, "SFX preload skipped: no memory for directory queue");
-            return;
-        }
-        std::memset(scan, 0, sizeof(*scan));
-        scan->tail = 1; // Entry zero is the package root (empty relative path).
-        const size_t cached_before = sound_cache_bytes;
-        size_t scanned_directories = 0;
-        while (scan->head < scan->tail &&
-               sound_cache_bytes < kMaximumSoundCacheBytes) {
-            const ScanDirectory& current = scan->pending[scan->head++];
-            if (!pdxJoinPath(scan->directory_path, sizeof(scan->directory_path),
-                             package_info.path, current.relative)) {
-                continue;
-            }
-            DIR* directory = opendir(scan->directory_path);
-            if (!directory) continue;
-            ++scanned_directories;
-            while (dirent* entry = readdir(directory)) {
-                if (!std::strcmp(entry->d_name, ".") ||
-                    !std::strcmp(entry->d_name, "..")) continue;
-                const int relative_length = current.relative[0]
-                    ? std::snprintf(scan->child_relative,
-                                    sizeof(scan->child_relative), "%s/%s",
-                                    current.relative, entry->d_name)
-                    : std::snprintf(scan->child_relative,
-                                    sizeof(scan->child_relative), "%s",
-                                    entry->d_name);
-                if (relative_length <= 0 || static_cast<size_t>(relative_length) >=
-                    sizeof(scan->child_relative)) continue;
-                if (!pdxJoinPath(scan->child_path, sizeof(scan->child_path),
-                                 package_info.path, scan->child_relative)) continue;
-                std::memset(&scan->value, 0, sizeof(scan->value));
-                if (stat(scan->child_path, &scan->value) != 0) continue;
-                if (S_ISDIR(scan->value.st_mode)) {
-                    if (!musicPath(scan->child_relative) && current.depth < 7) {
-                        if (scan->tail < scan->pending.size()) {
-                            ScanDirectory& next = scan->pending[scan->tail++];
-                            std::snprintf(next.relative, sizeof(next.relative),
-                                          "%s", scan->child_relative);
-                            next.depth = static_cast<uint8_t>(current.depth + 1);
-                        } else {
-                            ++scan->skipped_directories;
-                        }
-                    }
-                    continue;
-                }
-                if (!S_ISREG(scan->value.st_mode) ||
-                    musicPath(scan->child_relative) ||
-                    !pathHasSuffix(scan->child_relative, ".pda")) continue;
-                (void)cacheSound(scan->child_relative);
-                if (sound_cache_bytes >= kMaximumSoundCacheBytes) break;
-            }
-            closedir(directory);
-        }
-        ESP_LOGI(TAG,
-                 "SFX preload: dirs=%u queued=%u skipped=%u cache=+%uB total=%uB",
-                 static_cast<unsigned>(scanned_directories),
-                 static_cast<unsigned>(scan->tail),
-                 static_cast<unsigned>(scan->skipped_directories),
-                 static_cast<unsigned>(sound_cache_bytes - cached_before),
-                 static_cast<unsigned>(sound_cache_bytes));
-        heap_caps_free(scan);
-    }
-
     bool cloneCachedSound(int index, int16_t*& samples, uint32_t& frames,
                           uint32_t& sample_rate) const {
         samples = nullptr;
@@ -6099,7 +6044,10 @@ struct Runtime::Impl {
             sound->effect = effectForPath(path);
             sound->music = musicPath(path);
             std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
-            if (!sound->music) sound->cache_index = runtime->cacheSound(path);
+            // Sound construction is part of many games' startup path. Decode
+            // the sample only when play() first needs it, then retain the
+            // existing bounded cache for later plays.
+            sound->cache_index = -1;
         }
         luaL_getmetatable(state, kSoundMetatable);
         lua_setmetatable(state, -2);
@@ -6137,6 +6085,10 @@ struct Runtime::Impl {
             sound->started_at_ms = runtime->now_ms;
             int16_t* samples = nullptr;
             uint32_t frames = 0, sample_rate = 0;
+            if (!sound->music && sound->cache_index < 0 && sound->path[0]) {
+                sound->cache_index = runtime->cacheSound(sound->path);
+                ++runtime->runtime_stats.lazy_sound_loads;
+            }
             const bool loaded = runtime->audio && sound->path[0] &&
                 (runtime->cloneCachedSound(sound->cache_index, samples, frames,
                                            sample_rate) ||
@@ -6324,7 +6276,7 @@ struct Runtime::Impl {
             sound->effect = effectForPath(path);
             sound->music = musicPath(path);
             std::snprintf(sound->path, sizeof(sound->path), "%s", path ? path : "");
-            sound->cache_index = sound->music ? -1 : runtime->cacheSound(path);
+            sound->cache_index = -1;
         }
         lua_pushboolean(state, sound != nullptr);
         return 1;
@@ -6832,7 +6784,12 @@ struct Runtime::Impl {
 
     static int cUpdateTimers(lua_State* state) {
         Impl* runtime = self(state);
-        if (!runtime->updateTimers()) return luaL_error(state, "%s", runtime->last_error);
+        const int64_t started = esp_timer_get_time();
+        const bool ok = runtime->updateTimers();
+        runtime->profile_elapsed_us[ProfileTimer] +=
+            static_cast<uint32_t>(std::clamp<int64_t>(
+                esp_timer_get_time() - started, 0, UINT32_MAX));
+        if (!ok) return luaL_error(state, "%s", runtime->last_error);
         return 0;
     }
 
@@ -7824,6 +7781,10 @@ struct Runtime::Impl {
         setInteger(playdate,"kButtonUp",0x01);setInteger(playdate,"kButtonDown",0x02);
         setInteger(playdate,"kButtonA",0x20);setInteger(playdate,"kButtonB",0x10);
         setBoolean(playdate,"isSimulator",false);
+        // Internal compatibility profiler. compat.lua brackets the expensive
+        // sprite and frame-timer passes without exposing a public SDK API.
+        setFunction(playdate,"_pogoProfileBegin",cProfileBegin);
+        setFunction(playdate,"_pogoProfileEnd",cProfileEnd);
         setFunction(playdate,"getCurrentTimeMilliseconds",cGetCurrentTime);
         setFunction(playdate,"getElapsedTime",cGetElapsedTime);
         setFunction(playdate,"resetElapsedTime",cResetElapsedTime);
@@ -8057,7 +8018,9 @@ struct Runtime::Impl {
 
     esp_err_t start(gfx::Canvas& target_canvas,audio::Audio& target_audio,
                     storage::Storage& target_storage,Game selected_game,
-                    const char* package_path = nullptr) {
+                    const char* package_path = nullptr,
+                    const PackageInfo* inspected_package = nullptr) {
+        const int64_t startup_started = esp_timer_get_time();
         canvas=&target_canvas;audio=&target_audio;storage=&target_storage;game=selected_game;
         last_error[0]='\0';loaded_modules.fill(false);runtime_stats={};
         for (auto& name : loaded_external_modules) name.fill('\0');
@@ -8065,10 +8028,17 @@ struct Runtime::Impl {
         allocated_bytes=0;peak_allocated_bytes=0;
         package_mode=false;package_info={};pdz.close();external_pdz.close();
         if (package_path && package_path[0]) {
-            const esp_err_t inspect_error = inspectPackage(package_path, package_info);
-            if (inspect_error != ESP_OK) {
-                setError("PDX", "invalid or incomplete package");
-                return inspect_error;
+            if (inspected_package &&
+                !std::strcmp(inspected_package->path, package_path) &&
+                inspected_package->kind != PackageKind::Invalid) {
+                package_info = *inspected_package;
+            } else {
+                const esp_err_t inspect_error = inspectPackage(
+                    package_path, package_info);
+                if (inspect_error != ESP_OK) {
+                    setError("PDX", "invalid or incomplete package");
+                    return inspect_error;
+                }
             }
             if (package_info.kind == PackageKind::NativeBinary) {
                 setError("PDX", "pdex.bin is ARM code; ESP32-S3 requires Lua main.pdz");
@@ -8089,7 +8059,7 @@ struct Runtime::Impl {
             if (!std::strcmp(package_info.bundle_id, "com.hteumeuleu.celeste") ||
                 std::strstr(package_info.name, "Celeste")) game = Game::Celeste;
             else game = Game::External;
-            preloadShortSounds();
+            ESP_LOGI(TAG, "SFX preload deferred until first play");
         }
         // Keep each game's original simulation speed.  The panel can still
         // present up to 50 Hz, but forcing a frame-based 30 FPS game to run
@@ -8125,7 +8095,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP13.4: size-aware Pogofont system fallback");
+                 "PogoDate API STEP13.4.1: cached PDZ, lazy SFX and profiler");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -8150,13 +8120,20 @@ struct Runtime::Impl {
         // spikes on PSRAM-backed allocations.
         lua_gc(lua, LUA_GCINC, 110, 200, 8);
         is_running=true;
-        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50, screen=%s, audio cache=%lu",
+        runtime_stats.startup_us = static_cast<uint32_t>(
+            std::clamp<int64_t>(esp_timer_get_time() - startup_started, 0,
+                                UINT32_MAX));
+        runtime_stats.pdz_cache_bytes = static_cast<uint32_t>(
+            std::min<size_t>(pdz.cachedBytes(), UINT32_MAX));
+        ESP_LOGI(TAG,"PogoDate Lite ready: %s %s Lua 5.4, 400x240, logic=%lu FPS LCD cap=50, screen=%s, PDZ cache=%lu, audio cache=%lu, startup=%lu ms",
                  package_mode ? package_info.name :
                     (game==Game::Celeste?"Celeste Classic 1.0.3":"PDSnake 1.2"),
                  package_mode ? "SD main.pdz" : "source",
                  static_cast<unsigned long>(refresh_rate),
                  screen_in_internal_ram ? "internal" : "PSRAM",
-                 static_cast<unsigned long>(sound_cache_bytes));
+                 static_cast<unsigned long>(runtime_stats.pdz_cache_bytes),
+                 static_cast<unsigned long>(sound_cache_bytes),
+                 static_cast<unsigned long>(runtime_stats.startup_us / 1000U));
         return ESP_OK;
     }
 
@@ -8198,16 +8175,24 @@ struct Runtime::Impl {
         if(frame_accumulator_units>=1000U){
             frame_accumulator_units-=1000U;
             frame_dt_ms=(1000U+refresh_rate/2U)/std::max<uint32_t>(1U,refresh_rate);
+            profile_started_us.fill(0);
+            profile_elapsed_us.fill(0);
             const uint8_t released=static_cast<uint8_t>(previous_held_buttons&~held_buttons);
             const int64_t started=esp_timer_get_time();
             bool crank_consumed=false;
             if(!dispatchInput(pressed_buttons,released)||
-               !dispatchCrank(crank_consumed)||!callGlobal("playdate","update")){
+               !dispatchCrank(crank_consumed)){
                 // A Lua failure ends the game immediately.  Sample players,
                 // file players and synth voices live in the shared mixer and
                 // otherwise keep sounding after is_running becomes false.
                 // Queue StopAll before PogoDateApp queues its one-shot error
                 // effect, so only the system notification remains audible.
+                if(audio)audio->stopAll();
+                is_running=false;
+                return 0;
+            }
+            const int64_t game_started=esp_timer_get_time();
+            if(!callGlobal("playdate","update")){
                 if(audio)audio->stopAll();
                 is_running=false;
                 return 0;
@@ -8221,6 +8206,12 @@ struct Runtime::Impl {
             const int64_t finished=esp_timer_get_time();
             const uint32_t elapsed=static_cast<uint32_t>(std::max<int64_t>(0,finished-started));
             runtime_stats.last_logic_us=static_cast<uint32_t>(std::max<int64_t>(0,logic_finished-started));
+            runtime_stats.last_game_us=static_cast<uint32_t>(
+                std::max<int64_t>(0, logic_finished-game_started));
+            runtime_stats.last_sprite_us=profile_elapsed_us[ProfileSprite];
+            runtime_stats.last_timer_us=profile_elapsed_us[ProfileTimer];
+            runtime_stats.last_frame_timer_us=
+                profile_elapsed_us[ProfileFrameTimer];
             runtime_stats.last_blit_us=static_cast<uint32_t>(std::max<int64_t>(0,finished-logic_finished));
             runtime_stats.last_update_us=elapsed;runtime_stats.max_update_us=std::max(runtime_stats.max_update_us,elapsed);
             ++runtime_stats.lua_frames;++produced;pressed_buttons=0;
@@ -8245,6 +8236,14 @@ esp_err_t Runtime::startPackage(gfx::Canvas& canvas,audio::Audio& audio,
     if (!impl_) return ESP_ERR_NO_MEM;
     impl_->stop();
     return impl_->start(canvas, audio, storage, Game::External, pdx_path);
+}
+esp_err_t Runtime::startPackage(gfx::Canvas& canvas,audio::Audio& audio,
+                                storage::Storage& storage,
+                                const PackageInfo& package){
+    if (!impl_) return ESP_ERR_NO_MEM;
+    impl_->stop();
+    return impl_->start(canvas, audio, storage, Game::External, package.path,
+                        &package);
 }
 void Runtime::stop(){if(impl_)impl_->stop();}
 void Runtime::setInput(uint8_t held_mask,uint8_t pressed_mask){if(!impl_)return;impl_->held_buttons=held_mask;impl_->pressed_buttons=static_cast<uint8_t>(impl_->pressed_buttons|pressed_mask);}

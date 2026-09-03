@@ -147,7 +147,7 @@ void PogoDateApp::onEnter(AppContext& context) {
                  uxTaskGetStackHighWaterMark(nullptr)));
     start_error_ = package_.path[0]
         ? runtime_.startPackage(context.gfx.canvas(), context.audio,
-                                context.storage, package_.path)
+                                context.storage, package_)
         : runtime_.start(context.gfx.canvas(), context.audio,
                          context.storage, game_);
     if (start_error_ == ESP_OK) {
@@ -279,6 +279,12 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
     if (perf_elapsed_us >= 1000000U) {
         const playdate::Stats stats = runtime_.stats();
         const gfx::Graphics::Stats lcd_stats = context.gfx.stats();
+        const uint64_t profiled_game_us =
+            static_cast<uint64_t>(stats.last_sprite_us) +
+            stats.last_timer_us + stats.last_frame_timer_us;
+        const uint32_t other_game_us = static_cast<uint32_t>(
+            stats.last_game_us > profiled_game_us
+                ? stats.last_game_us - profiled_game_us : 0U);
         const uint32_t lua_delta =
             stats.lua_frames - previous_lua_frames_;
         const uint32_t lcd_delta =
@@ -292,7 +298,8 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
         ESP_LOGI(
             TAG,
             "PERF PD %s lua=%lu lcd=%lu target=%lu update=%luus max=%luus "
-            "logic=%luus blit=%luus rows=%u/240 tx=%luB/%luus "
+            "logic=%luus game=%luus spr=%luus timer=%luus ft=%luus "
+            "other=%luus blit=%luus rows=%u/240 tx=%luB/%luus "
             "luaheap=%lu peak=%lu gc=%lu err=%lu RAM=%lu/%lu PSRAM=%lu "
             "acc=%+.2f,%+.2f,%+.2f i2cerr=%lu",
             displayTitle(), static_cast<unsigned long>(lua_fps),
@@ -301,6 +308,11 @@ void PogoDateApp::update(AppContext& context, uint32_t dt_ms) {
             static_cast<unsigned long>(stats.last_update_us),
             static_cast<unsigned long>(stats.max_update_us),
             static_cast<unsigned long>(stats.last_logic_us),
+            static_cast<unsigned long>(stats.last_game_us),
+            static_cast<unsigned long>(stats.last_sprite_us),
+            static_cast<unsigned long>(stats.last_timer_us),
+            static_cast<unsigned long>(stats.last_frame_timer_us),
+            static_cast<unsigned long>(other_game_us),
             static_cast<unsigned long>(stats.last_blit_us),
             static_cast<unsigned>(lcd_stats.last_rows),
             static_cast<unsigned long>(lcd_stats.last_bytes),

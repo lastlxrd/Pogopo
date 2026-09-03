@@ -22,8 +22,13 @@ class PdzArchive {
 public:
     static constexpr size_t MAX_ENTRIES = 96;
 
+    PdzArchive() = default;
+    ~PdzArchive() { close(); }
+    PdzArchive(const PdzArchive&) = delete;
+    PdzArchive& operator=(const PdzArchive&) = delete;
+
     esp_err_t open(const char* path, char* error, size_t error_capacity,
-                   bool require_main = true);
+                   bool require_main = true, bool cache_data = true);
     void close();
     const PdzEntry* findLua(const char* module) const;
     // Caller owns the returned heap_caps_malloc()-compatible buffer.
@@ -31,6 +36,7 @@ public:
                    char* error, size_t error_capacity) const;
 
     const char* path() const { return path_; }
+    size_t cachedBytes() const { return cache_size_; }
     size_t count() const { return count_; }
     const PdzEntry* entry(size_t index) const {
         return index < count_ ? &entries_[index] : nullptr;
@@ -41,6 +47,8 @@ private:
     std::array<PdzEntry, MAX_ENTRIES> entries_{};
     size_t count_ = 0;
     char path_[224]{};
+    uint8_t* cache_ = nullptr;
+    size_t cache_size_ = 0;
 };
 
 bool pdxJoinPath(char* out, size_t capacity, const char* root,

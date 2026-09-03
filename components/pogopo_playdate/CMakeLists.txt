@@ -113,4 +113,7 @@ set_source_files_properties(
     PROPERTIES GENERATED TRUE
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
+# The runtime's image, collision and bytecode-normalization loops dominate
+# Playdate frame time on ESP32-S3. Keep this component on the performance
+# profile even when the rest of the firmware uses the balanced default.
+target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
