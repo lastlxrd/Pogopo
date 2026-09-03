@@ -1055,12 +1055,16 @@ struct Runtime::Impl {
         Image replacement{};
         const size_t bytes = static_cast<size_t>(width) * height;
         // A native 400x240 frame is read and written several times per game
-        // update. Keep it in fast internal SRAM when a 64 KiB safety reserve
-        // remains; otherwise fall back to PSRAM exactly as before.
+        // update. PogoDate temporarily borrows Game Boy's idle SRAM arena, so
+        // prefer that fast block while still leaving 48 KiB for transient IDF
+        // allocations. Fall back to PSRAM if the handoff was unavailable.
+        const size_t free_internal = heap_caps_get_free_size(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         const size_t largest_internal = heap_caps_get_largest_free_block(
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         const bool prefer_internal = scale == 2 ||
-            largest_internal >= bytes + 64U * 1024U;
+            (largest_internal >= bytes &&
+             free_internal >= bytes + 48U * 1024U);
         bool replacement_internal = false;
         if (!allocateImage(replacement, width, height, background_color,
                            prefer_internal, &replacement_internal)) {
@@ -8162,7 +8166,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP13.4.3: byte blit and watchdog-safe scheduling");
+                 "PogoDate API STEP13.5: internal framebuffer RAM handoff");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

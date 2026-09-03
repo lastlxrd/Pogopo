@@ -7,12 +7,15 @@
 #include "pogopo_gui.h"
 #include "pogopo_playdate.h"
 
+namespace pogopo::gameboy { class GameBoy; }
+
 namespace pogopo::demo {
 
 class PogoDateApp final : public Application {
 public:
     PogoDateApp(playdate::Game game, const char* app_id,
-                const char* app_title, const char* game_title);
+                const char* app_title, const char* game_title,
+                gameboy::GameBoy* memory_donor = nullptr);
     void preparePackage(const playdate::PackageInfo& package);
 
     const char* id() const override { return app_id_; }
@@ -31,6 +34,8 @@ private:
     const char* displayTitle() const;
 
     playdate::Runtime runtime_{};
+    gameboy::GameBoy* memory_donor_ = nullptr;
+    uint32_t borrowed_rom_arena_bytes_ = 0;
     playdate::Game game_ = playdate::Game::PDSnake;
     const char* app_id_ = "pogodate";
     const char* app_title_ = "PogoDate";

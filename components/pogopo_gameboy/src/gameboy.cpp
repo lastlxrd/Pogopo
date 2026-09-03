@@ -146,42 +146,7 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     config_ = config;
     audio_ = &audio;
 
-    if (config_.internal_rom_arena_bytes > 0) {
-        constexpr uint32_t internal_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-        const uint32_t free_internal = static_cast<uint32_t>(
-            heap_caps_get_free_size(internal_caps));
-        const uint32_t largest_internal = static_cast<uint32_t>(
-            heap_caps_get_largest_free_block(internal_caps));
-        const uint32_t safe_budget = free_internal > config_.internal_rom_headroom_bytes
-            ? free_internal - config_.internal_rom_headroom_bytes : 0;
-        uint32_t candidate = std::min({config_.internal_rom_arena_bytes,
-                                       largest_internal, safe_budget});
-        candidate -= candidate % ROM_CACHE_PAGE_SIZE;
-        uint32_t minimum = std::max<uint32_t>(
-            ROM_CACHE_PAGE_SIZE, config_.internal_rom_arena_min_bytes);
-        minimum -= minimum % ROM_CACHE_PAGE_SIZE;
-        while (candidate >= minimum && !impl_->rom_arena) {
-            impl_->rom_arena = static_cast<uint8_t*>(heap_caps_malloc(
-                candidate, internal_caps));
-            if (!impl_->rom_arena) candidate -= ROM_CACHE_PAGE_SIZE;
-        }
-        if (impl_->rom_arena) {
-            impl_->rom_arena_size = candidate;
-            ESP_LOGI(TAG,
-                     "Reserved adaptive ROM arena: %lu bytes (%lu cache pages, free=%lu largest=%lu)",
-                     static_cast<unsigned long>(impl_->rom_arena_size),
-                     static_cast<unsigned long>(impl_->rom_arena_size / ROM_CACHE_PAGE_SIZE),
-                     static_cast<unsigned long>(heap_caps_get_free_size(internal_caps)),
-                     static_cast<unsigned long>(heap_caps_get_largest_free_block(
-                         internal_caps)));
-        } else {
-            ESP_LOGW(TAG,
-                     "Could not reserve adaptive ROM arena (free=%lu largest=%lu headroom=%lu)",
-                     static_cast<unsigned long>(free_internal),
-                     static_cast<unsigned long>(largest_internal),
-                     static_cast<unsigned long>(config_.internal_rom_headroom_bytes));
-        }
-    }
+    reserveRomArena();
 
     impl_->frame_mutex = xSemaphoreCreateMutex();
     impl_->core_mutex = xSemaphoreCreateMutex();
@@ -205,6 +170,71 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     last_error_.store(ESP_OK);
     ESP_LOGI(TAG, "Game Boy frontend ready: Peanut-GB + MiniGB APU");
     return ESP_OK;
+}
+
+bool GameBoy::reserveRomArena() {
+    if (!impl_ || impl_->rom_arena || config_.internal_rom_arena_bytes == 0) {
+        return impl_ && (impl_->rom_arena || config_.internal_rom_arena_bytes == 0);
+    }
+
+    constexpr uint32_t internal_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const uint32_t free_internal = static_cast<uint32_t>(
+        heap_caps_get_free_size(internal_caps));
+    const uint32_t largest_internal = static_cast<uint32_t>(
+        heap_caps_get_largest_free_block(internal_caps));
+    const uint32_t safe_budget = free_internal > config_.internal_rom_headroom_bytes
+        ? free_internal - config_.internal_rom_headroom_bytes : 0;
+    uint32_t candidate = std::min({config_.internal_rom_arena_bytes,
+                                   largest_internal, safe_budget});
+    candidate -= candidate % ROM_CACHE_PAGE_SIZE;
+    uint32_t minimum = std::max<uint32_t>(
+        ROM_CACHE_PAGE_SIZE, config_.internal_rom_arena_min_bytes);
+    minimum -= minimum % ROM_CACHE_PAGE_SIZE;
+    while (candidate >= minimum && !impl_->rom_arena) {
+        impl_->rom_arena = static_cast<uint8_t*>(heap_caps_malloc(
+            candidate, internal_caps));
+        if (!impl_->rom_arena) candidate -= ROM_CACHE_PAGE_SIZE;
+    }
+    if (impl_->rom_arena) {
+        impl_->rom_arena_size = candidate;
+        ESP_LOGI(TAG,
+                 "Reserved adaptive ROM arena: %lu bytes (%lu cache pages, free=%lu largest=%lu)",
+                 static_cast<unsigned long>(impl_->rom_arena_size),
+                 static_cast<unsigned long>(impl_->rom_arena_size / ROM_CACHE_PAGE_SIZE),
+                 static_cast<unsigned long>(heap_caps_get_free_size(internal_caps)),
+                 static_cast<unsigned long>(heap_caps_get_largest_free_block(
+                     internal_caps)));
+    } else {
+        ESP_LOGW(TAG,
+                 "Could not reserve adaptive ROM arena (free=%lu largest=%lu headroom=%lu)",
+                 static_cast<unsigned long>(free_internal),
+                 static_cast<unsigned long>(largest_internal),
+                 static_cast<unsigned long>(config_.internal_rom_headroom_bytes));
+    }
+    return impl_->rom_arena != nullptr;
+}
+
+uint32_t GameBoy::releaseIdleRomArena() {
+    if (!impl_ || loaded_.load() || task_running_.load() ||
+        audio_task_running_.load() || !impl_->rom_arena) {
+        return 0;
+    }
+    const uint32_t released = impl_->rom_arena_size;
+    heap_caps_free(impl_->rom_arena);
+    impl_->rom_arena = nullptr;
+    impl_->rom_arena_size = 0;
+    ESP_LOGI(TAG, "Lent idle ROM arena to PogoDate: %lu bytes",
+             static_cast<unsigned long>(released));
+    return released;
+}
+
+uint32_t GameBoy::reserveIdleRomArena() {
+    if (!impl_ || loaded_.load() || task_running_.load() ||
+        audio_task_running_.load()) {
+        return 0;
+    }
+    reserveRomArena();
+    return impl_->rom_arena_size;
 }
 
 void GameBoy::end() {

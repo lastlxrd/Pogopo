@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "pogopo_gameboy.h"
 #include "pogopo_menu.h"
 
 namespace pogopo::demo {
@@ -85,9 +86,10 @@ bool endsPdx(const char* name) {
 }
 
 PogoDateApp::PogoDateApp(playdate::Game game, const char* app_id,
-                         const char* app_title, const char* game_title)
+                         const char* app_title, const char* game_title,
+                         gameboy::GameBoy* memory_donor)
     : game_(game), app_id_(app_id), app_title_(app_title),
-      game_title_(game_title) {}
+      game_title_(game_title), memory_donor_(memory_donor) {}
 
 void PogoDateApp::preparePackage(const playdate::PackageInfo& package) {
     package_ = package;
@@ -142,6 +144,14 @@ void PogoDateApp::onEnter(AppContext& context) {
     context.audio.stopStream();
     context.audio.stopRealtime();
     drawLoading(context);
+    borrowed_rom_arena_bytes_ = memory_donor_
+        ? memory_donor_->releaseIdleRomArena() : 0;
+    ESP_LOGI(TAG, "PogoDate fast-RAM handoff: borrowed=%luB free=%luB largest=%luB",
+             static_cast<unsigned long>(borrowed_rom_arena_bytes_),
+             static_cast<unsigned long>(heap_caps_get_free_size(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
     ESP_LOGI(TAG, "Starting %s: pogopo_os stack free=%uB",
              displayTitle(), static_cast<unsigned>(
                  uxTaskGetStackHighWaterMark(nullptr)));
@@ -160,6 +170,10 @@ void PogoDateApp::onEnter(AppContext& context) {
         context.uiSound(audio::Effect::Error);
         ESP_LOGE(TAG, "PogoDate start failed: %s / %s",
                  esp_err_to_name(start_error_), runtime_.error());
+        if (borrowed_rom_arena_bytes_ && memory_donor_) {
+            memory_donor_->reserveIdleRomArena();
+            borrowed_rom_arena_bytes_ = 0;
+        }
     }
     ESP_LOGI(TAG, "%s startup complete: pogopo_os stack minimum free=%uB",
              displayTitle(), static_cast<unsigned>(
@@ -169,6 +183,12 @@ void PogoDateApp::onEnter(AppContext& context) {
 
 void PogoDateApp::onExit(AppContext&) {
     runtime_.stop();
+    if (borrowed_rom_arena_bytes_ && memory_donor_) {
+        const uint32_t restored = memory_donor_->reserveIdleRomArena();
+        ESP_LOGI(TAG, "PogoDate fast-RAM returned: restored=%luB",
+                 static_cast<unsigned long>(restored));
+        borrowed_rom_arena_bytes_ = 0;
+    }
     queued_pressed_ = 0;
     frame_pending_ = false;
 }

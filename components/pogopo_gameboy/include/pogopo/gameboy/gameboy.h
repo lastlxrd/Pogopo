@@ -92,6 +92,11 @@ public:
     esp_err_t begin(audio::Audio& audio, const Config& config);
     void end();
 
+    // Lend the early contiguous SRAM reservation to PogoDate while no
+    // cartridge is active, then rebuild it before the next Game Boy load.
+    uint32_t releaseIdleRomArena();
+    uint32_t reserveIdleRomArena();
+
     esp_err_t load(const char* path);
     void unload();
     esp_err_t flushSave();
@@ -124,6 +129,7 @@ private:
     void audioTaskLoop();
     esp_err_t allocateFrames();
     void freeFrames();
+    bool reserveRomArena();
     esp_err_t loadRomFile(const char* path);
     esp_err_t initializeCore();
     esp_err_t initializeSaveRam();
