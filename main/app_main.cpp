@@ -315,7 +315,10 @@ esp_err_t start_gameboy() {
     pogopo::GameBoy::Config config;
     config.internal_rom_arena_bytes = 128U * 1024U;
     config.internal_rom_arena_min_bytes = 32U * 1024U;
-    config.internal_rom_headroom_bytes = 128U * 1024U;
+    // Reserve at least a 112 KiB contiguous arena on the current board. When
+    // PogoDate starts, its 96 KiB native screen borrows this block and still
+    // leaves roughly 16 KiB contiguous plus the rest of the internal heap.
+    config.internal_rom_headroom_bytes = 96U * 1024U;
     config.internal_rom_limit = 256U * 1024U;
     config.save_flush_interval_ms = 0; // Flush on exit/power-off, never mid-frame.
     config.requested_cache_pages = 8;
@@ -654,7 +657,7 @@ void os_task(void*) {
         ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     } else {
-        ESP_LOGI(TAG, "STEP13.5.1 menu assets ready: %u bytes",
+        ESP_LOGI(TAG, "STEP13.5.2 menu assets ready: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     }
     if (!g_power_outro_animation.valid()) {
@@ -669,7 +672,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP13.5.1 PogoDate fast-RAM runtime ready after startup");
+    ESP_LOGI(TAG, "STEP13.5.2 PogoDate internal-screen runtime ready after startup");
 
     // The startup can wait in its 12..15 loop indefinitely. Reset both OS
     // clocks so the first menu frame begins at animation time zero instead of
@@ -736,7 +739,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5.1 POGODATE FAST RAM");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5.2 POGODATE INTERNAL SCREEN");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -767,5 +770,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP13.5.1 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.5.2 system tasks started: startup animation pending");
 }

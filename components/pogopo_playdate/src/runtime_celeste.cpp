@@ -1073,6 +1073,15 @@ struct Runtime::Impl {
         releaseImage(screen);
         screen = replacement;
         screen_in_internal_ram = replacement_internal;
+        ESP_LOGI(TAG,
+                 "Screen buffer: %ux%u %uB in %s (free internal=%u largest=%u)",
+                 static_cast<unsigned>(width), static_cast<unsigned>(height),
+                 static_cast<unsigned>(bytes),
+                 screen_in_internal_ram ? "internal RAM" : "PSRAM",
+                 static_cast<unsigned>(heap_caps_get_free_size(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return true;
     }
 
@@ -8166,7 +8175,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP13.5.1: internal framebuffer RAM handoff");
+                 "PogoDate API STEP13.5.2: guaranteed internal screen arena");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
