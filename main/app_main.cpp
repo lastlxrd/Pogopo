@@ -19,6 +19,7 @@
 #include "pogopo_settings.h"
 #include "pogopo_gameboy.h"
 #include "pogopo_playdate.h"
+#include "pogopo_menu.h"
 #include "pogopo_startup.h"
 
 #include <algorithm>
@@ -373,11 +374,16 @@ void draw_power_message(const char* title, const char* line1, const char* line2)
     g_gfx.set_clip({0, 0, g_gfx.width(), g_gfx.height()});
     canvas.clear_clip(pogopo::gfx::WHITE);
     canvas.draw_rect(16, 18, 368, 204, pogopo::gfx::BLACK);
-    canvas.draw_text(42, 43, title, pogopo::gfx::font5x7(), pogopo::gfx::BLACK, 2);
+    pogopo::menu::PogoFont::drawText(canvas, 42, 36, title,
+                                     pogopo::menu::FontFace::Italic22);
     canvas.draw_line(34, 74, 366, 74, pogopo::gfx::BLACK);
-    canvas.draw_text(37, 101, line1, pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
-    canvas.draw_text(37, 124, line2, pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
-    canvas.draw_text(37, 178, "GPIO17 / BQ24295 BATFET", pogopo::gfx::font5x7(), pogopo::gfx::BLACK);
+    pogopo::menu::PogoFont::drawText(canvas, 37, 93, line1,
+                                     pogopo::menu::FontFace::Regular14);
+    pogopo::menu::PogoFont::drawText(canvas, 37, 119, line2,
+                                     pogopo::menu::FontFace::Regular14);
+    pogopo::menu::PogoFont::drawText(canvas, 37, 172,
+                                     "GPIO17 / BQ24295 BATFET",
+                                     pogopo::menu::FontFace::Italic14);
     g_gfx.reset_clip();
     g_gfx.present();
 }
@@ -646,7 +652,7 @@ void os_task(void*) {
         ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     } else {
-        ESP_LOGI(TAG, "STEP13.3.2 menu assets ready: %u bytes",
+        ESP_LOGI(TAG, "STEP13.4 menu assets ready: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     }
     if (!g_power_outro_animation.valid()) {
@@ -661,7 +667,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP13.3.2 documentation build ready after startup");
+    ESP_LOGI(TAG, "STEP13.4 Pogofont system ready after startup");
 
     // The startup can wait in its 12..15 loop indefinitely. Reset both OS
     // clocks so the first menu frame begins at animation time zero instead of
@@ -716,7 +722,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.3.2 DOCS + GITHUB PAGES");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.4 POGOFONT SYSTEM");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -747,5 +753,5 @@ extern "C" void app_main(void) {
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP13.3.2 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.4 system tasks started: startup animation pending");
 }

@@ -29,6 +29,7 @@ extern "C" {
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "pogopo/menu/pogo_font.h"
 #include "zlib.h"
 
 namespace pogopo::playdate {
@@ -134,7 +135,10 @@ struct ImageTable {
 struct PdFont {
     bool pico = false;
     bool compiled = false;
+    bool pogo = false;
+    bool italic = false;
     int scale = 1;
+    uint8_t pogo_height = 10;
     int16_t tracking = 0;
     int16_t leading = 0;
     uint8_t glyph_width = 0;
@@ -611,7 +615,7 @@ struct Runtime::Impl {
     Image* stencil = nullptr;
     PdFont* current_font = nullptr;
     int current_font_ref = LUA_NOREF;
-    int system_font_ref = LUA_NOREF;
+    std::array<int, 2> system_font_refs{{LUA_NOREF, LUA_NOREF}};
     int font_tracking = 0;
     int maze_completion_image_ref = LUA_NOREF;
     bool maze_completion_reuse_logged = false;
@@ -4257,8 +4261,8 @@ struct Runtime::Impl {
         }
     }
 
-    void drawSystemCharacter(uint32_t codepoint, int x, int y,
-                             int scale = 1) {
+    void drawLegacySystemCharacter(uint32_t codepoint, int x, int y,
+                                   int scale = 1) {
         x += draw_offset_x;
         y += draw_offset_y;
         scale = std::max(1, scale);
@@ -4274,6 +4278,80 @@ struct Runtime::Impl {
                         putLogicalPixel(x + column * scale + sx,
                                         y + row * scale + sy, Black);
                     }
+                }
+            }
+        }
+    }
+
+    static int scaledPogoMetric(int value, int target_height,
+                                int source_height) {
+        if (source_height <= 0) return value;
+        const int magnitude = std::abs(value);
+        const int scaled = (magnitude * target_height + source_height / 2) /
+            source_height;
+        return value < 0 ? -scaled : scaled;
+    }
+
+    static int pogoTargetHeight(const PdFont* font, int fallback = 10) {
+        if (font && font->compiled) {
+            return std::clamp<int>(font->glyph_height, 5, 48);
+        }
+        if (font && font->pogo) {
+            return std::clamp<int>(font->pogo_height, 5, 48);
+        }
+        return std::clamp(fallback, 5, 48);
+    }
+
+    static bool pogoItalic(const PdFont* font) {
+        return font && font->pogo && font->italic;
+    }
+
+    static int pogoCharacterAdvance(uint32_t codepoint, int target_height,
+                                    bool italic) {
+        const unsigned char character = systemFallbackCharacter(codepoint);
+        const menu::FontFace face = menu::PogoFont::closestFace(
+            target_height, italic);
+        const menu::FontGlyph glyph = menu::PogoFont::glyph(face, character);
+        const int source_height = std::max(1, menu::PogoFont::lineHeight(face));
+        if (glyph.height == 0U || glyph.advance == 0U) {
+            return std::max(1, (6 * target_height + 3) / 7);
+        }
+        return std::max(1, scaledPogoMetric(
+            glyph.advance, target_height, source_height));
+    }
+
+    void drawPogoCharacter(uint32_t codepoint, int x, int y,
+                           int target_height, bool italic = false) {
+        target_height = std::clamp(target_height, 5, 48);
+        const unsigned char character = systemFallbackCharacter(codepoint);
+        const menu::FontFace face = menu::PogoFont::closestFace(
+            target_height, italic);
+        const menu::FontGlyph glyph = menu::PogoFont::glyph(face, character);
+        if (glyph.height == 0U || glyph.advance == 0U) {
+            drawLegacySystemCharacter(character, x, y,
+                std::max(1, (target_height + 6) / 7));
+            return;
+        }
+        if (!glyph.bitmap || glyph.width == 0U) return; // space
+
+        const int source_height = std::max<int>(1, glyph.height);
+        const int output_width = std::max(1, scaledPogoMetric(
+            glyph.width, target_height, source_height));
+        x += draw_offset_x + scaledPogoMetric(
+            glyph.x_offset, target_height, source_height);
+        y += draw_offset_y;
+        for (int output_y = 0; output_y < target_height; ++output_y) {
+            const int source_y = std::min<int>(glyph.height - 1,
+                output_y * source_height / target_height);
+            for (int output_x = 0; output_x < output_width; ++output_x) {
+                const int source_x = std::min<int>(glyph.width - 1,
+                    output_x * glyph.width / output_width);
+                const size_t index = static_cast<size_t>(source_y) *
+                    glyph.stride + (source_x >> 3);
+                const uint8_t bit = static_cast<uint8_t>(
+                    0x80U >> (source_x & 7));
+                if ((glyph.bitmap[index] & bit) != 0U) {
+                    putLogicalPixel(x + output_x, y + output_y, Black);
                 }
             }
         }
@@ -4349,7 +4427,10 @@ struct Runtime::Impl {
                     if (playdateButtonSymbol(codepoint, button_label)) {
                         line_width += buttonSymbolAdvance(
                             buttonSymbolScaleForFont(font)) + tracking;
-                    } else line_width += 6 + tracking;
+                    } else {
+                        line_width += pogoCharacterAdvance(codepoint,
+                            pogoTargetHeight(font), false) + tracking;
+                    }
                 }
             } else if (font && font->pico) {
                 char button_label = 0;
@@ -4357,10 +4438,13 @@ struct Runtime::Impl {
                     ? buttonSymbolAdvance() + tracking : 4 + tracking;
             } else {
                 char button_label = 0;
-                const int scale = font ? font->scale : 1;
+                const int target_height = pogoTargetHeight(font);
+                const int button_scale = std::max(1,
+                    (target_height + 3) / 7);
                 line_width += playdateButtonSymbol(codepoint, button_label)
-                    ? buttonSymbolAdvance(scale) + tracking
-                    : 6 * scale + tracking;
+                    ? buttonSymbolAdvance(button_scale) + tracking
+                    : pogoCharacterAdvance(codepoint, target_height,
+                        pogoItalic(font)) + tracking;
             }
         }
         return std::max(maximum_width, line_width);
@@ -4378,7 +4462,7 @@ struct Runtime::Impl {
         }
         const int line_height = font && font->compiled
             ? std::max<int>(1, font->glyph_height)
-            : (font && font->pico ? 5 : 7 * (font ? font->scale : 1));
+            : (font && font->pico ? 5 : pogoTargetHeight(font));
         const int leading = font ? font->leading : 0;
         return text && length > 0
             ? lines * line_height + std::max(0, lines - 1) * leading : 0;
@@ -4420,7 +4504,8 @@ struct Runtime::Impl {
         if (!text) return;
         int cursor_x = x, cursor_y = y;
         const bool pico = current_font && current_font->pico;
-        const int scale = current_font ? current_font->scale : 1;
+        const int pogo_height = pogoTargetHeight(current_font);
+        const bool italic = pogoItalic(current_font);
         const int tracking = font_tracking + (current_font &&
             !current_font->compiled ? current_font->tracking : 0);
         const CelesteAsset* font_asset = pico ? findCelesteAsset("Assets/pico") : nullptr;
@@ -4431,7 +4516,7 @@ struct Runtime::Impl {
                 cursor_x = x;
                 cursor_y += (current_font && current_font->compiled
                     ? std::max<int>(1, current_font->glyph_height)
-                    : (pico ? 6 : 8 * scale)) +
+                    : (pico ? 6 : pogo_height)) +
                     (current_font ? current_font->leading : 0);
                 continue;
             }
@@ -4456,14 +4541,20 @@ struct Runtime::Impl {
                     cursor_x += buttonSymbolAdvance(button_scale) + tracking;
                     continue;
                 }
-                drawSystemCharacter(codepoint, cursor_x, cursor_y);
-                cursor_x += 6 + tracking;
+                drawPogoCharacter(codepoint, cursor_x, cursor_y,
+                                  pogoTargetHeight(current_font));
+                cursor_x += pogoCharacterAdvance(codepoint,
+                    pogoTargetHeight(current_font), false) + tracking;
                 continue;
             }
             char button_label = 0;
             if (playdateButtonSymbol(codepoint, button_label)) {
-                drawButtonSymbol(codepoint, cursor_x, cursor_y, pico ? 1 : scale);
-                cursor_x += buttonSymbolAdvance(pico ? 1 : scale) + tracking;
+                const int button_scale = pico ? 1 : std::max(1,
+                    (pogo_height + 3) / 7);
+                const int button_y = pico ? cursor_y : cursor_y + std::max(0,
+                    (pogo_height - 7 * button_scale) / 2);
+                drawButtonSymbol(codepoint, cursor_x, button_y, button_scale);
+                cursor_x += buttonSymbolAdvance(button_scale) + tracking;
                 continue;
             }
             const unsigned char character = codepoint <= 0xffU
@@ -4475,8 +4566,10 @@ struct Runtime::Impl {
                 drawImage(glyph, cursor_x, cursor_y, Unflipped);
                 cursor_x += 4 + tracking;
             } else {
-                drawSystemCharacter(character, cursor_x, cursor_y, scale);
-                cursor_x += 6 * scale + tracking;
+                drawPogoCharacter(character, cursor_x, cursor_y,
+                                  pogo_height, italic);
+                cursor_x += pogoCharacterAdvance(character, pogo_height,
+                                                 italic) + tracking;
             }
         }
     }
@@ -4546,6 +4639,35 @@ struct Runtime::Impl {
         return 0;
     }
 
+    static int requestedFontHeight(const char* path) {
+        if (!path) return 10;
+        int requested = 0;
+        for (const char* cursor = path; *cursor;) {
+            if (!std::isdigit(static_cast<unsigned char>(*cursor))) {
+                ++cursor;
+                continue;
+            }
+            int value = 0;
+            while (std::isdigit(static_cast<unsigned char>(*cursor))) {
+                value = std::min(999, value * 10 + (*cursor - '0'));
+                ++cursor;
+            }
+            if (value >= 5 && value <= 48) requested = value;
+        }
+        return requested > 0 ? requested : 10;
+    }
+
+    static bool fallbackFontIsItalic(const char* path) {
+        if (!path) return false;
+        std::string lower(path);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+            [](unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+        return lower.find("italic") != std::string::npos ||
+               lower.find("oblique") != std::string::npos;
+    }
+
     static int cFontNew(lua_State* state) {
         Impl* runtime = self(state);
         const char* path = luaL_optstring(state, 1, "");
@@ -4580,7 +4702,15 @@ struct Runtime::Impl {
             state, sizeof(PdFont), 0));
         new (font) PdFont{};
         font->pico = path && std::strstr(path, "Assets/pico");
-        font->scale = (!font->pico && path && std::strstr(path, "-20-")) ? 2 : 1;
+        if (!font->pico) {
+            font->pogo = true;
+            font->italic = fallbackFontIsItalic(path);
+            font->pogo_height = static_cast<uint8_t>(
+                requestedFontHeight(path));
+            ESP_LOGI(TAG, "PFT fallback: %s -> PogoFont %s %u px",
+                     path, font->italic ? "Regular Italic" : "Regular",
+                     static_cast<unsigned>(font->pogo_height));
+        }
         luaL_getmetatable(state, kFontMetatable);
         lua_setmetatable(state, -2);
         return 1;
@@ -4589,7 +4719,7 @@ struct Runtime::Impl {
     static int cFontGetHeight(lua_State* state) {
         auto* font = static_cast<PdFont*>(luaL_checkudata(state, 1, kFontMetatable));
         lua_pushinteger(state, font && font->compiled ? font->glyph_height :
-            (font && font->pico ? 5 : 7 * (font ? font->scale : 1)));
+            (font && font->pico ? 5 : pogoTargetHeight(font)));
         return 1;
     }
 
@@ -4749,26 +4879,31 @@ struct Runtime::Impl {
         return 1;
     }
 
-    int pushSystemFont(lua_State* state) {
-        if (system_font_ref != LUA_NOREF) {
-            lua_rawgeti(state, LUA_REGISTRYINDEX, system_font_ref);
+    int pushSystemFont(lua_State* state, bool italic = false) {
+        const size_t variant = italic ? 1U : 0U;
+        if (system_font_refs[variant] != LUA_NOREF) {
+            lua_rawgeti(state, LUA_REGISTRYINDEX, system_font_refs[variant]);
             return 1;
         }
         auto* font = static_cast<PdFont*>(lua_newuserdatauv(
             state, sizeof(PdFont), 0));
         new (font) PdFont{};
-        font->scale = 1;
+        font->pogo = true;
+        font->italic = italic;
+        // Match Playdate's compact system-font layout while drawing the
+        // Pogopo Regular/Regular Italic shapes. Games that load a named font
+        // receive the size parsed from that font's filename instead.
+        font->pogo_height = 10;
         luaL_getmetatable(state, kFontMetatable);
         lua_setmetatable(state, -2);
         lua_pushvalue(state, -1);
-        system_font_ref = luaL_ref(state, LUA_REGISTRYINDEX);
+        system_font_refs[variant] = luaL_ref(state, LUA_REGISTRYINDEX);
         return 1;
     }
 
     static int cGetSystemFont(lua_State* state) {
-        // Pogopo has one built-in 5x7 system face. The optional normal/bold/
-        // italic variant is accepted; all variants resolve to that same face.
-        return self(state)->pushSystemFont(state);
+        const int variant = static_cast<int>(luaL_optinteger(state, 1, 0));
+        return self(state)->pushSystemFont(state, variant == 2);
     }
 
     static int cGetFont(lua_State* state) {
@@ -4777,7 +4912,7 @@ struct Runtime::Impl {
             lua_rawgeti(state, LUA_REGISTRYINDEX, runtime->current_font_ref);
             return 1;
         }
-        return runtime->pushSystemFont(state);
+        return runtime->pushSystemFont(state, false);
     }
 
     static int cSetFont(lua_State* state) {
@@ -7981,7 +8116,8 @@ struct Runtime::Impl {
         draw_pattern_pixels.fill(Clear);draw_pattern_uses_image=false;
         pattern_offset_x=pattern_offset_y=0;current_font=nullptr;
         font_tracking=0;
-        current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
+        current_font_ref=LUA_NOREF;
+        system_font_refs.fill(LUA_NOREF);
         maze_completion_image_ref=LUA_NOREF;
         maze_completion_reuse_logged=false;
         if(!resizeScreen(1)){clearSoundCache();setError("startup","screen buffer allocation failed");return ESP_ERR_NO_MEM;}
@@ -7989,7 +8125,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP11.6.33: effects, ADPCM and SD compatibility");
+                 "PogoDate API STEP13.4: size-aware Pogofont system fallback");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
@@ -8038,7 +8174,8 @@ struct Runtime::Impl {
         if(display_transform_buffer)heap_caps_free(display_transform_buffer);
         display_transform_buffer=nullptr;display_transform_capacity=0;
         target=nullptr;stencil=nullptr;current_font=nullptr;
-        current_font_ref=LUA_NOREF;system_font_ref=LUA_NOREF;
+        current_font_ref=LUA_NOREF;
+        system_font_refs.fill(LUA_NOREF);
         maze_completion_image_ref=LUA_NOREF;
         maze_completion_reuse_logged=false;
         canvas=nullptr;audio=nullptr;storage=nullptr;

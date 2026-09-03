@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "pogopo_menu.h"
 
 namespace pogopo::demo {
 namespace {
@@ -64,12 +65,17 @@ void GameBoyApp::drawLoading(AppContext& context) {
     canvas.clear(context.theme.background);
     gui::draw_header(canvas, context.theme, "GAME BOY", "LOADING");
     canvas.draw_rect(28, 54, 344, 118, context.theme.border);
-    canvas.draw_text(48, 76, "PEANUT-GB / MINIGB APU", gfx::font5x7(),
-                     context.theme.foreground);
-    canvas.draw_text(48, 99, display_name_[0] ? display_name_ : "ROM",
-                     gfx::font5x7(), context.theme.foreground);
-    canvas.draw_text(48, 130, "READING ROM + SAVE RAM...", gfx::font5x7(),
-                     context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 48, 68, "Peanut-GB / MiniGB APU",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 48, 94,
+                             display_name_[0] ? display_name_ : "ROM",
+                             menu::FontFace::Italic14,
+                             context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 48, 130,
+                             "Reading ROM + save RAM...",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
     gui::draw_footer(canvas, context.theme, "PLEASE WAIT", gameboy::scale_mode_name(scale_));
     context.gfx.presentFull();
 }
@@ -208,14 +214,20 @@ void GameBoyApp::draw(AppContext& context, const gfx::Rect&) {
         canvas.clear_clip(context.theme.background);
         gui::draw_header(canvas, context.theme, "GAME BOY", "LOAD ERROR");
         canvas.draw_rect(25, 48, 350, 145, context.theme.border);
-        canvas.draw_text(43, 69, "COULD NOT START ROM", gfx::font5x7(),
-                         context.theme.foreground, 2);
-        canvas.draw_text(43, 107, display_name_, gfx::font5x7(),
-                         context.theme.foreground);
-        canvas.draw_text(43, 132, esp_err_to_name(load_error_), gfx::font5x7(),
-                         context.theme.foreground);
-        canvas.draw_text(43, 157, "ONLY UNCOMPRESSED .GB IS SUPPORTED", gfx::font5x7(),
-                         context.theme.foreground);
+        menu::PogoFont::drawText(canvas, 43, 60, "Could not start ROM",
+                                 menu::FontFace::Italic22,
+                                 context.theme.foreground);
+        menu::PogoFont::drawText(canvas, 43, 101, display_name_,
+                                 menu::FontFace::Regular14,
+                                 context.theme.foreground);
+        menu::PogoFont::drawText(canvas, 43, 126,
+                                 esp_err_to_name(load_error_),
+                                 menu::FontFace::Italic14,
+                                 context.theme.foreground);
+        menu::PogoFont::drawText(canvas, 43, 153,
+                                 "Only uncompressed .gb is supported",
+                                 menu::FontFace::Regular14,
+                                 context.theme.foreground);
         gui::draw_footer(canvas, context.theme, "B BACK", "CHECK SERIAL");
         return;
     }

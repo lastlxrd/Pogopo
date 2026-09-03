@@ -96,6 +96,7 @@ idf_component_register(
     REQUIRES
         lua
         pogopo_graphics
+        pogopo_menu
         pogopo_audio
         pogopo_storage
         esp_timer

@@ -4,11 +4,13 @@
 #include <cstdio>
 #include <cstring>
 
+#include "pogopo/menu/pogo_font.h"
+
 namespace pogopo::gui {
 
 namespace {
 constexpr int kHeaderHeight = 26;
-constexpr int kFooterHeight = 17;
+constexpr int kFooterHeight = 21;
 
 size_t next_enabled(const ListItem* items, size_t count, size_t from, int direction) {
     if (!items || count == 0 || direction == 0) return from;
@@ -186,12 +188,15 @@ void Dialog::draw(gfx::Canvas& canvas, const Theme& theme) {
 void draw_header(gfx::Canvas& canvas, const Theme& theme,
                  const char* title, const char* right_text) {
     canvas.fill_rect(0, 0, canvas.width(), kHeaderHeight, theme.focus_background);
-    canvas.draw_text(9, 9, title ? title : "", gfx::font5x7(), theme.focus_foreground, 1,
-                     true, theme.focus_background);
+    menu::PogoFont::drawText(canvas, 8, 2, title ? title : "",
+                             menu::FontFace::Italic14,
+                             theme.focus_foreground);
     if (right_text && *right_text) {
-        const int x = canvas.width() - text_width(right_text, 1) - 9;
-        canvas.draw_text(x, 9, right_text, gfx::font5x7(), theme.focus_foreground, 1,
-                         true, theme.focus_background);
+        const int x = canvas.width() -
+            menu::PogoFont::textWidth(menu::FontFace::Regular14, right_text) - 8;
+        menu::PogoFont::drawText(canvas, x, 2, right_text,
+                                 menu::FontFace::Regular14,
+                                 theme.focus_foreground);
     }
 }
 
@@ -199,12 +204,15 @@ void draw_footer(gfx::Canvas& canvas, const Theme& theme,
                  const char* left_text, const char* right_text) {
     const int y = canvas.height() - kFooterHeight;
     canvas.fill_rect(0, y, canvas.width(), kFooterHeight, theme.focus_background);
-    canvas.draw_text(8, y + 5, left_text ? left_text : "", gfx::font5x7(),
-                     theme.focus_foreground, 1, true, theme.focus_background);
+    menu::PogoFont::drawText(canvas, 8, y + 1, left_text ? left_text : "",
+                             menu::FontFace::Regular14,
+                             theme.focus_foreground);
     if (right_text && *right_text) {
-        const int x = canvas.width() - text_width(right_text, 1) - 8;
-        canvas.draw_text(x, y + 5, right_text, gfx::font5x7(),
-                         theme.focus_foreground, 1, true, theme.focus_background);
+        const int x = canvas.width() -
+            menu::PogoFont::textWidth(menu::FontFace::Italic14, right_text) - 8;
+        menu::PogoFont::drawText(canvas, x, y + 1, right_text,
+                                 menu::FontFace::Italic14,
+                                 theme.focus_foreground);
     }
 }
 
@@ -257,4 +265,3 @@ void draw_wrapped_text(gfx::Canvas& canvas, const gfx::Rect& bounds,
 }
 
 } // namespace pogopo::gui
-

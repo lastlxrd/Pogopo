@@ -103,16 +103,23 @@ void PogoDateApp::drawLoading(AppContext& context) {
     canvas.clear(context.theme.background);
     gui::draw_header(canvas, context.theme, "POGODATE LITE", "LOADING");
     canvas.draw_rect(24, 49, 352, 139, context.theme.border);
-    canvas.draw_text(43, 70, "PLAYDATE LUA COMPATIBILITY TEST",
-                     gfx::font5x7(), context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 43, 64,
+                             "Playdate Lua compatibility",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
     char game_line[80]{};
     std::snprintf(game_line, sizeof(game_line), "GAME: %s", displayTitle());
-    canvas.draw_text(43, 99, game_line,
-                     gfx::font5x7(), context.theme.foreground, 2);
-    canvas.draw_text(43, 134, "LUA 5.4 + NATIVE POGOPO API",
-                     gfx::font5x7(), context.theme.foreground);
-    canvas.draw_text(43, 157, "400 x 240 / 1-BIT NATIVE",
-                     gfx::font5x7(), context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 43, 91, game_line,
+                             menu::FontFace::Italic14,
+                             context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 43, 126,
+                             "Lua 5.4 + native Pogopo API",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 43, 151,
+                             "400 x 240 / 1-bit native",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
     gui::draw_footer(canvas, context.theme, "PLEASE WAIT",
                      package_.path[0] ? "SD PDX / PDZ" : "SOURCE LUA");
     context.gfx.presentFull();
@@ -332,14 +339,18 @@ void PogoDateApp::draw(AppContext& context, const gfx::Rect&) {
     char failure[96]{};
     std::snprintf(failure, sizeof(failure), "%s COULD NOT CONTINUE",
                   displayTitle());
-    canvas.draw_text(39, 67, failure,
-                     gfx::font5x7(), context.theme.foreground, 2);
+    menu::PogoFont::drawText(canvas, 39, 61, failure,
+                             menu::FontFace::Italic14,
+                             context.theme.foreground);
     char status[96]{};
     std::snprintf(status, sizeof(status), "%s", runtime_.error());
-    canvas.draw_text(39, 111, status, gfx::font5x7(),
-                     context.theme.foreground);
-    canvas.draw_text(39, 151, "CHECK SERIAL FOR FULL DIAGNOSTIC",
-                     gfx::font5x7(), context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 39, 101, status,
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
+    menu::PogoFont::drawText(canvas, 39, 145,
+                             "Check serial for full diagnostic",
+                             menu::FontFace::Regular14,
+                             context.theme.foreground);
     gui::draw_footer(canvas, context.theme, "POWER MENU -> HOME",
                      esp_err_to_name(start_error_));
 }

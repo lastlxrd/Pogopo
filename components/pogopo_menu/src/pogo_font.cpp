@@ -1,6 +1,7 @@
 #include "pogopo/menu/pogo_font.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "menu_data_generated.h"
 #include "pogopo/menu/menu_assets.h"
@@ -16,13 +17,14 @@ const generated::FontMeta& font_meta(FontFace face) {
     return generated::kFonts[index];
 }
 
-const generated::GlyphMeta* glyph_meta(FontFace face, char character) {
-    const uint8_t code = static_cast<uint8_t>(character);
+const generated::GlyphMeta* glyph_meta(FontFace face, uint32_t codepoint) {
+    uint8_t code = codepoint <= 0xffU
+        ? static_cast<uint8_t>(codepoint) : static_cast<uint8_t>('?');
     if (code < generated::kAsciiFirst || code > generated::kAsciiLast) {
-        character = '?';
+        code = static_cast<uint8_t>('?');
     }
     return &font_meta(face).glyphs[
-        static_cast<uint8_t>(character) - generated::kAsciiFirst];
+        code - generated::kAsciiFirst];
 }
 
 } // namespace
@@ -47,11 +49,47 @@ int PogoFont::textWidth(FontFace face, const char* text) {
     return std::max(maximum_width, line_width);
 }
 
+FontFace PogoFont::closestFace(int target_line_height, bool italic) {
+    const FontFace regular_faces[] = {
+        FontFace::Regular14, FontFace::Regular22, FontFace::Regular24,
+    };
+    const FontFace italic_faces[] = {
+        FontFace::Italic14, FontFace::Italic22, FontFace::Italic24,
+    };
+    const FontFace* faces = italic ? italic_faces : regular_faces;
+    FontFace best = faces[0];
+    int best_distance = std::abs(target_line_height - lineHeight(best));
+    for (size_t index = 1; index < 3; ++index) {
+        const int distance = std::abs(
+            target_line_height - lineHeight(faces[index]));
+        if (distance < best_distance) {
+            best = faces[index];
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+FontGlyph PogoFont::glyph(FontFace face, uint32_t codepoint) {
+    const auto* meta = glyph_meta(face, codepoint);
+    const uint8_t* base = Assets::base();
+    if (!meta || !base) return {};
+    FontGlyph result{};
+    result.width = meta->width;
+    result.height = meta->height;
+    result.stride = static_cast<uint8_t>((meta->width + 7U) / 8U);
+    result.x_offset = meta->x_offset;
+    result.advance = meta->advance;
+    if (meta->offset != 0xFFFFFFFFU && meta->width > 0U) {
+        result.bitmap = base + meta->offset;
+    }
+    return result;
+}
+
 void PogoFont::drawText(gfx::Canvas& canvas, int x, int y, const char* text,
                         FontFace face, gfx::Color foreground,
                         bool transparent_background, gfx::Color background) {
     if (!text || !Assets::valid()) return;
-    const uint8_t* base = Assets::base();
     const int origin_x = x;
     while (*text) {
         if (*text == '\n') {
@@ -61,15 +99,16 @@ void PogoFont::drawText(gfx::Canvas& canvas, int x, int y, const char* text,
             continue;
         }
 
-        const auto* glyph = glyph_meta(face, *text++);
-        if (glyph->offset != 0xFFFFFFFFU && glyph->width > 0) {
+        const FontGlyph glyph = PogoFont::glyph(
+            face, static_cast<uint8_t>(*text++));
+        if (glyph.bitmap && glyph.width > 0) {
             const gfx::Bitmap bitmap = gfx::make_bitmap_1bpp(
-                glyph->width, glyph->height, base + glyph->offset,
+                glyph.width, glyph.height, glyph.bitmap,
                 gfx::BitOrder::MSB_FIRST);
-            canvas.draw_bitmap(x + glyph->x_offset, y, bitmap, foreground,
+            canvas.draw_bitmap(x + glyph.x_offset, y, bitmap, foreground,
                                transparent_background, background);
         }
-        x += glyph->advance;
+        x += glyph.advance;
     }
 }
 
