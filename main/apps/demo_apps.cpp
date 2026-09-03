@@ -1278,7 +1278,7 @@ void AboutApp::draw(AppContext& context, const gfx::Rect&) {
     menu::PogoFont::drawText(canvas, 12, -1, "about pogopo", menu::FontFace::Italic22);
     draw_battery(canvas, context.power.state(), 0, 366, 8);
     canvas.draw_rect(12, 40, 376, 164, gfx::BLACK);
-    menu::PogoFont::drawText(canvas, 28, 50, "pogopoOS 2.0  /  STEP13.4.2",
+    menu::PogoFont::drawText(canvas, 28, 50, "pogopoOS 2.0  /  STEP13.4.3",
                              menu::FontFace::Italic14);
     menu::PogoFont::drawText(canvas, 28, 78,
         "ESP32-S3  16 MB flash  8 MB PSRAM\n"
