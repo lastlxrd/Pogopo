@@ -1641,6 +1641,28 @@ struct Runtime::Impl {
                 plane_size <= (image.serialized_size - 16U) / plane_count) {
                 const uint8_t* bitmap = bytes + 16U;
                 const uint8_t* mask = has_mask ? bitmap + plane_size : nullptr;
+                // PDI/PDT sprites are stored as one bit per pixel while the
+                // logical framebuffer uses one byte per pixel. Expanding a
+                // complete source byte through a lookup table replaces eight
+                // iterations of the hottest XTRIS sprite loop with one load
+                // and one unaligned 64-bit store. Mixed mask bytes retain the
+                // exact transparent-pixel behavior of the scalar fallback.
+                static const std::array<uint64_t, 256> expanded_plane = [] {
+                    std::array<uint64_t, 256> table{};
+                    for (unsigned value = 0; value < table.size(); ++value) {
+                        uint64_t pixels = 0;
+                        for (unsigned pixel = 0; pixel < 8; ++pixel) {
+                            const uint8_t color =
+                                (value & (0x80U >> pixel)) ? White : Black;
+                            pixels |= static_cast<uint64_t>(color) << (pixel * 8U);
+                        }
+                        table[value] = pixels;
+                    }
+                    return table;
+                }();
+                constexpr uint64_t white_pixels = 0x0101010101010101ULL;
+                constexpr uint64_t black_pixels = 0x0202020202020202ULL;
+                constexpr uint64_t invert_pixels = 0x0303030303030303ULL;
                 const int start_x = std::max(content_left,
                     std::max(clip.x - x, -x));
                 const int start_y = std::max(content_top,
@@ -1661,15 +1683,16 @@ struct Runtime::Impl {
                         row_bytes;
                     uint8_t* destination = target->pixels +
                         static_cast<size_t>(y + logical_y) * target->stride;
-                    for (int logical_x = start_x; logical_x < end_x; ++logical_x) {
+
+                    const auto draw_serialized_pixel = [&](int logical_x) {
                         const int source_x = (flip & FlippedX)
                             ? image.width - 1 - logical_x : logical_x;
-                        if (source_x < left || source_x >= left + stored_width) continue;
+                        if (source_x < left || source_x >= left + stored_width) return;
                         const unsigned local_x = static_cast<unsigned>(source_x - left);
                         const size_t source_index = source_row + (local_x >> 3U);
                         const uint8_t bit = static_cast<uint8_t>(
                             0x80U >> (local_x & 7U));
-                        if (mask && !(mask[source_index] & bit)) continue;
+                        if (mask && !(mask[source_index] & bit)) return;
                         uint8_t value = (bitmap[source_index] & bit) ? White : Black;
                         if (image.inverted) value = value == Black ? White : Black;
                         if (draw_mode == FillWhite) value = White;
@@ -1679,6 +1702,52 @@ struct Runtime::Impl {
                         if (target == &screen && inverted_display)
                             value = value == Black ? White : Black;
                         destination[x + logical_x] = value;
+                    };
+
+                    int logical_x = start_x;
+                    if ((flip & FlippedX) == 0) {
+                        while (logical_x < end_x &&
+                               ((logical_x - left) & 7) != 0) {
+                            draw_serialized_pixel(logical_x++);
+                        }
+                        for (; logical_x + 8 <= end_x; logical_x += 8) {
+                            const unsigned local_x =
+                                static_cast<unsigned>(logical_x - left);
+                            const size_t source_index =
+                                source_row + (local_x >> 3U);
+                            const uint8_t mask_byte = mask
+                                ? mask[source_index] : 0xFFU;
+                            if (mask_byte == 0U) continue;
+
+                            uint64_t pixels;
+                            if (draw_mode == FillWhite) pixels = white_pixels;
+                            else if (draw_mode == FillBlack) pixels = black_pixels;
+                            else {
+                                pixels = expanded_plane[bitmap[source_index]];
+                                if (image.inverted != (draw_mode == Inverted)) {
+                                    pixels ^= invert_pixels;
+                                }
+                            }
+                            if (target == &screen && inverted_display) {
+                                pixels ^= invert_pixels;
+                            }
+                            if (mask_byte == 0xFFU) {
+                                std::memcpy(destination + x + logical_x,
+                                            &pixels, sizeof(pixels));
+                            } else {
+                                for (unsigned pixel = 0; pixel < 8; ++pixel) {
+                                    if (mask_byte & (0x80U >> pixel)) {
+                                        destination[x + logical_x +
+                                            static_cast<int>(pixel)] =
+                                            static_cast<uint8_t>(pixels >>
+                                                (pixel * 8U));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (; logical_x < end_x; ++logical_x) {
+                        draw_serialized_pixel(logical_x);
                     }
                 }
                 return;
@@ -6034,7 +6103,6 @@ struct Runtime::Impl {
     }
 
     static int cSoundNew(lua_State* state) {
-        Impl* runtime = self(state);
         const char* path = lua_type(state, 1) == LUA_TSTRING ? lua_tostring(state, 1) : "";
         auto* original = static_cast<Sound*>(luaL_testudata(state, 1, kSoundMetatable));
         auto* sound = static_cast<Sound*>(lua_newuserdatauv(state, sizeof(Sound), 0));
@@ -6269,7 +6337,6 @@ struct Runtime::Impl {
     }
 
     static int cSoundLoad(lua_State* state) {
-        Impl* runtime = self(state);
         auto* sound = static_cast<Sound*>(luaL_checkudata(state, 1, kSoundMetatable));
         const char* path = luaL_checkstring(state, 2);
         if (sound) {
@@ -8095,7 +8162,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP13.4.1: cached PDZ, lazy SFX and profiler");
+                 "PogoDate API STEP13.4.2: fast PDI/PDT byte blit and profiler");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;
