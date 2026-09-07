@@ -129,7 +129,7 @@ private:
     void audioTaskLoop();
     esp_err_t allocateFrames();
     void freeFrames();
-    bool reserveRomArena();
+    bool reserveRomArena(uint32_t headroom_bytes);
     esp_err_t loadRomFile(const char* path);
     esp_err_t initializeCore();
     esp_err_t initializeSaveRam();

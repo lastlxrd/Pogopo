@@ -1056,7 +1056,7 @@ struct Runtime::Impl {
         const size_t bytes = static_cast<size_t>(width) * height;
         // A native 400x240 frame is read and written several times per game
         // update. PogoDate temporarily borrows Game Boy's idle SRAM arena, so
-        // prefer that fast block while still leaving 48 KiB for transient IDF
+        // prefer that fast block while still leaving 40 KiB for transient IDF
         // allocations. Fall back to PSRAM if the handoff was unavailable.
         const size_t free_internal = heap_caps_get_free_size(
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -1064,7 +1064,7 @@ struct Runtime::Impl {
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         const bool prefer_internal = scale == 2 ||
             (largest_internal >= bytes &&
-             free_internal >= bytes + 48U * 1024U);
+             free_internal >= bytes + 40U * 1024U);
         bool replacement_internal = false;
         if (!allocateImage(replacement, width, height, background_color,
                            prefer_internal, &replacement_internal)) {
@@ -5022,8 +5022,19 @@ struct Runtime::Impl {
     }
 
     static int cGetSystemFont(lua_State* state) {
-        const int variant = static_cast<int>(luaL_optinteger(state, 1, 0));
-        return self(state)->pushSystemFont(state, variant == 2);
+        bool italic = false;
+        if (lua_isnumber(state, 1)) {
+            italic = lua_tointeger(state, 1) == 2;
+        } else if (lua_isstring(state, 1)) {
+            // Older Playdate SDK builds emitted string font variants. Keep
+            // accepting those alongside the current integer constants.
+            const char* variant = lua_tostring(state, 1);
+            italic = variant &&
+                (std::strstr(variant, "italic") ||
+                 std::strstr(variant, "Italic") ||
+                 std::strstr(variant, "ITALIC"));
+        }
+        return self(state)->pushSystemFont(state, italic);
     }
 
     static int cGetFont(lua_State* state) {
@@ -8175,7 +8186,7 @@ struct Runtime::Impl {
         lua=lua_newstate(allocator,this);if(!lua){releaseImage(screen);clearSoundCache();setError("startup","could not allocate Lua state");return ESP_ERR_NO_MEM;}
         luaL_openlibs(lua);registerApi();
         ESP_LOGI(TAG, "%s",
-                 "PogoDate API STEP13.5.2: guaranteed internal screen arena");
+                 "PogoDate API STEP13.5.3: stack and legacy-font stability");
         size_t compat_size=0;const char* compat=compatSource(compat_size);
         if(!loadBuffer("PogoDate CoreLibs compatibility",compat,compat_size)){
             lua_close(lua);lua=nullptr;clearLargeImagePool();releaseImage(screen);clearSoundCache();return ESP_FAIL;

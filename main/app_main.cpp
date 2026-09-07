@@ -657,7 +657,7 @@ void os_task(void*) {
         ESP_LOGE(TAG, "Menu asset size mismatch: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     } else {
-        ESP_LOGI(TAG, "STEP13.5.2 menu assets ready: %u bytes",
+        ESP_LOGI(TAG, "STEP13.5.3 menu assets ready: %u bytes",
                  static_cast<unsigned>(pogopo::menu::Assets::embeddedSize()));
     }
     if (!g_power_outro_animation.valid()) {
@@ -672,7 +672,7 @@ void os_task(void*) {
     g_app_manager.start("launcher");
     g_haptics.play(pogopo::HapticEffect::Confirm);
     if (g_settings.uiSoundsEnabled()) g_audio.play(pogopo::AudioEffect::Startup);
-    ESP_LOGI(TAG, "STEP13.5.2 PogoDate internal-screen runtime ready after startup");
+    ESP_LOGI(TAG, "STEP13.5.3 PogoDate stability runtime ready after startup");
 
     // The startup can wait in its 12..15 loop indefinitely. Reset both OS
     // clocks so the first menu frame begins at animation time zero instead of
@@ -739,7 +739,7 @@ extern "C" void app_main(void) {
     uint32_t flash_size = 0;
     ESP_ERROR_CHECK(esp_flash_get_size(nullptr, &flash_size));
 
-    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5.2 POGODATE INTERNAL SCREEN");
+    ESP_LOGI(TAG, "pogopoOS2.0 STEP13.5.3 POGODATE STABILITY");
     ESP_LOGI(TAG, "ESP32-S3 cores=%d rev=%d flash=%u MB",
              chip.cores, chip.revision,
              static_cast<unsigned>(flash_size / (1024 * 1024)));
@@ -765,10 +765,12 @@ extern "C" void app_main(void) {
 
     // Stable pogopoOS1.0 split: Core 1 runs high-priority input + emulator;
     // Core 0 runs high-priority I2S and low-priority GUI/Sharp presentation.
-    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
+    // PDZ imports and termination callbacks can nest several Lua/C frames.
+    // Hardware high-water logs reached 108 bytes with the old 8 KiB stack.
+    if (xTaskCreatePinnedToCore(os_task, "pogopo_os", 16384, nullptr, 1, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Could not create pogopoOS task");
     }
 
     start_system_tasks();
-    ESP_LOGI(TAG, "STEP13.5.2 system tasks started: startup animation pending");
+    ESP_LOGI(TAG, "STEP13.5.3 system tasks started: startup animation pending");
 }

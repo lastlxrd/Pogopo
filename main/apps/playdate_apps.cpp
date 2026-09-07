@@ -170,6 +170,10 @@ void PogoDateApp::onEnter(AppContext& context) {
         context.uiSound(audio::Effect::Error);
         ESP_LOGE(TAG, "PogoDate start failed: %s / %s",
                  esp_err_to_name(start_error_), runtime_.error());
+        // A failed package can already own the screen, Lua state and decoded
+        // caches. Drop them before returning to the browser or rebuilding the
+        // Game Boy arena.
+        runtime_.stop();
         if (borrowed_rom_arena_bytes_ && memory_donor_) {
             memory_donor_->reserveIdleRomArena();
             borrowed_rom_arena_bytes_ = 0;

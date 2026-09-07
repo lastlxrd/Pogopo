@@ -146,7 +146,7 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     config_ = config;
     audio_ = &audio;
 
-    reserveRomArena();
+    reserveRomArena(config_.internal_rom_headroom_bytes);
 
     impl_->frame_mutex = xSemaphoreCreateMutex();
     impl_->core_mutex = xSemaphoreCreateMutex();
@@ -172,7 +172,7 @@ esp_err_t GameBoy::begin(audio::Audio& audio, const Config& config) {
     return ESP_OK;
 }
 
-bool GameBoy::reserveRomArena() {
+bool GameBoy::reserveRomArena(uint32_t headroom_bytes) {
     if (!impl_ || impl_->rom_arena || config_.internal_rom_arena_bytes == 0) {
         return impl_ && (impl_->rom_arena || config_.internal_rom_arena_bytes == 0);
     }
@@ -182,8 +182,8 @@ bool GameBoy::reserveRomArena() {
         heap_caps_get_free_size(internal_caps));
     const uint32_t largest_internal = static_cast<uint32_t>(
         heap_caps_get_largest_free_block(internal_caps));
-    const uint32_t safe_budget = free_internal > config_.internal_rom_headroom_bytes
-        ? free_internal - config_.internal_rom_headroom_bytes : 0;
+    const uint32_t safe_budget = free_internal > headroom_bytes
+        ? free_internal - headroom_bytes : 0;
     uint32_t candidate = std::min({config_.internal_rom_arena_bytes,
                                    largest_internal, safe_budget});
     candidate -= candidate % ROM_CACHE_PAGE_SIZE;
@@ -209,7 +209,7 @@ bool GameBoy::reserveRomArena() {
                  "Could not reserve adaptive ROM arena (free=%lu largest=%lu headroom=%lu)",
                  static_cast<unsigned long>(free_internal),
                  static_cast<unsigned long>(largest_internal),
-                 static_cast<unsigned long>(config_.internal_rom_headroom_bytes));
+                 static_cast<unsigned long>(headroom_bytes));
     }
     return impl_->rom_arena != nullptr;
 }
@@ -233,7 +233,10 @@ uint32_t GameBoy::reserveIdleRomArena() {
         audio_task_running_.load()) {
         return 0;
     }
-    reserveRomArena();
+    // Startup needs a large headroom for display buffers and task stacks. At
+    // this point they already exist, so preserve only 32 KiB and recover the
+    // original seven-page fast ROM/cache arena after leaving PogoDate.
+    reserveRomArena(32U * 1024U);
     return impl_->rom_arena_size;
 }
 
