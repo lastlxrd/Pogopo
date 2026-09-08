@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#ffffff">
-    <meta name="description" content="Pogopo engineering case studies with measured problems, investigations, solutions, and results.">
+    <meta name="description" content="Engineering notes on Pogopo display, emulation, memory, audio, scheduling, and hardware reliability.">
     <title>Engineering · pogopo</title>
     <link rel="icon" href="../assets/jabaLOGO.png" type="image/png">
     <script src="../assets/theme.js"></script>
@@ -24,81 +24,49 @@
       <main class="doc-content" id="main-content">
         <p class="eyebrow">Project</p>
         <h1>Engineering</h1>
-        <p class="lead">This page focuses on the work behind the features: observed failure modes, the evidence used to isolate them, the implemented change, and the result that can be supported by the repository history.</p>
+        <p class="lead">Measured notes from the work behind Pogopo: display timing, emulation, memory placement, audio, task scheduling, and board reliability.</p>
         <hr class="page-rule">
 
         <section class="case-study">
           <h2>Display performance</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>The ESP-IDF Sharp driver was configured for 2 MHz. A worst-case 400 × 240 transfer took about 49 ms on the wire, making a 30 FPS Game Boy presentation path impossible.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Driver timing was compared with the stable Arduino firmware on the same board. Serial performance logs separated emulator rate, LCD rate, and frame time instead of treating them as one FPS value.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>The display bus was restored to 14 MHz. Dirty-row transfers stayed enabled; framebuffer scans and DMA staging were kept in internal memory where possible; full-screen output received a direct fast path.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>Worst-case transfer time fell to roughly 7 ms on the wire. The STEP9.5 baseline records approximately 29.9 visible LCD updates per second during full-speed Game Boy emulation.</dd></div>
-          </dl>
+          <p>The first ESP-IDF display path drove the Sharp panel at 2 MHz. Sending a complete 400 × 240 frame took about 49 ms on the wire, so a 30 FPS presentation target was impossible before any application work was counted.</p>
+          <p>Comparison with the stable Arduino firmware exposed the clock regression. The bus now runs at 14 MHz, unchanged rows are skipped, DMA staging stays in internal memory, and full-screen output uses a direct path. A worst-case transfer is roughly 7 ms, and the established Game Boy baseline presents about 29.9 visible frames per second.</p>
         </section>
 
         <section class="case-study">
           <h2>Game Boy emulator optimization</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>Large ROMs executing from PSRAM could advance too slowly. One measured regression reported <code>emu=39</code>, <code>lcd=31</code>, and frame time around 26 ms; automatic frame skipping could make a slow game look even slower.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Once-per-second diagnostics tracked emulated frames, presented frames, ROM location, cache hits and misses, cache-fill time, audio state, heap state, and I²C errors. The data showed that LCD rate and Game Boy CPU rate were different bottlenecks.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>CPU, timers, interrupts, joypad, and APU writes now run for every 59.7 Hz Game Boy frame while expensive LCD scanline drawing is skipped on alternate frames. Larger PSRAM ROMs use an adaptive internal 16 KiB-page cache with bank 0 pinned and LRU replacement.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>The documented performance baseline is full-rate 59.7 Hz Game Boy emulation with approximately 29.9 Hz LCD presentation, including ROMs that do not fit entirely in internal memory.</dd></div>
-          </dl>
+          <p>Large ROMs stored in PSRAM originally slowed both emulation and presentation. The performance log was split into emulated frames, LCD frames, ROM-cache activity, audio state, heap state, and I²C errors; that made it clear that CPU progress and display rate were separate limits.</p>
+          <p>The emulator now advances CPU, timers, interrupts, input, and APU state for every 59.7 Hz Game Boy frame while drawing alternate frames to the LCD. ROMs that do not fit in internal memory stay in PSRAM behind an adaptive 16 KiB-page cache with bank 0 pinned and LRU replacement. The resulting baseline is full-rate emulation with roughly 29.9 Hz presentation.</p>
         </section>
 
         <section class="case-study">
           <h2>Memory, PSRAM, and internal RAM</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>ROM data benefits from the 8 MB PSRAM, but latency-sensitive framebuffers, DMA buffers, task stacks, and cache pages compete for limited internal memory. A single 256 KiB early arena request could fail completely and leave <code>arena=0</code>.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Heap diagnostics recorded total free internal RAM, largest contiguous block, PSRAM location, and cache-page availability. The three original 160 × 144 shade buffers also accounted for 69,120 bytes.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>Four Game Boy shades are packed at 2 bits per pixel, reducing one frame from 23,040 to 5,760 bytes and three buffers to 17,280 bytes. The firmware reserves the largest 16 KiB-aligned internal arena up to 128 KiB while leaving 128 KiB of headroom.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>The packed framebuffers save 51,840 bytes. ROMs that fit use the arena directly; larger ROMs keep bulk data in PSRAM and reuse the arena as a two-to-eight-page bank cache.</dd></div>
-          </dl>
-          <p class="todo-note">TODO: add separate IRAM/instruction-cache measurements. The current repository evidence documents data-memory placement and instruction-cache pressure, not a complete IRAM benchmark.</p>
+          <p>PSRAM holds large assets well, but the display framebuffer, DMA buffers, task stacks, and hot cache pages need internal RAM. Heap diagnostics therefore track both total free memory and the largest contiguous block instead of reporting one reassuring number.</p>
+          <p>Game Boy shades are packed at two bits per pixel, reducing three 160 × 144 buffers from 69,120 to 17,280 bytes. The current startup policy reserves an aligned internal arena while preserving headroom for the OS; Game Boy uses it for ROM data or bank-cache pages, and PogoDate can borrow the idle arena for its 96 KB screen buffer. That arrangement keeps latency-sensitive rendering away from PSRAM without permanently dedicating the memory to one runtime.</p>
         </section>
 
         <section class="case-study">
           <h2>Audio buffering</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>Generating one APU packet inside each video frame made slow rendering starve audio. An adaptive playback rate could conceal a draining buffer, but it also changed pitch.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>The implementation was compared with the stable Arduino path, and underrun/overflow counters were added to the performance line. The stable design used a dedicated high-priority Core 0 producer paced by blocking I²S output.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>MiniGB APU and MAX98357A stay locked to 32,768 Hz. A priority-7 Core 0 APU task feeds an internal ring buffer; the priority-8 I²S writer consumes at the hardware clock. Underruns fade out and back in without stretching playback.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>Audio timing is decoupled from the visible frame rate and the runtime no longer changes playback speed to hide missed deadlines. The fixed-rate path is retained in the current baseline.</dd></div>
-          </dl>
+          <p>Generating audio inside each video frame made slow rendering audible. Increasing or decreasing the playback rate could hide a draining buffer, but it also changed pitch, so it was not a valid fix.</p>
+          <p>MiniGB APU and the MAX98357A now remain locked to 32,768 Hz. A Core 0 producer feeds an internal ring buffer and the higher-priority I²S task consumes it at the hardware clock. Video timing can fluctuate without retuning the game, while underruns are counted and softened with a short fade.</p>
         </section>
 
         <section class="case-study">
           <h2>FreeRTOS task and core organization</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>Emulation, I²S, display work, input, motion, and system UI have different latency requirements. Running them without clear ownership risks audio underruns, input lag, and watchdog starvation.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Serial diagnostics and acceptance tests tracked frame deadlines, audio counters, task watchdog faults, and I²C errors. The emulator also yields a real RTOS tick periodically when continuously late.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>Core 1 owns the priority-6 emulator and priority-7 input path. Core 0 owns priority-8 I²S, priority-7 APU generation, BMI270/power/VCOM services, and the lower-priority PogopoOS UI/display loop.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>The task split used by the 59.7 Hz emulator / ~29.9 Hz LCD baseline is now explicit in configuration rather than implicit in the main loop.</dd></div>
-          </dl>
-          <p class="todo-note">TODO: publish captured runtime traces and worst-case task latency measurements.</p>
+          <p>Emulation, I²S output, display work, controls, motion, and power services do not have the same latency requirements. Core 1 runs the emulator and its input path. Core 0 owns fixed-rate I²S, APU generation, the BMI270, power and VCOM services, and the lower-priority PogopoOS presentation loop.</p>
+          <p>The priorities are explicit, and long-running runtime work yields to the scheduler instead of relying on incidental delays. Serial timing and watchdog reports remain part of the acceptance check because a higher average frame rate is not useful if an idle task can still be starved.</p>
         </section>
 
         <section class="case-study">
           <h2>Hardware debugging</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>Custom-board bring-up needs to distinguish wiring, bus, device-ID, and software-state failures across several peripherals.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Firmware probes the TCA9555 at <code>0x20</code>, BMI270 at <code>0x68</code>, and BQ24295 at <code>0x6B</code>, then reads identity, configuration, status, and fault registers.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>Startup and system-status diagnostics report device health, button-port state, charger status/fault registers, internal RAM, and PSRAM. Dedicated on-device apps exercise controls, audio, haptics, motion, power, and display behavior.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>Board failures can be narrowed to a named peripheral and register set instead of appearing only as a broken UI feature.</dd></div>
-          </dl>
-          <p class="todo-note">TODO: add oscilloscope captures, failed-board examples, and the corresponding root causes.</p>
+          <p>Board bring-up has to separate a wiring fault from a bus fault and both from bad software state. Startup probes the TCA9555 at <code>0x20</code>, BMI270 at <code>0x68</code>, and BQ24295 at <code>0x6B</code>, then records identity, configuration, charger status, and fault registers.</p>
+          <p>The system-status screen and dedicated test applications expose controls, audio, haptics, motion, power, display behavior, internal RAM, and PSRAM. A failed feature can therefore be traced back to a named peripheral and its current register state.</p>
         </section>
 
         <section class="case-study">
           <h2>Storage and peripheral reliability</h2>
-          <dl class="case-flow">
-            <div class="case-step"><dt>Problem</dt><dd>Removable storage, I²C controls, and power-off can fail at inconvenient times: a mount can fail, a file path can exceed fixed buffers, an I²C read can time out, or a save can be interrupted.</dd></div>
-            <div class="case-step"><dt>Investigation</dt><dd>Drivers expose explicit error returns and counters. Storage checks mount, extension, path length, file format, and allocation limits; input tracks I²C read errors; shutdown checks USB and save state.</dd></div>
-            <div class="case-step"><dt>Solution</dt><dd>SD mounting never formats on failure, file paths are bounds-checked, TCA9555 reads use a 10 ms timeout with released-state fallback, gameplay save writes are deferred, and pending saves flush on app exit or shutdown.</dd></div>
-            <div class="case-step"><dt>Result</dt><dd>The current code has defined failure behavior for these cases instead of silently formatting storage, holding a direction, or writing saves in the emulator’s critical path.</dd></div>
-          </dl>
-          <p class="todo-note">TODO: publish long-duration SD, save-cycle, I²C fault-injection, and power-interruption test results.</p>
+          <p>Removable storage and shared I²C devices can fail at inconvenient moments, so the firmware treats those failures as normal states. SD mounting never formats a card on failure, paths are bounds-checked, and file loaders validate type and allocation limits before accepting content.</p>
+          <p>TCA9555 reads use a 10 ms timeout and fall back to a released button state. Game Boy saves are deferred outside the emulator’s critical path and flushed when the app exits or the device shuts down. These choices prevent a transient bus error from becoming a held direction and keep an interrupted save from being mixed into frame timing.</p>
         </section>
 
         <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
@@ -109,4 +77,3 @@
     <script src="../assets/app.js"></script>
   </body>
 </html>
-

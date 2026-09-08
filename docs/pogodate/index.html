@@ -28,15 +28,12 @@
         <hr class="page-rule">
 
         <h2>Package support</h2>
-        <table class="spec-table"><tbody>
-          <tr><th>Lua source / Lua PDZ</th><td>Supported when the title uses implemented APIs.</td></tr>
-          <tr><th>Images, image tables, fonts, and audio</th><td>Partially supported; compatibility is expanded and verified title by title.</td></tr>
-          <tr><th>Native <code>pdex.bin</code></th><td>Unsupported. Playdate native code targets ARM while ESP32-S3 uses Xtensa.</td></tr>
-          <tr><th>Complete Playdate SDK</th><td>Not yet implemented.</td></tr>
-        </tbody></table>
+        <p>Lua source and Lua PDZ packages can run when they stay within the implemented API surface. Images, image tables, fonts, audio, sprites, timers, easing, clipping, buttons, and accelerometer input are available, but compatibility is still verified title by title.</p>
+        <p>Native <code>pdex.bin</code> games are not supported because Playdate native code targets ARM while the ESP32-S3 uses Xtensa. PogoDate does not claim complete Playdate SDK coverage.</p>
 
         <h2>Implemented areas</h2>
-        <ul><li>Lua 5.4 runtime and PDZ loading</li><li>400 × 240 monochrome rendering, patterns, images, and image tables</li><li>Sprites, timers, easing, fonts, clipping, and common drawing APIs</li><li>Samples, file players, synthesizer paths, PCM mixing, and IMA ADPCM decoding</li><li>Buttons and BMI270 accelerometer mapping</li><li>Per-title compatibility and performance fixes</li></ul>
+        <p>The runtime combines Lua 5.4 and PDZ loading with a 400 × 240 monochrome graphics layer. It implements the common drawing, image, image-table, font, sprite, timer, easing, pattern, and clipping paths used by the titles tested so far.</p>
+        <p>Audio support includes samples, file players, synthesizer paths, PCM mixing, and IMA ADPCM decoding. Physical buttons map to the Playdate input API, and the BMI270 provides accelerometer data. Compatibility and performance fixes remain general where possible, with per-title testing used to expose missing behavior.</p>
 
         <h2>Current limitations</h2>
         <p>A title reaching its menu does not mean every gameplay scene, transition, audio format, SDK call, or accessibility mode is implemented. Native Playdate executables cannot run through this runtime.</p>

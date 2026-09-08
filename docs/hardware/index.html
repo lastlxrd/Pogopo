@@ -27,111 +27,57 @@
         <p class="lead">pogopo is built around a custom ESP32-S3 PCB with a 400 × 240 monochrome display, physical controls, audio, storage, motion sensing, haptics, and battery management.</p>
         <hr class="page-rule">
 
-        <h2>Hardware summary</h2>
-        <table class="spec-table">
-          <tbody>
-            <tr><th>MCU and memory</th><td>Dual-core ESP32-S3, 16 MB flash, 8 MB Octal PSRAM</td></tr>
-            <tr><th>Display</th><td>Sharp LS027B7DH01, 400 × 240, 1-bit Memory LCD</td></tr>
-            <tr><th>Storage</th><td>microSD over four-bit SDMMC</td></tr>
-            <tr><th>Input</th><td>D-pad, A, B, Start, Menu via TCA9555; Power on a dedicated GPIO</td></tr>
-            <tr><th>Motion</th><td>BMI270 six-axis IMU</td></tr>
-            <tr><th>Audio</th><td>MAX98357A digital I²S amplifier</td></tr>
-            <tr><th>Power</th><td>BQ24295 charger/power-path controller with gated battery ADC measurement</td></tr>
-          </tbody>
-        </table>
-
-        <h2>Block diagram</h2>
-        <div class="diagram-placeholder"><strong>Hardware block diagram placeholder</strong>TODO: replace this area with the verified PCB-level power and signal diagram.</div>
+        <h2>System overview</h2>
+        <p>The dual-core ESP32-S3 is paired with 16 MB of flash and 8 MB of Octal PSRAM. A Sharp LS027B7DH01 Memory LCD provides the 400 × 240 monochrome display, while a four-bit SDMMC bus connects removable storage without sharing the display’s SPI path.</p>
+        <p>Front controls arrive through a TCA9555 I/O expander. Motion data comes from a BMI270, audio leaves the MCU over I²S to a MAX98357A amplifier, and a BQ24295 manages charging and the power path. These choices keep the board compact while giving firmware direct control over timing-critical work.</p>
 
         <h2>Core components</h2>
 
         <section class="component-section">
           <h3>ESP32-S3</h3>
-          <p>The MCU runs PogopoOS, device services, UI rendering, application code, and the Game Boy runtime. The current board exposes 16 MB of flash and 8 MB of PSRAM.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>System control, graphics, application runtime, emulation, and peripheral coordination.</dd></div>
-            <div><dt>Interface</dt><dd>Native GPIO, SPI, I²C, I²S, SDMMC, ADC, and FreeRTOS tasks on two cores.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It combines two cores, embedded peripherals, external-memory support, and the ESP-IDF software stack in one MCU.</dd></div>
-          </dl>
+          <p>The MCU runs PogopoOS, renders the interface, coordinates every peripheral, and hosts the Game Boy and PogoDate runtimes. GPIO, SPI, I²C, I²S, SDMMC, and ADC are all available directly from the chip, while FreeRTOS distributes time-sensitive work across both cores. It was chosen because it combines those interfaces with external-memory support and a mature ESP-IDF stack in one compact part.</p>
         </section>
 
         <section class="component-section">
           <h3>Sharp LS027B7DH01 Memory LCD</h3>
-          <p>The 400 × 240 panel defines pogopo’s crisp 1-bit visual language. PogopoOS keeps a 12 KB framebuffer, updates dirty rows, and uses a fast full-frame path when needed.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Displays the launcher, applications, games, diagnostics, and shutdown animation.</dd></div>
-            <div><dt>Interface</dt><dd>SPI2 at 14 MHz: SCK GPIO12, MOSI GPIO11, active-high CS GPIO14; VCOM is maintained by a dedicated task.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It provides a readable monochrome image and retains static pixels without continuous full-screen refresh.</dd></div>
-          </dl>
+          <p>The 400 × 240 panel displays the launcher, applications, games, diagnostics, and shutdown animation through SPI2 at 14 MHz. PogopoOS keeps a 12 KB 1-bit framebuffer, transfers only dirty rows when practical, and maintains VCOM in a dedicated task. The panel was chosen for its sharp monochrome image and its ability to retain static pixels without continuous full-screen refresh.</p>
         </section>
 
         <section class="component-section">
           <h3>BMI270</h3>
-          <p>The six-axis IMU provides acceleration and angular-rate data for diagnostics and future motion-aware applications.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Reports device movement and orientation-related sensor data.</dd></div>
-            <div><dt>Interface</dt><dd>I²C at address <code>0x68</code>, SDA GPIO8, SCL GPIO9, interrupt GPIO18.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It adds compact motion input without consuming the primary control GPIOs.</dd></div>
-          </dl>
+          <p>The six-axis IMU reports acceleration and angular rate for diagnostics and motion-aware applications. It shares the I²C bus at address <code>0x68</code> and has a dedicated interrupt on GPIO18. This provides a compact motion input without consuming the GPIOs reserved for controls, display, storage, and audio.</p>
         </section>
 
         <section class="component-section">
           <h3>MAX98357A audio</h3>
-          <p>The digital amplifier receives PCM audio from the ESP32-S3. The Game Boy path runs at a fixed 32,768 Hz with 16-bit stereo I²S data.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Converts the firmware’s digital audio stream into amplified speaker output.</dd></div>
-            <div><dt>Interface</dt><dd>I²S: DATA GPIO38, BCLK GPIO39, LRCK GPIO40.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>A digital I²S path keeps sample timing under firmware control and avoids an external analog DAC stage.</dd></div>
-          </dl>
+          <p>The MAX98357A converts the firmware’s PCM stream into amplified speaker output. DATA, BCLK, and LRCK connect directly to the ESP32-S3 I²S peripheral, and the Game Boy path runs at a fixed 32,768 Hz. A digital amplifier keeps sample timing under firmware control and avoids a separate analog DAC stage.</p>
         </section>
 
         <section class="component-section">
           <h3>microSD storage</h3>
-          <p>The card holds ROMs, WAV files, and other user content mounted through ESP-IDF’s FAT VFS.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Provides removable storage and file-based content loading.</dd></div>
-            <div><dt>Interface</dt><dd>Four-bit SDMMC: D0–D3 GPIO5/4/16/15, CLK GPIO6, CMD GPIO7.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>The four-bit bus provides more transfer bandwidth than a basic SPI card connection.</dd></div>
-          </dl>
+          <p>The microSD card holds ROMs, audio, Playdate packages, and other user content through ESP-IDF’s FAT filesystem. It uses a four-bit SDMMC connection on D0–D3, CLK, and CMD rather than a basic SPI link. That wider bus improves bulk transfer speed and leaves the display bus independent.</p>
         </section>
 
         <section class="component-section">
           <h3>TCA9555 and controls</h3>
-          <p>The I/O expander reads the D-pad, A, B, Start, and Menu as one active-low port. The firmware uses a 10 ms I²C timeout and treats a failed sample as released to avoid stuck input.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Expands the MCU’s input capacity for eight front-panel controls.</dd></div>
-            <div><dt>Interface</dt><dd>I²C <code>0x20</code>, interrupt GPIO21. P8 Top, P9 Down, P10 Left, P11 Right, P12 B, P13 A, P14 Menu, P15 Start.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It reduces direct GPIO usage while allowing the full button state to be read together.</dd></div>
-          </dl>
+          <p>The TCA9555 reads the D-pad, A, B, Start, and Menu as one active-low byte over I²C at <code>0x20</code>, with its interrupt connected to GPIO21. A failed read is treated as a released sample so a bus fault cannot leave a control stuck. The expander saves eight direct MCU pins and lets firmware capture the entire front-panel state in one transaction.</p>
         </section>
 
         <section class="component-section">
           <h3>Haptics</h3>
-          <p>A vibration motor provides short UI and gameplay feedback.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Adds tactile confirmation for interactions.</dd></div>
-            <div><dt>Interface</dt><dd>GPIO3 through the board’s vibration drive circuit.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It communicates feedback without requiring another visual or audio cue.</dd></div>
-          </dl>
+          <p>The vibration motor is driven from GPIO3 through the board’s output stage. It gives UI and gameplay actions a short physical response, which is useful when another sound or screen effect would be distracting.</p>
         </section>
 
         <section class="component-section">
           <h3>Battery and power management</h3>
-          <p>The BQ24295 is detected at I²C address <code>0x6B</code>. Firmware reads charge and fault status, samples the battery through a gated ADC path, distinguishes short and held Power presses, blocks ship mode while USB is present, and physically clears the LCD before shutdown.</p>
-          <dl class="component-meta">
-            <div><dt>What it does</dt><dd>Charging and power-path status, battery measurement, user power events, and final ship-mode shutdown.</dd></div>
-            <div><dt>Interface</dt><dd>I²C plus Power GPIO17, charger interrupt GPIO41, battery ADC GPIO1, measurement gate GPIO2.</dd></div>
-            <div><dt>Why it was chosen</dt><dd>It gives firmware visibility into charge state and a controlled low-power shutdown path.</dd></div>
-          </dl>
+          <p>The BQ24295 at I²C address <code>0x6B</code> manages charging and the power path. Firmware reads its charge and fault state, measures the battery through a gated ADC on GPIO1, handles the separate Power input on GPIO17, and requests ship mode only after saves are flushed and the LCD is cleared. This gives PogopoOS a controlled shutdown path instead of relying on an abrupt battery disconnect.</p>
         </section>
 
         <h2>Custom PCB</h2>
         <p>The custom board integrates the ESP32-S3, display connection, SDMMC bus, I²C peripherals, digital audio, controls, haptics, and power-management signals used by PogopoOS. Bring-up diagnostics probe the TCA9555, BMI270, and BQ24295 and print their register state to the serial monitor.</p>
-        <p class="todo-note">TODO: add PCB revision, layer stack, board dimensions, schematic excerpt, and validated power measurements when they are ready for publication.</p>
 
         <h2>Enclosure</h2>
         <p>The enclosure is designed as a compact handheld around the display, physical controls, custom PCB, and a right-side expansion area. Mechanical module retention and the final external connector arrangement remain work in progress.</p>
-        <p class="todo-note">TODO: add final enclosure material, manufacturing method, dimensions, assembly details, and photographs.</p>
 
         <div class="page-nav" id="page-nav" aria-label="Previous and next pages"></div>
         <footer class="doc-footer">pogopo documentation · <span data-year></span></footer>
@@ -141,4 +87,3 @@
     <script src="../assets/app.js"></script>
   </body>
 </html>
-

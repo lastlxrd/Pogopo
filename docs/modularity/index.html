@@ -34,7 +34,7 @@
 
         <h2>Mechanical expansion</h2>
         <p>The attachment area must locate a module consistently, resist normal handheld loads, and allow removal without damaging the console. It also has to fit the enclosure geometry and keep the device comfortable to hold.</p>
-        <p class="todo-note">Work in progress: final retention method, envelope, insertion cycle target, and module enclosure rules are not yet documented.</p>
+        <p>The retention method, physical envelope, insertion-cycle target, and enclosure rules remain open until the mechanical design has been tested on hardware.</p>
 
         <h2>Electrical expansion</h2>
         <p>The electrical side needs a defined connector, power budget, voltage levels, signaling, and protection behavior. PogopoOS will also need a predictable way to detect a module and expose it to applications.</p>
@@ -45,15 +45,11 @@
 
         <h2>Software model</h2>
         <p>The intended software boundary is a device service that recognizes the attached hardware and presents a stable API to applications. Apps should not need to reproduce low-level bus handling for every module.</p>
-        <p class="todo-note">TODO: define discovery, driver registration, permissions, detach handling, and compatibility versioning after the electrical interface is selected.</p>
+        <p>Discovery, driver registration, permissions, detach handling, and compatibility versioning will be defined after the electrical interface is fixed.</p>
 
         <h2>Design constraints</h2>
-        <dl class="fact-list">
-          <div class="fact-row"><dt>Base device first</dt><dd>The console should remain fully usable with no module attached.</dd></div>
-          <div class="fact-row"><dt>Clear ownership</dt><dd>PogopoOS should own detection and drivers; applications should consume higher-level services.</dd></div>
-          <div class="fact-row"><dt>Electrical safety</dt><dd>Power and signals need defined limits before modules can be considered compatible.</dd></div>
-          <div class="fact-row"><dt>Honest compatibility</dt><dd>A module is supported only after both mechanical fit and electrical/software behavior are tested.</dd></div>
-        </dl>
+        <p>The console must remain fully usable with no module attached. PogopoOS owns detection and drivers while applications consume higher-level services, so a module cannot take over the base device’s hardware directly.</p>
+        <p>Power and signal limits have to be fixed before any module is called compatible. Support means that mechanical fit, electrical behavior, attachment and removal, and the software path have all been tested together.</p>
 
         <h2>Current status</h2>
         <p><span class="status experimental">Experimental</span>The modular expansion area is a central product direction, but the public interface specification and verified module list are not complete.</p>
@@ -66,4 +62,3 @@
     <script src="../assets/app.js"></script>
   </body>
 </html>
-
