@@ -347,15 +347,16 @@ html[data-theme="dark"] .theme-toggle .moon-icon {
 .doc-content h1 {
   max-width: 700px;
   margin: 0;
+  padding: 0 0 32px;
   font-size: clamp(38px, 6vw, 58px);
   font-weight: 790;
   letter-spacing: -0.045em;
-  line-height: 1.12;
+  line-height: 1.18;
 }
 
 .lead {
   max-width: 690px;
-  margin: 30px 0 0;
+  margin: 0;
   color: var(--lead);
   font-size: 19px;
   line-height: 1.65;
@@ -595,6 +596,11 @@ html[data-theme="dark"] .hero-media img {
   gap: 28px;
 }
 
+.gallery-grid-large {
+  grid-template-columns: 1fr;
+  gap: 38px;
+}
+
 .gallery-item {
   margin: 0;
 }
@@ -611,20 +617,19 @@ html[data-theme="dark"] .hero-media img {
 }
 
 .gallery-photo img {
+  height: auto;
+  aspect-ratio: 4 / 3;
   object-fit: cover;
   image-rendering: auto;
 }
 
-.gallery-featured {
-  grid-column: 1 / -1;
-}
-
-.gallery-featured img {
-  aspect-ratio: 16 / 9;
-}
-
 .gallery-item-tall img {
-  aspect-ratio: 4 / 5;
+  width: min(100%, 760px);
+  height: auto;
+  aspect-ratio: auto;
+  margin-inline: auto;
+  border: 0;
+  background: transparent;
 }
 
 .gallery-item figcaption {
@@ -982,14 +987,6 @@ code {
 
   .gallery-grid {
     grid-template-columns: 1fr;
-  }
-
-  .gallery-featured {
-    grid-column: auto;
-  }
-
-  .gallery-featured img {
-    aspect-ratio: 5 / 3;
   }
 
   .page-nav {
