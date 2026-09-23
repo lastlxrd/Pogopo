@@ -1,0 +1,6 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "photo")(type "KiCad")(uri "D:/root prog/KiCad/9.0/share/kicad/photo")(options "")(descr ""))
+  (lib (name "dome switch 10mm")(type "KiCad")(uri "D:/root prog/KiCad/9.0/share/kicad/custom symbolsss/dome switch 10mm")(options "")(descr ""))
+  (lib (name "Library")(type "KiCad")(uri "${KIPRJMOD}/Library.pretty")(options "")(descr ""))
+)
